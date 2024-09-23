@@ -18,15 +18,15 @@ def load_system_prompt():
 rules = load_system_prompt()
 # Functions to interact with OpenAI
 # Conversational Speech
-def generate_conversation_speech(character, memory, rules):
+def generate_conversation_speech(character, characters, rules, current_context, most_recent):
 
     #prompt = "It is your turn to speak, what will you say?"
-    full_prompt = "\n".join(memory) #+ "\n" + prompt
+    full_prompt = "\n".join(characters[character]["memory"]) + "\n" + "Current conversational context:" + "\n" + current_context + "Most recent message(s):" + "\n" + "\n".join(most_recent)
 
-    system_prompt = f"You are {character}, a character in a murder mystery game. {rules}. You have been selected to speak next in the conversation, what will you say? (Respond with plaintext, do not include speach marks or {character} says, etc)"
+    system_prompt = f"You are {character}, a character in an Among-Us style murder mystery game. {rules}. You have been selected to speak next in the conversation, what will you say? (Respond with plaintext, do not include speach marks or {character} says, etc). \n Remember, you are {character} and your output is what they will say next in the conversation, if you do not believe it is {character}'s turn to speak next, simply state you have nothing to say."
     
     response = openai.chat.completions.create(
-        model="gpt-3.5-turbo", 
+        model="gpt-4o-mini", 
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": full_prompt}
@@ -34,39 +34,58 @@ def generate_conversation_speech(character, memory, rules):
         max_tokens=100,
     )
 
+    return response.choices[0].message.content.split(":")[-1]
+
+def generate_responses(characters, rules, conversation_context, most_recent):
+    """Generate a response from each AI character based on the conversation context."""
+    responses = {}
+    for character in characters:
+        if characters[character]["alive"]:
+            response = generate_conversation_speech(character, characters, rules, conversation_context, most_recent)
+            responses[character] = response
+    return responses
+
+
+def summarise_conversation(conversation_history):
+    summary_prompt = (
+        "Summarize the following conversation in a few sentences. Focus on key details relevant to the murder mystery.\n\n"
+        f"Conversation history:\n{conversation_history}"
+    )
+    response = openai.chat.completions.create(
+        model="gpt-4o-mini", 
+        messages=[
+            {"role": "system", "content": "You are a detective's assistant summarizing a conversation in a murder mystery. Only summarise the speech, do not analyse underlying intentions or provide commentary and ensure not to assert anything as fact, use langauge such as person A claims, person B questions, person C denies, etc. If two or more characters provide conflicting series of event then this should be highlighted."},
+            {"role": "user", "content": summary_prompt}
+        ],
+        max_tokens=150,
+    )
     return response.choices[0].message.content
 
-# Eagerness Scores
-def generate_eagerness_score(character, memory, rules):
 
-    #prompt = "On a scale of 1 to 10, how eager are you to speak next in this conversation? Provide a number between 1 and 10. IMPORTANT: YOUR RESPONSE MUST BE AN INTEGER VALUE"
-    full_prompt = "\n".join(memory) #+ "\n" + prompt
-    #print("FULL PROMPT: ", full_prompt)
-    system_prompt = (
-    f"You will be provided with a transcript of a conversation. First, assess how eager {character} (and {character} ONLY) is to speak next - relative to the percieved eagerness of others. You are required by law to explain your reasoning. Max 40 words. "
-    f"Contributors to eagerness include: {character} being directly addressed (eagerness always equals 9 when their name is mentioned explicitly, by the Detective or others) or the Detective is currently engaged in a line of questioning with {character} (equally important, eagerness = 9), private information, {character} being discussed by others, "
-    f"or addressing holes in their alibi. If it is clear that another character has a better reason to speak next, this should be considered. Focus on the last two lines of the conversation. After your assessment, respond with a single integer value between 1 and 9 that reflects how eager {character} is to speak next, this integer should be the final character of your output."
-    f"Finally, the Detective has a deeply commanding presence, if {character} feels as if the Detective is placing pressure on them, compelling them to speak or questioning them - they MUST be eager to speak for risk of imprisonment."# It should also be noted that the Detective has ADHD and will rapidly switch between lines of questioning, once out of the spotlight eagerness should return to a low level."
-)
-    #print(system_prompt)
-    response = openai.chat.completions.create(
-        model="gpt-3.5-turbo", 
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": full_prompt}
-        ],
-        max_tokens=80,
-        temperature= 0.1,
+def select_best_response(responses, conversation_context, most_recent):
+    response_summary = "\n".join([f"{char}: {resp}" for char, resp in responses.items()])
+    
+    overseer_prompt = (
+        f"The following responses were generated by the characters in a murder mystery conversation. "
+        f"Choose the most fitting response based on the current conversation context:\n\n{conversation_context}\n\n"
+        f"The most recent messages: \n{most_recent}\n"
+        f"Responses:\n{response_summary}\n\n"
+        f"Provide the name of the character whose response best fits the conversation."
     )
 
-    match = re.search(r'\b[1-9]\b', response.choices[0].message.content.strip())
-    #print(response.choices[0].message.content.strip())
-    #print(int(match.group(0)))
-    try:
-        eagerness_score = int(match.group(0))
-        return eagerness_score
-    except ValueError or AttributeError:
-        return 0
+    response = openai.chat.completions.create(
+        model="gpt-4o-mini", 
+        messages=[
+            {"role": "system", "content": f"You are an overseer managing the flow of conversation in a murder mystery game. Your answer must be a single word. Mike is never an acceptable answer."},
+            {"role": "user", "content": overseer_prompt}
+        ],
+        max_tokens=5,
+    )
+
+    speaker = response.choices[0].message.content.strip().rstrip(".").rstrip(",")
+    best_response = responses[speaker].replace("{", "").replace("}", "")
+    return best_response, speaker
+
 
 def generate_next_speaker(characters, memory, rules):
 
@@ -76,7 +95,7 @@ def generate_next_speaker(characters, memory, rules):
     system_prompt = f"You are the GameMaster of a murder mystery game. You will be provided a transcript of a conversation and your job is to assess who should speak next. Your answer must be a single word, one of the following names: {listington} and no other text."
     
     response = openai.chat.completions.create(
-        model="gpt-3.5-turbo", 
+        model="gpt-4o-mini", 
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": full_prompt}
@@ -107,32 +126,51 @@ def generate_room_selection(character, available_rooms, memory, rules):
     room_choice = response.choices[0].message.content.strip()
     return room_choice
 
-def generate_killer_decision(killer, room_occupants, memory, rules):
 
-    prompt = f"You are in a room with {', '.join(room_occupants)}. Do you want to kill someone? If no: simply state NO. If yes: simply state their name"
-    full_prompt = "\n".join(memory) + "\n" + prompt
-
-    system_prompt = f"You are {killer}, a character in a murder mystery game. {rules}"
-    
-    response = openai.chat.completions.create(
-        model="gpt-3.5-turbo", 
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": full_prompt}
-        ],
-        max_tokens=50,
+def generate_voting_prompt(character, memory, rules, conversation_summary):
+    """Generate a prompt for the AI to vote on who they think the killer is."""
+    prompt = (
+        f"Based on the following summary of the conversation so far, please decide who you think the killer is. "
+        f"Consider any suspicious behavior or inconsistent alibis, but if you are unsure, make your best guess. "
+        f"You cannot vote for yourself.\n\n"
+        f"Conversation summary (Hearsay):\n{conversation_summary}\n\n"
+        f"Your memory (Matter-of-fact):\n{memory}\n\n"
+        f"Who do you think is the killer? Respond only with a character name."
     )
 
-    decision = response.choices[0].message.content.strip()
-    return decision
+    # Generate the response using the AI
+    response = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": f"You are {character}, a character in a murder mystery game. {rules}"},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=20
+    )
+    
+    vote = response.choices[0].message.content.strip().replace(".","")
+    print(f"{character} votes for: {vote}")
+    return vote
 
-# Room Selection with Crime Scene Exclusion
-def choose_room(character):
-    available_rooms = [room for room in rooms if room not in crime_scenes]
-    room = generate_room_selection(character, available_rooms, memory, rules)
-    print(f"{character} chooses to stay in the {room}.")
-    return room
+def ai_vote_for_killer(player_name, characters, conversation_summary, rules):
+    """Conduct the voting phase where each alive character votes for who they think the killer is."""
+    votes = {}
+    votes[player_name] = input("Who are you voting for?")
 
+    for character in characters:
+        if characters[character]["alive"]:
+            # Prompt the AI to vote for the killer
+            vote = generate_voting_prompt(character, characters[character]["memory"], rules, conversation_summary)
+            
+            # Ensure they don't vote for themselves
+            while vote == character or (vote != player_name and vote not in characters):
+                vote = random.choice([char for char in characters if char != character and characters[char]["alive"]])
+
+            votes[character] = vote
+            print(f"{character} voted for {vote}.")
+        
+    
+    return votes
 # Character profiles
 characters = {
     "Jerry": {"alive": True, "profile": ["You are Jerry, you are soft-spoken and introverted."], "memory": []},
@@ -147,14 +185,12 @@ crime_scenes = []
 
 # Select a random killer
 #killer = random.choice(list(characters.keys()))
-killer = "Jerry"
+#killer = "Jerry"
 #print("The killer is: " + killer)
-characters[killer]["memory"].append("IMPORTANT: YOU ARE THE KILLER! Don't let anyone find out.")
+#characters[killer]["memory"].append("IMPORTANT: YOU ARE THE KILLER! Don't let anyone find out.")
 
-for character in characters:
-    if character != killer:
-        characters[character]["memory"].append("IMPORTANT: Your are NOT the killer, lying is FORBIDDEN - only information disclosed within the text supplied may be drawn from to construct your alibi. Fabrication of information will result in IMMEDIATE DEATH.")
-
+# for character in characters:
+#     characters[character]["memory"].append("IMPORTANT: You are NOT theM
 room_facts = {
     "Attic": "There is a distinct humming noise.",
     "Kitchen": "The oven is broken.",
@@ -164,10 +200,10 @@ room_facts = {
 }
 
 #TESTING---------------------
-characters["Jerry"]["memory"].append("Begin Night 0 (Action Phase 0): You spend the night in the Kitchen, Debra is there with you and you kill her. DISTINCT FACT: The oven is broken. WARNING: If the Detective discovers that you spent this night in the Kitchen then he will know you are the killer.")
-characters["Dave"]["memory"].append("Begin Night 0 (Action Phase 0): You spend the night in the Library, only Owen is there with you. DISTINCT FACT: The smell of old books is overwhelming. During the night you hear a scream on the same floor as you.")
-characters["Owen"]["memory"].append("Begin Night 0 (Action Phase 0): You spend the night in the Library, only Dave is there with you. DISTINCT FACT: The smell of old books is overwhelming. During the night you hear a scream but aren't able to make out where it came from.")
-characters["Hank"]["memory"].append("Begin Night 0 (Action Phase 0): You spend the night in the Attic, no-one else is there with you. DISTINCT FACT: The smell of old books is overwhelming. During the night you hear a scream frpm a floor below you.")
+characters["Jerry"]["memory"].append("BEGIN Action Phase 0: \n You (Jerry) spent the night in the Kitchen, you witness Mike killing Debra in the Kitchen - Mike is the Killer. \n END of Action Phase 0")
+characters["Dave"]["memory"].append("BEGIN Action Phase 0: \n You (Dave) spent the night in the Library, Owen was there with you and no-one else. In the morning it is revealed that Debra's corpse was found in the Kitchen. \n END of Action Phase 0")
+characters["Owen"]["memory"].append("BEGIN Action Phase 0: \n You (Owen) spent the night in the Library, Dave was there with you and no-one else. In the morning it is revealed that Debra's corpse was found in the Kitchen. \n END of Action Phase 0")
+characters["Hank"]["memory"].append("BEGIN Action Phase 0: \n You (Hank) spent the night in the Attic, no-one else was there with you. In the morning it is revealed that Debra's corpse was found in the Kitchen. \n END  of Action Phase 0")
 
 #TESTING OVER-----------------
 
@@ -234,112 +270,142 @@ def prompt_killer(room, occupants):
             return {"room": room, "victim": victim}
     return None
 
-def scan_message_for_character(player_input, characters):
-    """ Scan the player's message to detect if a specific character is mentioned. """
-    mentioned_characters = []
+
+def check_direct_address(most_recent_message, characters, player_name):
+    """Check if a character is directly addressed by name in the player's message."""
+
+    most_recent_message = most_recent_message.split(":")[1]
+    if most_recent_message.strip().replace(",","").split(" ")[0] == player_name:
+        return player_name
     for character in characters:
-        if character in player_input and characters[character]["alive"]:
-            mentioned_characters.append(character)
-    
-    if len(mentioned_characters) == 1:
-        return mentioned_characters[0]  # Return the single mentioned character
-    return None  # No specific character or multiple characters mentioned
+        #print(most_recent_message.strip().split(" ")[0])
+        if characters[character]["alive"] and (f". {character}" in most_recent_message or (most_recent_message.strip().replace(",", "").replace("'"," ").split(" ")[0] == character or most_recent_message.strip().split(",")[0] == character)):
+            return character  # Return the character that is directly addressed
+    return None
 
 # # Conversation Phase
-def conversation_stage():
+def conversation_stage(player_name):
     print("\nConversation Phase begins. Detective asks the first question.")
 
-    player_response = handle_player_interjection()
-    for character in characters:
-        characters[character]["memory"].append(f"\n Begin Day 1 (Conversation Phase 1): Alive suspects = [Jerry, Dave, Owen, Hank], Dead suspects = [Debra]. Rooms that were able to be occupied last night = [Attic, Kitchen, Library, Basement, Cellar] \n" )
-        characters[character]["memory"].append(f"Someone was killed last night, only the Detective knows where the murder took place. The Detective arrives at the scene to question you and the others. The Detective will ask the first question. Begin Conversation 1:")
-        characters[character]["memory"].append(f"The Detective: {player_response}")
+    short_term_memory = 2
+    yap_counter = 0
 
+    current_conversation = []
+    most_recent_messageS = []
+
+    alive_characters = [char for char in characters if characters[char]["alive"]]
+
+
+    if random.randint(0,10) <= 7:
+        first_to_answer = player_name
+    else:
+        first_to_answer = random.choice(alive_characters)
+
+    most_recent_message = f"Detective: {first_to_answer}, let's start with you. Where were you last night? \n"
+    print(most_recent_message)
+    most_recent_messageS.append(most_recent_message)
+    current_conversation.append(most_recent_message)
+
+    if first_to_answer == player_name:
+        print(f"Possible Locations: {rooms}")
+        player_response = handle_player_interjection()
+        most_recent_message = f"{player_name}: {player_response}"
+        most_recent_messageS.append(most_recent_message)
+        current_conversation.append(most_recent_message)
+    
+    for character in characters:
+        characters[character]["memory"].append(f"\n Begin Day 1 (Conversation Phase 1): Alive suspects = [Jerry, Dave, Owen, Hank, {player_name}], Dead suspects = [Debra]. Rooms that were able to be occupied last night = [Attic, Kitchen, Library, Basement, Cellar], it is impossible for anyone to have occupied a location other than one of these rooms. \n" )
+        characters[character]["memory"].append(f"The Detective reveals that Debra was killed last night, her body was found in the Kitchen, someone who stayed the night in the Kitchen must have killed her.")
+        #characters[character]["memory"].append(f"The Detective: {player_response}")
+
+    
     while True:
-        # Get eagerness scores for all characters
-        eagerness_scores = prompt_eagerness(characters)
 
-        mentioned = scan_message_for_character(player_response, characters)
-        if mentioned != None:
-            eagerness_scores[mentioned] = 10
-        # Find the highest eagerness score
-        max_eagerness = max(eagerness_scores.values())
-        
-        # If all eagerness scores are below 5, prompt the player to speak
-        if max_eagerness < 5:
-            if player_interject():
-                player_response = handle_player_interjection()
-                for character in characters:
-                    characters[character]["memory"].append(f"The Detective: {player_response}")
+        if len(current_conversation) == 20: 
+            print("CONVERSATION LENGTH REQUIREMENT MET: TYPE 'vote' AT ANY TIME TO INITIATE VOTING")
+
+        mentioned = check_direct_address(most_recent_message, characters, player_name)
+        #print("Mentioned: ", mentioned)
+        if mentioned != None and mentioned != most_recent_message.split(":")[0]:
+            if mentioned != player_name:
+                if yap_counter >= 3 and player_interject():
+                    player_response = handle_player_interjection()
+                    if (player_response.strip().lower() == "vote" and len(current_conversation) >= 20):
+                        votes = ai_vote_for_killer(player_name, characters, conversation_summary, rules)
+                        break
+
+                    most_recent_message = f"{player_name}: {player_response}"
+                    yap_counter = 0
+                else:
+                    conversation_summary = summarise_conversation(current_conversation)
+                    response = generate_conversation_speech(mentioned, characters, rules, conversation_summary, most_recent_message).replace("{", "").replace("}", "")
+                    most_recent_message = f"{mentioned}: {response}"
+                    yap_counter += 1
+                    print(most_recent_message, "\n")
+
+                most_recent_messageS.append(most_recent_message)
+                if len(most_recent_messageS) > short_term_memory :
+                    most_recent_messageS.pop(0)
+                current_conversation.append(most_recent_message)
             else:
-                print("The conversation phase ends.")
-                break
-
-        # Otherwise, the character with the highest eagerness score speaks
-        else:
-            speaker = max(eagerness_scores, key=eagerness_scores.get)
-            speech = generate_conversation_speech(speaker, characters[speaker]["memory"], rules)
-            player_response = speech
-            print(f"{speaker}: {speech}")
-            
-            for character in characters:
-                characters[character]["memory"].append(f"{speaker}: {speech}")
-            shared_memory.append(f"{speaker}: {speech}")
-
-            # Allow the player to interject after the AI speaks
-            if player_interject():
                 player_response = handle_player_interjection()
-                for character in characters:
-                    characters[character]["memory"].append(f"The Detective: {player_response}")
 
-# Conversation Phase
-# def conversation_stage():
-#     print("\nConversation Phase begins. Detective asks the first question.")
+                if (player_response.strip().lower() == "vote" and len(current_conversation) >= 20):
+                    votes = ai_vote_for_killer(player_name, characters, conversation_summary, rules)
+                    break
+                most_recent_message = f"{player_name}: {player_response}"
 
-#     player_response = handle_player_interjection()
-#     shared_memory.append(f"Someone was killed last night, a Detective arrives at the scene to question you and a group of others. The Detective will ask the first question. The conversation begins now.")
-#     shared_memory.append(f"The Detective (player) says: {player_response}")
-#     for character in characters:
-#         characters[character]["memory"].append(f"Someone was killed last night, a Detective arrives at the scene to question you and a group of others. The Detective will ask the first question. The conversation begins now.")
-#         characters[character]["memory"].append(f"The Detective (player) says: {player_response}")
+                most_recent_messageS.append(most_recent_message)
+                if len(most_recent_messageS) > short_term_memory :
+                    most_recent_messageS.pop(0)
+                current_conversation.append(most_recent_message)
 
-#     while True:
+                yap_counter = 0
 
-
-#         # Otherwise, the character with the highest eagerness score speaks
-#         speaker = generate_next_speaker(characters, shared_memory, rules)
-#         speech = generate_conversation_speech(speaker, characters[speaker]["memory"], rules)
-#         print(f"{speaker} says: {speech}")
         
-#         for character in characters:
-#             characters[character]["memory"].append(f"{speaker} says: {speech}")
-#         shared_memory.append(f"{speaker} says: {speech}")
+        else:
+            if most_recent_message.split(":")[0] != player_name and player_interject():
 
-#         # Allow the player to interject after the AI speaks
-#         if player_interject():
-#             player_response = handle_player_interjection()
-#             shared_memory.append(f"The Detective (player) says: {player_response}")
-#             print(shared_memory)
+                player_response = handle_player_interjection()
+                if (player_response.strip().lower() == "vote" and len(current_conversation) >= 20):
+                    votes = ai_vote_for_killer(player_name, characters, conversation_summary, rules)
+                    break
+                most_recent_message = f"{player_name}: {player_response}"
 
-#             for character in characters:
-#                 characters[character]["memory"].append(f"The Detective (player) says: {player_response}")
+                most_recent_messageS.append(most_recent_message)
+                if len(most_recent_messageS) > short_term_memory :
+                    most_recent_messageS.pop(0)
+                current_conversation.append(most_recent_message)
 
-# Prompt AI characters to give an eagerness score
-def prompt_eagerness(characters):
-    eagerness_scores = {}
-    for character in characters:
-        if characters[character]["alive"]:
-            eagerness = generate_eagerness_score(character, characters[character]["memory"], rules)
-            eagerness_scores[character] = eagerness
-            print(f"{character}'s eagerness score: {eagerness}")
+                yap_counter = 0
+                
+            else:
+                #print("No direct address detected and player passes")
+                conversation_summary = summarise_conversation(current_conversation)
+                #print(conversation_summary)
+                responses = generate_responses(characters, rules,  conversation_summary, most_recent_messageS)
+                best_response, speaker = select_best_response(responses, conversation_summary, most_recent_messageS)
+                most_recent_message = f"{speaker}: {best_response}"
 
-    # Return the eagerness scores for all alive characters
-    return eagerness_scores
+                print(most_recent_message, "\n")
+                most_recent_messageS.append(most_recent_message)
+                if len(most_recent_messageS) > short_term_memory :
+                    most_recent_messageS.pop(0)
+                current_conversation.append(most_recent_message)
+
+
+        
+        if len(current_conversation) >= 40:
+            votes = ai_vote_for_killer(player_name, characters, conversation_summary, rules)
+            break
+
+
+
 
 # Handle player interjection
 def handle_player_interjection():
     player_input = input("What would you like to say?")
-    print(f"You (Detective): {player_input}")
+    #print(f"You: {player_input} \n")
     return player_input
 
 # Check if the player wants to interject
@@ -349,11 +415,12 @@ def player_interject():
 
 # Main game loop
 def start_game():
+    player_name = input("You there, what is your name?")
     print("The game begins with an action stage.")
     
     while True:
         # Action Stage
-        #room_assignments, kill_info = action_stage()
+        #outputs = action_stage(inputs)
         
         # Check for game-ending conditions (if all but the detective and killer are dead)
         alive_count = sum(1 for char in characters if characters[char]["alive"])
@@ -362,7 +429,7 @@ def start_game():
             break
 
         # Conversation Stage
-        conversation_stage()
+        conversation_stage(player_name)
 
         # Check if the player wants to make a prediction
         if player_make_prediction():
