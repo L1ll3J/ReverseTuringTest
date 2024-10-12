@@ -6,8 +6,15 @@ import random
 import re
 from collections import Counter
 
+import sys
+from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl
+from PyQt5.QtGui import QTextCursor, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+
 # Load API keys from environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 
 # Initialize API
 openai.api_key = OPENAI_API_KEY
@@ -25,18 +32,18 @@ def generate_conversation_speech(character, characters, rules, current_context, 
     #prompt = "It is your turn to speak, what will you say?"
     full_prompt = "\n".join(characters[character]["memory"]) + "\n" + "Current conversational context:" + "\n" + current_context + "Most recent message(s):" + "\n" + "\n".join(most_recent)
 
-    system_prompt = f"You are {character}, a character in an Among-Us style murder mystery game. \n {rules}. You have been selected to speak next in the conversation, what will you say? (Respond with plaintext, do not include speach marks or {character} says, etc). \n Remember, you are {character} and your output is what they will say next in the conversation, if you do not believe it is {character}'s turn to speak next, simply state you have nothing to say."
+    system_prompt = f"You are {character}, a character in an Among-Us style murder mystery game. As {character} {characters[character]['profile']}. \n {rules}. You have been selected to speak next in the conversation, what will you say? (Respond with plaintext, do not include speach marks or {character} says, etc). Max 3 sentences. \n Remember, you are {character} and your output is what they will say next in the conversation."
     
     response = openai.chat.completions.create(
-        model="gpt-4o-mini", 
+        model="gpt-4o", 
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": full_prompt}
         ],
-        max_tokens=100,
+        max_tokens=150,
     )
 
-    return response.choices[0].message.content.split(":")[-1]
+    return response.choices[0].message.content
 
 # Generate response from each possible (alive) character
 def generate_responses(characters, rules, conversation_context, most_recent):
@@ -66,7 +73,7 @@ def select_best_response(responses, conversation_context, most_recent, NPCs):
     )
 
     response = openai.chat.completions.create(
-        model="gpt-4o-mini", 
+        model="gpt-4o", 
         messages=[
             {"role": "system", "content": f"You are an overseer managing the flow of conversation in a murder mystery game. Your answer must be a single word."},
             {"role": "user", "content": overseer_prompt}
@@ -75,8 +82,6 @@ def select_best_response(responses, conversation_context, most_recent, NPCs):
     )
     speaker = response.choices[0].message.content.strip().rstrip(".").rstrip(",")
 
-    if speaker == "Josh":
-        print(NPCs)
     if speaker not in NPCs:
         print("ERROR: Couldn't select best response, responsdant chosen randomly")
         speaker = random.choice(NPCs)
@@ -86,18 +91,20 @@ def select_best_response(responses, conversation_context, most_recent, NPCs):
 
 # Summarise conversation to reduce complexity, using entire conversation transcripts quickly overloads GPT models and can lead to cascading irregularities in syntax
 def summarise_conversation(conversation_history):
+    
     summary_prompt = (
         "Summarize the following conversation in a few sentences. Focus on key details relevant to the murder mystery.\n\n"
         f"Conversation history:\n{conversation_history}"
     )
     response = openai.chat.completions.create(
-        model="gpt-4o-mini", 
+        model="gpt-4o", 
         messages=[
             {"role": "system", "content": "You are a detective's assistant summarizing a conversation in a murder mystery. Only summarise the speech, do not analyse underlying intentions or provide commentary and ensure not to assert anything as fact, use langauge such as person A claims, person B questions, person C denies, etc. If two or more characters provide conflicting / mutually-exclusive series of event then this should be highlighted."},
             {"role": "user", "content": summary_prompt}
         ],
         max_tokens=300,
     )
+
     return response.choices[0].message.content
 
 # Generate single vote
@@ -146,13 +153,6 @@ def ai_vote_for_killer(player_name, characters, conversation_summary, rules, rou
     vote_counts = Counter(votes.values())
     most_common = vote_counts.most_common()
 
-    print(conversation_summary)
-
-    for character in characters:
-        if characters[character]["alive"] == True:
-            characters[character]["memory"].pop(-1)
-            characters[character]["memory"].append(f"Final Conversation Summary for the day: \n {conversation_summary} \n\n")
-
     if most_common[0][1] == most_common[1][1]:
         print(f"There was a tie between {most_common[0][0]} and {most_common[1][0]}, no-one was voted out.")
     elif most_common[0][0] == "NONE":
@@ -167,9 +167,6 @@ def ai_vote_for_killer(player_name, characters, conversation_summary, rules, rou
         else:
             print(f"{voted_out} was voted out! They were hanged for their crimes.")
             characters[voted_out]["alive"] = False
-            for character in characters:
-                if characters[character]["alive"] == True:
-                    characters[character]["memory"].append(f"During the Voting Phase, you voted for {votes[character]} as you decided they were the most suspiscious. \n In the end, {voted_out} was voted out by the group and was hanged for their crimes, however, it is revealed that {voted_out} was NOT the killer. The game continues. \n  Day {round_number} (Conversation Phase {round_number}) END \n")
     return characters, False
 
 
@@ -205,31 +202,34 @@ def check_direct_address(most_recent_message, characters, player_name):
     """Check if a character is directly addressed by name in the player's message."""
     most_recent_message = most_recent_message.split(":")[1]
 
-    #First we check if only a single person was mentioned in the message
-    mentioned_characters = []
-    for character in characters:
-        if characters[character]["alive"] and character in most_recent_message:
-            mentioned_characters.append(character)
+    last_mentioned_character = None
+    last_mentioned_index = 1000000
 
-    if player_name in most_recent_message:
-        mentioned_characters.append(player_name)
+    sentences = re.split(r'[.!?]', most_recent_message)
+    for last_sentence in reversed(sentences):
+        if last_sentence == '':
+            continue
+        if last_mentioned_character == None:
+    
+            # Clean the sentence by removing commas and other non-alphabetic characters for comparison
+            most_recent_message = re.sub(r"[^a-zA-Z0-9\s]", " ", last_sentence).strip()
 
-    if len(mentioned_characters) == 1:
-        return mentioned_characters[0]
-    
-    #Next we check if the player was directly addressed as the first word of the message
-    if most_recent_message.strip().replace(",","").split(" ")[0] == player_name:
-        return player_name
-    
-    #Then we check if any NPCs were directly addressed - unfortunately there is some indexing priority here but that shouldn't really be an issue.
-    for character in characters:
-        if characters[character]["alive"] and (f". {character}" in most_recent_message or (most_recent_message.strip().replace(",", "").replace("'"," ").split(" ")[0] == character or most_recent_message.strip().split(",")[0] == character)):
-            return character  
-    
-    #Then we check if the player was directly addressed at a later part of the message
-    if f". {player_name}" in most_recent_message:
-        return player_name
-    return None
+            # Check if the player name is mentioned and find its last occurrence
+            index = most_recent_message.rfind(player_name)
+            if index != -1 and index < last_mentioned_index:
+                last_mentioned_character = player_name
+
+            # Check for each character in the message
+            for character in characters:
+                if characters[character]["alive"]:
+                    # Find the last occurrence of the character's name in the message
+                    index = most_recent_message.rfind(character)
+                    if index != -1 and index < last_mentioned_index:
+                        last_mentioned_character = character
+                        last_mentioned_index = index
+
+    # Return the last mentioned character or None if none are found
+    return last_mentioned_character
 
 # # Conversation Phase
 def conversation_stage(player_name, rooms, characters, old_crime_scenes, round_number):
@@ -237,7 +237,7 @@ def conversation_stage(player_name, rooms, characters, old_crime_scenes, round_n
 
     short_term_memory = 2
     yap_counter = 0
-    minimum_to_call_vote = 1 #Remember to change back to 20!
+    minimum_to_call_vote = 20 #Remember to change back to 20!
 
     current_conversation = []
     most_recent_messageS = []
@@ -273,12 +273,12 @@ def conversation_stage(player_name, rooms, characters, old_crime_scenes, round_n
     while True:
 
         #Ensure no-one gets away with saying nothing
-        if len(current_conversation) >= 10 and len(current_conversation) % 5 == 0:
+        if len(current_conversation) >= 6 and len(current_conversation) % 3 == 0:
             unspoken = find_characters_yet_to_speak(current_conversation, alive_characters)
             if len(unspoken) >= 1:
                 forced_to_speak_up = random.choice(unspoken)
                 most_recent_message = f"Detective: Hold on a moment. {forced_to_speak_up}; you've remained awfully quiet - care to explain where you were last night?"
-                print(most_recent_message, "\n")
+                #print(most_recent_message, "\n")
                 most_recent_messageS.append(most_recent_message)
                 current_conversation.append(most_recent_message)
 
@@ -423,8 +423,9 @@ def action_phase(player_name, rooms, characters, old_crime_scenes, round_number)
     for character in characters:
         if characters[character]["alive"] == True:
             characters[character]["memory"] = [f"BEGIN Action Phase Information: \n"]
-            for key_takeaway in characters[character]["key-takeaways"]:
-                    characters[character]["memory"].append(key_takeaway)
+            if len(characters[character]["key-takeaways"]) >=2:
+                for key_takeaway in characters[character]["key-takeaways"]:
+                        characters[character]["memory"].append(key_takeaway)
 
     if len(occupants) == 1:
         # One character in the room, kill them
@@ -541,11 +542,11 @@ def start_game():
     round_number = 0
     # Character profiles
     characters = {
-        "Jerry": {"alive": True, "profile": ["You are Jerry, you are soft-spoken and introverted."], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
-        "Dave": {"alive": True, "profile": ["You are Dave, you are a friendly guy but a bit of a follower. You prefer to blend into the background."], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
-        "Owen": {"alive": True, "profile": ["You are Owen, you have a short temper and a bit of an ego."], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
-        "Hank": {"alive": True, "profile": ["You are Hank, you're always suspicious of everyone around you, including the Detective."], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
-        "Debra": {"alive": True, "profile": ["You are Debra, you're somewhere between apathetic and non-chalant, nothing really phases you."], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]}
+        "Jerry": {"alive": True, "profile": ["you are slightly impatient and occasionally rush to conclusions but you are not irrational and can recognise when you are over-stepping the mark"], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
+        "Dave": {"alive": True, "profile": ["you are are a pacifist in all meanings of the word, you are averse to conflict and would much prefer if everyone could just get along"], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
+        "Owen": {"alive": True, "profile": ["you are quite conspiratorial and you're certain that this is all a part of something much bigger and much more sinister that the others will entertain"], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
+        "Hank": {"alive": True, "profile": ["you are deeply religious, although which particular religion or denomination you belong to is intensely ambigious"], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
+        "Debra": {"alive": True, "profile": ["you're somewhere between apathetic and non-chalant, nothing really phases you and you're not taking this as seriously as you perhaps should"], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]}
     }
     # Rooms in the mansion
     rooms = ["Attic", "Kitchen", "Library", "Basement", "Cellar"]
@@ -569,7 +570,1747 @@ def start_game():
 
 
 
+class GameWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()  # Ensure the parent class is initialized
+        self.sfx_enabled = True
+        self.effect_player = QMediaPlayer()
+        self.effect_player.setVolume(25)
+        self.music_enabled = True
+
+        # Initialize game state variables first
+        self.player_name = ""
+        self.characters = {}
+        self.rooms = ["Attic", "Kitchen", "Library", "Basement", "Cellar"]
+        self.old_crime_scenes = []
+        self.room_assignments = {}
+        self.round_number = 0
+        self.phase = "action"  # Track the current phase (action or conversation)
+        self.conversation_length = 0  # To track when the "Call Vote" button should appear
+        self.show_room_allocations = True  # Track mode for room allocation display
+        self.game_over = False
+        self.active_workers = []
+        self.votes = {}  # To store all votes (including player's)
+        self.vote_buttons_widget = None  # Widget for player vote buttons
+
+        # New Variables for the conversation phase
+        self.transcript = []
+        self.current_conversation = []  # Holds the conversation log
+        self.most_recent_messageS = []  # Holds the short-term memory stack of recent messages
+        self.alive_characters = []  # Holds the list of alive characters
+        self.NPCs = []  # Holds the list of NPC characters
+        self.short_term_memory = 3  # Short-term memory limit for conversation
+        self.yap_counter = 0  # Counter for how many times a character/NPC can speak
+        self.minimum_to_call_vote = 2  # Minimum conversation length to call a vote
+        self.force_interject = False  # Tracks if the player is forced to interject
+        self.rules = load_system_prompt()  # Placeholder for game rules (if needed)
+
+        # Set a consistent window size
+        self.setFixedSize(800, 600)
+
+        # Call init_ui after initializing game variables
+        self.init_ui()
 
 
-if __name__ == "__main__":
-    start_game()
+    def init_ui(self):
+        self.setWindowTitle("AlibAi")
+
+        font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
+        font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+
+        # Output area (TextEdit) to display game output, hidden initially
+        self.output_area = QTextEdit(self)
+        self.output_area.setReadOnly(True)
+        self.output_area.hide()  # Hide until game starts
+
+
+
+        screen = QGuiApplication.primaryScreen()  # Get the primary screen
+        screen_size = screen.size()  # Get screen size
+        screen_width = screen_size.width()
+
+        
+        # Set the font size based on the screen width
+        # Adjust this formula as needed for better scaling
+        font_size = max(24, int(screen_width * 0.07))
+        
+
+        # Title of the game
+        self.title_label = QLabel("AlibAi", self)
+        self.title_label.setAlignment(Qt.AlignCenter)  # Center the title text
+        self.title_label.setStyleSheet(f"""
+            QLabel {{
+                font-family: 'Press Start 2P';
+                font-size: {font_size}px;  /* Increase the font size for prominence */
+                color: white;
+                padding-bottom: 2px;  /* Add some space below the title */
+            }}
+        """)
+
+        # Input field for player's name
+        self.player_name_label = QLabel(self)
+        self.player_name_label.setText("Enter your name:")
+        self.player_name_label.setFixedHeight(40)
+        self.player_name_label.setAlignment(Qt.AlignCenter)
+        self.player_name_label.setStyleSheet(f"font-size: {int(24*screen_width/2560)}px; color: #DCDCDC;")  # Increase the label size
+
+        self.player_name_input = QLineEdit(self)
+        self.player_name_input.setFixedHeight(40)  # Increase the height of the input field
+        self.player_name_input.setAlignment(Qt.AlignCenter)
+        self.player_name_input.setStyleSheet("""
+            QLineEdit {
+                font-size: 20px;
+                padding: 5px;
+                text-align: center;
+                color: #DCDCDC;
+                border: none;
+            }
+        """)
+        self.player_name_input.setPlaceholderText("Type here...")
+
+        # Reduce spacing between "Enter your name" label and the input field
+        self.player_name_layout = QVBoxLayout()
+        self.player_name_layout.addWidget(self.player_name_label)
+        self.player_name_layout.addWidget(self.player_name_input)
+        self.player_name_layout.setSpacing(5)  # Set spacing between label and input to 5px
+
+        start_buttons_font_size = max(int(50*(screen_width/2560)), 37)
+
+        # Toggle button for game difficulty (Normal/Super Hard)
+        self.difficulty_button = QPushButton("Mode: Normal", self)
+        self.difficulty_button.setFixedHeight(100)  # Increase the button size
+        self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: grey")
+        self.difficulty_button.clicked.connect(self.toggle_mode)
+
+        # Button to start the game
+        self.start_button = QPushButton('Start Game!', self)
+        self.start_button.setFixedHeight(100)  # Increase the button size
+        self.start_button.setStyleSheet(f"""
+            QPushButton{{
+            font-size: {start_buttons_font_size}px; padding: 10px; color: white
+            }}
+            QPushButton:hover {{
+                color: #808080;
+            }}
+            """)
+        self.start_button.clicked.connect(self.start_game)
+
+        # Buttons for rooms in action phase
+        self.room_labels = {}
+        self.room_containers = {}
+        self.room_buttons = {}
+        self.room_buttons_widget = QWidget()  # Define the room_buttons_widget
+        room_layout = QGridLayout()
+
+        def apply_opacity(button, opacity_level):
+            effect = QGraphicsOpacityEffect(button)
+            effect.setOpacity(opacity_level)
+            button.setGraphicsEffect(effect)
+
+        # Define sizes for images
+        room_dim = int(256*(screen_width/2560))
+
+        attic_size = QSize(2*room_dim, room_dim)  # Adjusted attic size
+        room_size = QSize(room_dim, room_dim)  # Adjusted room size
+
+        # Adjust layout to remove large gaps and center content
+        room_layout.setSpacing(0)  # Remove extra spacing between buttons
+        #room_layout.setContentsMargins(0, 0, 0, 0)  # Remove outer margins
+
+        # Create buttons and place them in the layout
+        for room in self.rooms:
+            # Create a QPushButton for the room, acting as the image holder
+            button = QPushButton(self)
+
+            # Set the image for each room based on the room name
+            if room == "Attic":
+                button.setIcon(QIcon("House_images/scaled/Attic.png"))
+                button.setIconSize(attic_size)
+                button.setFixedSize(attic_size)  # Adjust size for attic
+                room_layout.addWidget(button, 0, 0, 1, 2, Qt.AlignCenter)  # Attic spans 2 columns
+            else:
+                button.setIcon(QIcon(f"House_images/scaled/{room}.png"))
+                button.setIconSize(room_size)
+                button.setFixedSize(room_size)
+
+                # Add the buttons for Kitchen, Library, Basement, and Cellar to the grid
+                if room == "Kitchen":
+                    room_layout.addWidget(button, 1, 0, Qt.AlignRight)  # Kitchen at row 1, col 0
+                elif room == "Library":
+                    room_layout.addWidget(button, 1, 1, Qt.AlignLeft)  # Library at row 1, col 1
+                elif room == "Basement":
+                    room_layout.addWidget(button, 2, 0, Qt.AlignRight)  # Basement at row 2, col 0
+                elif room == "Cellar":
+                    room_layout.addWidget(button, 2, 1, Qt.AlignLeft)  # Cellar at row 2, col 1
+
+            # Overlay room name on the button using a QLabel (this is now optional)
+
+            text_label = QLabel(room, self)
+            text_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            #text_label.setAlignment(Qt.AlignCenter)
+
+            room_button_font_size = int(16 * (screen_width / 2560))
+            room_button_font_size  = max(room_button_font_size, 12)
+            # Style the text label
+            text_label.setStyleSheet(f"""
+                QLabel {{
+                    font-family: 'Press Start 2P';
+                    font-size: {room_button_font_size}px;
+                    color: white;
+                    background-color: transparent;
+                }}
+            """)
+            
+            self.room_labels[room] = text_label
+            # Stack the button and label in a QVBoxLayout (optional)
+            layout = QVBoxLayout()
+            layout.addWidget(button)
+            layout.addWidget(text_label)
+
+            # Create a container widget to hold the layout
+            container = QWidget()
+            container.setLayout(layout)
+            container.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self.room_containers[room] = container
+
+            # Add the container to the room_layout grid
+            if room == "Attic":
+                room_layout.addWidget(container, 0, 0, 1, 2, Qt.AlignCenter)
+            elif room == "Kitchen":
+                room_layout.addWidget(container, 1, 0, Qt.AlignRight | Qt.AlignVCenter)
+                container.setStyleSheet(f"""
+                    QWidget {{
+                        padding-right: {int(60*(screen_width/2560))}px;  
+                    }}
+                """)
+            elif room == "Library":
+                room_layout.addWidget(container, 1, 1, Qt.AlignLeft | Qt.AlignVCenter)
+                container.setStyleSheet(f"""
+                    QWidget {{
+                        padding-left: {int(60*(screen_width/2560))}px;  
+                    }}
+                """)
+            elif room == "Basement":
+                room_layout.addWidget(container, 2, 0, Qt.AlignRight | Qt.AlignVCenter)
+                container.setStyleSheet(f"""
+                    QWidget {{
+                        padding-right: {int(60*(screen_width/2560))}px;  
+                    }}
+                """)
+            elif room == "Cellar":
+                room_layout.addWidget(container, 2, 1, Qt.AlignLeft | Qt.AlignVCenter)
+                container.setStyleSheet(f"""
+                    QWidget {{
+                        padding-left: {int(65*(screen_width/2560))}px;  
+                    }}
+                """)
+
+                # Apply initial opacity based on whether the button is enabled or disabled
+            if button.isEnabled():
+                apply_opacity(button, 0.5)  # Set default opacity for enabled buttons
+            else:
+                apply_opacity(button, 0.01)  # Reduce brightness for disabled buttons
+
+            # Hover effects only for enabled buttons
+            def enter_event(event, btn):
+                if btn.isEnabled():  # Only apply hover if the button is enabled
+                    apply_opacity(btn, 1.0)  # Increase brightness on hover
+                QPushButton.enterEvent(btn, event)
+
+            def leave_event(event, btn):
+                if btn.isEnabled():  # Only apply hover if the button is enabled
+                    apply_opacity(btn, 0.5)  # Return to default brightness
+
+                QPushButton.leaveEvent(btn, event)
+
+            # Install event filters to apply hover effect to the button (image itself)
+            button.enterEvent = lambda event, b=button: enter_event(event, b)
+            button.leaveEvent = lambda event, b=button: leave_event(event, b)
+
+            # Connect the button to the 'choose_room' function as a clickable area
+            button.clicked.connect(lambda _, r=room: self.choose_room(r))
+
+            # Store the button in the dictionary
+            self.room_buttons[room] = button
+
+        # Set the layout for room_buttons_widget
+        self.room_buttons_widget.setLayout(room_layout)
+        #self.setCentralWidget(self.room_buttons_widget)  # Set this as the central widget
+
+
+        # Add room_buttons_widget to the main window layout
+        #self.main_layout.addWidget(self.room_buttons_widget)
+        #User Information Widet
+        self.secondary_output_area = QLabel(self)
+        self.secondary_output_area.setAlignment(Qt.AlignCenter)
+        self.secondary_output_area.setStyleSheet("color: grey; font-size: 18px;")  # Style it for better appearance
+        self.secondary_output_area.hide()  # Initially hidden
+
+
+        button_width = int(screen_width / 3)
+        button_height = int(100 * (screen_width/2560))
+        # Conversation phase buttons
+        self.pass_button = QPushButton('Pass')
+        self.pass_button.setFixedSize(button_width, button_height) 
+        self.pass_button.clicked.connect(self.pass_conversation)
+        self.interject_button = QPushButton('Interject')
+        self.interject_button.clicked.connect(self.interject_conversation)
+        self.vote_button = QPushButton('Call Vote')
+        self.vote_button.clicked.connect(self.call_vote)
+        self.vote_button.setEnabled(False)  # Initially disabled
+
+        conversation_button_font_size = max(int(32 *(screen_width/2560)), 18)
+        button_style = f"""
+            QPushButton {{
+                font-size: {conversation_button_font_size}px;
+            }}
+            QPushButton:disabled {{
+                color: transparent;  /* Hide text when disabled */
+            }}
+            QPushButton:hover {{
+                        color: #808080;
+                    }}
+        """
+        self.pass_button.setStyleSheet(button_style)
+        self.interject_button.setStyleSheet(button_style)
+        self.vote_button.setStyleSheet(button_style)
+
+        # Layouts
+        self.conversation_buttons_layout = QHBoxLayout()
+        self.conversation_buttons_layout.addWidget(self.pass_button)
+        self.conversation_buttons_layout.addWidget(self.interject_button)
+        self.conversation_buttons_layout.addWidget(self.vote_button)
+
+        # Input field for interjecting during conversation
+        self.interject_input = QLineEdit(self)
+        self.interject_input.setPlaceholderText("Type here...")
+        self.interject_input.setAlignment(Qt.AlignCenter)
+        self.interject_input.setStyleSheet(f"""
+            QLineEdit {{
+                font-size: {int(conversation_button_font_size/2)}px;
+                padding: 5px;
+                text-align: center;
+                color: #DCDCDC;
+                border: none;
+            }}
+        """)
+        self.interject_input.hide()  # Hidden until needed
+        self.interject_input.returnPressed.connect(self.send_interjection)
+        self.say_button = QPushButton('Say')
+        self.say_button.setStyleSheet(f"""
+            QPushButton {{
+                font-size: {conversation_button_font_size}px;
+            }}
+            QPushButton:hover {{
+                color: #808080;
+            }}
+        """)
+        self.say_button.clicked.connect(self.send_interjection)
+        self.say_button.hide()  # Hidden until needed
+
+        # Main Layout
+        self.start_layout = QVBoxLayout()
+        self.start_layout.addWidget(self.title_label)  # Add the title at the top
+        self.start_layout.addLayout(self.player_name_layout)
+        self.start_layout.addWidget(self.difficulty_button)
+        self.start_layout.addWidget(self.start_button)
+        self.start_layout.setContentsMargins(50, 50, 50, 50)  # Adjust the spacing around the layout
+        #self.start_layout.setAlignment(Qt.AlignCenter)  # Align everything centrally
+
+        self.layout = QVBoxLayout()
+        #self.layout.addWidget(self.top_right_widget)
+        self.layout.addLayout(self.start_layout)
+        self.layout.addWidget(self.room_buttons_widget)
+        self.layout.addWidget(self.output_area)
+        self.layout.addWidget(self.secondary_output_area)
+        #layout.setContentsMargins(50, 50, 50, 50)
+
+        # Placeholder for the conversation phase buttons (hide initially)
+        self.conversation_buttons_widget = QWidget()
+        self.conversation_buttons_widget.setLayout(self.conversation_buttons_layout)
+        self.layout.addWidget(self.conversation_buttons_widget)
+
+        # Layout for interjecting text box and button (below the output area)
+        interject_layout = QVBoxLayout()
+        interject_layout.addWidget(self.interject_input)
+        interject_layout.addWidget(self.say_button)
+        self.layout.addLayout(interject_layout)
+
+        container = QWidget()
+        container.setLayout(self.layout)
+        self.setCentralWidget(container)
+
+        # Initially hide room and conversation elements
+        self.room_buttons_widget.hide()
+        self.conversation_buttons_widget.hide()
+
+        # Create "How to Play" button
+        self.how_to_play_button = QPushButton("How to Play", self)
+        self.how_to_play_button.setStyleSheet(f"""
+            QPushButton{{
+            font-size: {int(start_buttons_font_size/2)}px; padding: 10px; color: white;
+            background-color: rgba(0, 0, 0, 0);
+            }}
+            QPushButton:hover {{
+                color: #808080;
+            }}
+            """)
+        self.how_to_play_button.clicked.connect(self.show_how_to_play)
+
+        # Create "Transcript" button
+        self.transcript_button = QPushButton("Transcript", self)
+        self.transcript_button.setStyleSheet(f"""
+            QPushButton{{
+            font-size: {int(start_buttons_font_size/2)}px; padding: 10px; color: white;
+            background-color: rgba(0, 0, 0, 0);
+            }}
+            QPushButton:hover {{
+                color: #808080;
+            }}
+            """)
+        self.transcript_button.clicked.connect(self.show_transcript)
+        self.transcript_button.hide()  # Initially hidden
+
+        # Position the "How to Play" button in the top-right corner
+        # Scale button size and positioning based on screen resolution
+        button_width = int(screen_width * 0.15)  # 10% of the screen width for the button width
+        button_height = int(button_width * 0.35)  # Adjust height proportionally to the width
+        button_x = screen_width - (button_width + 10)  # Position button 10 pixels from the right edge
+        button_y = 10  # 20 pixels from the top
+
+
+        self.how_to_play_button.setGeometry(button_x, button_y, button_width, button_height)
+        self.transcript_button.setGeometry(button_x, button_y, button_width, button_height)  # Adjust position and size
+        self.how_to_play_button.show()
+        self.how_to_play_button.raise_()
+        self.transcript_button.hide()
+        self.transcript = []
+
+        self.mute_button = QPushButton(self)
+        self.update_mute_button_icon()
+        self.mute_button.clicked.connect(self.toggle_mute)
+        self.mute_button.setGeometry(0, button_y, button_width, button_height)
+        self.mute_button.setIconSize(QSize(64, 64))
+        self.mute_button.show()
+
+        self.showFullScreen()  # Make the window fullscreen
+
+        #Start-screen Music
+        self.media_player = QMediaPlayer()
+        music_url = QUrl.fromLocalFile("sounds/start.mp3")
+        self.media_player.setMedia(QMediaContent(music_url))
+        self.media_player.setVolume(50)  # Adjust volume
+        self.media_player.play()
+
+        # Make the music loop indefinitely
+        self.media_player.mediaStatusChanged.connect(self.loop_music)
+
+        # Configure the output area
+        self.output_area.setStyleSheet(f"background-color: #1E1E1E; color: #E0E0E0; border: none; font-family: {font_family}; font-size: 16px; padding-left: 8px; padding-right: 20px;")
+        self.setStyleSheet(f"color: white; background-color: black; font-family: {font_family};")
+
+    def apply_opacity(self, button, opacity_level):
+        # Helper function to set the opacity of buttons
+        effect = QGraphicsOpacityEffect(button)
+        effect.setOpacity(opacity_level)
+        button.setGraphicsEffect(effect)
+
+    def update_room_button_states(self):
+        # Loop through each room button to update their states and apply appropriate opacity
+        for room, button in self.room_buttons.items():
+            if button.isEnabled():  # If the button is enabled, apply regular opacity and hover effects
+                self.apply_opacity(button, 0.5)  # Default opacity for enabled buttons
+            else:
+                self.apply_opacity(button, 0.1)
+                self.room_labels[room].hide()   # Low opacity for disabled buttons (crime scenes)
+                self.room_containers[room].hide()
+
+    def update_mute_button_icon(self):
+        """Update the mute button icon based on whether sound is enabled."""
+        if self.sfx_enabled:
+            self.mute_button.setIcon(QIcon("icons/audio.png"))  # Sound on icon
+        else:
+            self.mute_button.setIcon(QIcon("icons/audio-off.png"))  # Muted icon
+
+    def toggle_mute(self):
+        """Toggle sound on/off and update icon."""
+        self.sfx_enabled = not self.sfx_enabled
+        self.music_enabled = not self.music_enabled
+
+        if self.music_enabled:
+            self.media_player.play()  
+        else:
+            self.media_player.pause() 
+            self.effect_player.pause()
+
+        # Update the button icon
+        self.update_mute_button_icon()
+
+    def loop_music(self, status):
+        # Check if music has ended, and if so, restart it
+        if status == QMediaPlayer.EndOfMedia and self.music_enabled:
+            self.media_player.play()
+
+    def play_sound_effect(self, sound_path):
+        """Plays the given sound effect, if sound is enabled."""
+        if self.sfx_enabled:
+            self.effect_player.setMedia(QMediaContent(QUrl.fromLocalFile(sound_path)))
+            self.effect_player.play()
+
+    def toggle_mode(self):
+        # Toggle between Normal and Super Hard modes
+        if self.show_room_allocations:
+            self.difficulty_button.setText("Mode: Super Hard")
+            self.show_room_allocations = False
+        else:
+            self.difficulty_button.setText("Mode: Normal")
+            self.show_room_allocations = True
+
+    def start_game(self):
+        self.how_to_play_button.hide()
+        self.player_name = self.player_name_input.text().capitalize().split(" ")[0]
+        if not self.player_name:
+            self.output_area.append("Please enter your name to start the game.")
+            return
+        
+
+        # Hide name input, start button, and difficulty button
+        self.start_button.hide()
+        self.player_name_label.hide()
+        self.player_name_input.hide()
+        self.difficulty_button.hide()
+        self.title_label.hide()
+
+        # Show room buttons and output area
+        self.room_buttons_widget.show()
+        self.output_area.show()
+
+        # Initialize characters
+        self.characters = {
+            "Jerry": {"alive": True, "profile": ["you MUST occasionally emphasize how desperately lonely you are and how you will never find true love in this (cold / cruel / synonym) world (non-negotiable)"], "memory": [], "key-takeaways": [f"From your experiences in previous nights you know, as FACT, that: \n"]},
+            "Dave": {"alive": True, "profile": ["you MUST constantly be offended by the statements of others (this is non-negotiable)"], "memory": [], "key-takeaways": [f"From your experiences in previous nights you know, as FACT, that: \n"]},
+            "Owen": {"alive": True, "profile": ["you MUST be overly-flirtatious and full of flattery, especially directed towards Jerry (this is non-negotiable)"], "memory": [], "key-takeaways": [f"From your experiences in previous nights you know, as FACT, that: \n"]},
+            "Hank": {"alive": True, "profile": ["you MUST include subtle praise of the keto-diet in every message (this is non-negotiable)"], "memory": [], "key-takeaways": [f"From your experiences in previous nights you know, as FACT, that: \n"]},
+            "Debra": {"alive": True, "profile": ["you may only speak in riddles (this is non-negotiable)"], "memory": [], "key-takeaways": [f"From your experiences in previous nights you know, as FACT, that: \n"]}
+        }
+
+        for character in self.characters:
+            if character in self.player_name or self.player_name == "David":
+                self.player_name = "Einstein"
+
+        self.old_crime_scenes = []
+        self.round_number = 0
+        self.game_over = False
+
+        # Start the first action phase
+        self.run_action_phase()
+
+    def show_how_to_play(self):
+        font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
+        font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+
+        # Create the 'How to Play' window
+        self.how_to_play_window = HowToPlayWindow(font_family)
+        self.how_to_play_window.show()
+
+    def show_transcript(self):
+        font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
+        font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+
+        # Create the custom transcript window
+        self.transcript_window = TranscriptWindow(self.transcript, font_family)
+        self.transcript_window.show()
+
+    def run_action_phase(self):
+        self.mute_button.hide()
+        self.media_player.stop()
+        self.effect_player.setVolume(25)
+        self.play_sound_effect("sounds/start_button.mp3")
+        self.output_area.clear()
+        self.round_number += 1
+        self.output_area.append(f"Action Phase {self.round_number} begins!\n")
+        self.transcript.append(f"Action Phase {self.round_number}:\n")
+
+        # Room assignments for each character
+        self.room_assignments = {room: [] for room in self.rooms}
+        for character in self.characters:
+            if self.characters[character]["alive"]:
+                available_rooms = [r for r in self.rooms if r not in self.old_crime_scenes]
+                available_rooms_for_assignment = [room for room in available_rooms if len(self.room_assignments[room]) < 2]
+                room = random.choice(available_rooms_for_assignment)
+                self.room_assignments[room].append(character)
+
+        # Display room assignments if in normal mode
+        if self.show_room_allocations:
+            formatted_assignments = []
+            for room, occupants in self.room_assignments.items():
+                if occupants:
+                    occupants_str = ", ".join(occupants[:-1]) + (f" and {occupants[-1]}" if len(occupants) > 1 else occupants[0])
+                    formatted_assignments.append(f"{room}: {occupants_str}")
+
+                elif room not in self.old_crime_scenes:
+                    formatted_assignments.append(f"{room}: empty")
+            
+            assignments_output = "\n \n ".join(formatted_assignments)
+            self.output_area.append(f"Room Assignments; \n \n {assignments_output} \n")
+            self.transcript.append(f"Room Assignments; \n \n {assignments_output} \n")
+
+        # Ask the player to choose a room
+        self.output_area.append("Choose a room by clicking one of the buttons.")
+        self.rooms_visited = []  # Track rooms visited during the night
+        self.new_crime_scenes = []  # Track new crime scenes
+        self.had_to_change_rooms = False  # Track if the player moved rooms
+
+        for room in self.rooms:
+            if room in self.old_crime_scenes:
+                self.room_buttons[room].setEnabled(False)  # Disable crime scene rooms
+            else:
+                self.room_buttons[room].setEnabled(True)  # Enable non-crime scene rooms
+
+        self.update_room_button_states()
+
+        self.room_buttons_widget.show()  # Show room selection buttons
+
+
+    def choose_room(self, selected_room):
+        #self.remove_last_message()
+        self.output_area.append(f"\nYou have chosen to stay in the {selected_room}.\n")
+        occupants = self.room_assignments[selected_room]
+
+        self.rooms_visited.append(selected_room)
+        self.new_crime_scenes.append(selected_room)
+
+        # Handle the outcome based on room occupants
+        if len(occupants) == 0:
+            self.output_area.append(f"The {selected_room} is empty. You must choose another room, but the {selected_room} is now also a crime scene.\n")
+            self.had_to_change_rooms = True
+            
+            self.room_buttons[selected_room].setEnabled(False)  # Disable crime scene rooms
+            self.update_room_button_states()
+            return  # Let the player choose again
+
+        # If the room is occupied
+        self.room_buttons_widget.hide()
+        self.handle_room_occupants(selected_room, occupants)
+
+    def handle_room_occupants(self, player_room, occupants):
+        # Re-initialize action-phase memory for characters
+
+
+        if len(occupants) == 1:
+            # One character in the room, kill them
+            victim = occupants[0]
+            self.characters[victim]["alive"] = False
+            self.output_area.append(f"You killed {victim} in the {player_room}. The {player_room} is now a crime scene.\n \n")
+            self.new_crime_scenes.append(player_room)
+
+            # Update witnesses' memories (even if they are not in the same room)
+            self.update_witness_memories(victim)
+
+            # Now initiate the conversation phase correctly
+            self.run_conversation_phase()
+
+        else:
+            # Multiple occupants, player must choose who to kill
+            self.output_area.append(f"The {player_room} is occupied by {', '.join(occupants)}. Choose who to kill.\n")
+            self.display_victim_selection(occupants)
+
+
+    def display_victim_selection(self, occupants):
+        # Display buttons for choosing the victim in the room
+        self.victim_buttons_widget = QWidget()
+        victim_layout = QVBoxLayout()
+
+        screen = QGuiApplication.primaryScreen()  # Get the primary screen
+        screen_size = screen.size()  # Get screen size
+        screen_width = screen_size.width()
+        conversation_button_font_size = max(int(32 *(screen_width/2560)), 18)
+
+        for occupant in occupants:
+            victim_button = QPushButton(f"Kill {occupant}", self)
+            victim_button.setStyleSheet(f"""
+                QPushButton {{
+                    font-size: {int(conversation_button_font_size)}px;
+                    padding: 5px;
+                    color: white;
+                }}
+                QPushButton:hover {{
+                    color: #808080;
+                }}
+            """)
+            victim_button.clicked.connect(lambda _, o=occupant: self.kill_victim(o))
+            victim_layout.addWidget(victim_button)
+
+        self.victim_buttons_widget.setLayout(victim_layout)
+        self.centralWidget().layout().addWidget(self.victim_buttons_widget)
+
+    def kill_victim(self, victim):
+        self.characters[victim]["alive"] = False
+        self.output_area.append(f"You killed {victim}.\n \n")
+        self.new_crime_scenes.append(self.rooms_visited[-1])
+
+        # Hide the victim buttons after a choice has been made
+        self.victim_buttons_widget.hide()
+
+        # Update witnesses' memories after a multiple-person murder
+        self.update_witness_memories(victim)
+
+        # Check if there are any NPCs left alive
+        alive_npcs = [char for char in self.characters if self.characters[char]["alive"] and char != self.player_name]
+
+        if len(alive_npcs) == 0:
+            self.output_area.append("Congratulations! You killed all the NPCs and won the game!\n")
+            return  # End the game with a victory screen
+
+        # Now, correctly initiate the conversation phase (after victim selection is finalized)
+        self.run_conversation_phase()
+
+    def update_witness_memories(self, victim):
+        if self.had_to_change_rooms:
+            self.transcript.append(f"You went from the {' to the '.join(self.rooms_visited)} and killed {victim}.\n")
+        else:
+            self.transcript.append(f"You killed {victim} in the {self.rooms_visited[-1]}.\n")
+
+
+        for character in self.characters:
+            if self.characters[character]["alive"]:
+                for takeaway in self.characters[character]["key-takeaways"]:
+                    for other in self.characters:
+                        if not self.characters[other]["alive"]:
+                            if f"{other} is NOT the killer!" in takeaway:
+                                self.characters[character]["key-takeaways"].remove(takeaway)
+
+        for character in self.characters:
+            if self.characters[character]["alive"]:
+                self.characters[character]["memory"] = [f"BEGIN Action Phase {self.round_number}: \n"]
+                if len(self.characters[character]["key-takeaways"]) >=2:
+                    for takeaway in self.characters[character]["key-takeaways"]:
+                        self.characters[character]["memory"].append(takeaway)
+
+
+
+        # Update memories for any witnesses who saw the murder
+        for room, occupants in self.room_assignments.items():
+            if room != self.rooms_visited[-1]:
+                continue
+            for occupant in occupants:
+                if occupant != victim and occupant != self.player_name:
+                    other_occupants = [o for o in occupants if (o != occupant) and (o != victim)]
+                    if len(other_occupants) == 0:
+                        self.characters[occupant]["key-takeaways"].append(f"{self.player_name} is the killer! You witnessed {self.player_name} kill {victim} in the {self.rooms_visited[-1]} during a previous night (not last night, but before)! This is an un-deniable fact. \n")
+                        self.characters[occupant]["memory"].append(f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {self.rooms_visited[-1]} with {self.player_name} and {victim} and no-one else. \n You witness {self.player_name} killing {victim} in the {self.rooms_visited[-1]} - {self.player_name} is the killer. \n Expect {self.player_name} to lie, cheat and do everything possible to shift blame, you must defend your innocence. \n Since you know for a fact that {self.player_name} is the killer,  DO NOT EVER ATTEMPT TO CAST SUSPISCION ON ANYONE OTHER THAN {self.player_name}. \n Accuse {self.player_name} as soon as possible! The rest of the group must be told they are the killer!")
+                    else:
+                        self.characters[occupant]["key-takeaways"].append(f"{self.player_name} is the killer! You witnessed {self.player_name} kill {victim} in the {self.rooms_visited[-1]} during a previous night! This is an un-deniable fact. \n")
+                        self.characters[occupant]["memory"].append(f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {self.rooms_visited[-1]} with {self.player_name}, {', '.join(other_occupants)} and {victim} and no-one else. \n You witness {self.player_name} killing {victim} in the {self.rooms_visited[-1]} - {self.player_name} is the killer. \n Expect {self.player_name} to lie, cheat and do everything possible to shift blame, you must defend your innocence. \n Since you know for a fact that {self.player_name} is the killer,  DO NOT EVER ATTEMPT TO CAST SUSPISCION ON ANYONE OTHER THAN {self.player_name}. \n")
+                        self.characters[occupant]["memory"].append(f"{' and '.join(other_occupants)} also spent the night with you in the {self.rooms_visited[-1]} and also witnessed the murder, they are NOT the killer and can validate your testimony. \n")
+
+        # Update memories for other NPCs
+        for room, occupants in self.room_assignments.items():
+            if room == self.rooms_visited[-1]:
+                continue
+            for occupant in occupants:
+                if self.characters[occupant]["alive"]:
+                    other_occupants = [o for o in occupants if o != occupant]
+                    if len(other_occupants) > 0:
+                        self.characters[occupant]["key-takeaways"].append(f"You know with certainty that {' and '.join(other_occupants)} is NOT the killer! You spent a previous night (not last night, but before) with them while the killer was active and they never left your sight. You MUST defend {' and '.join(other_occupants)} from suspiscion since you are certain of their innocence! They can also vouch for your innocence.")
+                        self.characters[occupant]["memory"].append(f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {room}, {' and '.join(other_occupants)} was there with you and no-one else. \n")
+                        self.characters[occupant]["memory"].append(
+                            f"Because of this you know for a FACT that {' and '.join(other_occupants)} is NOT the killer because you can support their alibi, you MUST assert the innocence of {' and '.join(other_occupants)} and defend them from suspiscion. \n"
+                        )
+                    else:
+                        self.characters[occupant]["memory"].append(
+                            f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {room}, no-one else was there with you. \n \n"
+                        )
+                    self.characters[occupant]["memory"].append(f"In the morning the Detective reveals to everyone that {victim}'s corpse was found in the {self.rooms_visited[-1]}.")
+
+                    self.characters[occupant]["memory"].append(f"The killer (along with any witnesses) must be someone who spent the night in the {self.rooms_visited[-1]}, but it is likely the killer will lie about their whereabouts.")
+
+                    if self.had_to_change_rooms:
+                        self.characters[occupant]["memory"].append(f"The Detective also tells everyone that the killer made their way from the {' to the '.join(self.rooms_visited)} during the night! A presence in any of these rooms is deeply suspiscious.")
+                    
+
+
+
+    def run_conversation_loop(self):
+        self.secondary_output_area.clear()
+        self.play_sound_effect(f"sounds/voices/{self.most_recent_messageS[-1].split(':')[0]}.mp3")
+        self.vote_button.setEnabled(False)
+
+        cursor = self.output_area.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.output_area.setTextCursor(cursor)
+
+        while len(self.most_recent_messageS) > self.short_term_memory:
+            self.most_recent_messageS.pop(0)
+
+        if len(self.current_conversation) >= 10 and len(self.current_conversation) % 5 == 0:
+            unspoken = find_characters_yet_to_speak(self.current_conversation, self.alive_characters)
+            if len(unspoken) >= 1:
+                forced_to_speak_up = random.choice(unspoken)
+                most_recent_message = f"Detective: Hold on a moment. {forced_to_speak_up}; you've remained awfully quiet - care to explain where you were last night?"
+                formatted_message = f"""<p><span style="font-size: 16px;"><strong>Detective:</strong></span><br><span style="font-size: 16px; padding-left: 20px;">Hold on a moment. {forced_to_speak_up}; you've remained awfully quiet - care to explain where you were last night?</span></p><br>"""
+                self.output_area.append(formatted_message)
+
+                # Move the cursor to the end of the document
+                cursor = self.output_area.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                self.output_area.setTextCursor(cursor)
+
+                # Ensure the scroll bar reflects the change
+                self.output_area.ensureCursorVisible()
+                self.current_conversation.append(most_recent_message)
+                self.most_recent_messageS.append(most_recent_message)
+                self.yap_counter = 0
+
+                # Shorten memory stack if necessary
+                if len(self.most_recent_messageS) > self.short_term_memory:
+                    self.most_recent_messageS.pop(0)
+
+                    self.play_sound_effect("sounds/voices/Detective.mp3")
+
+        # Check who is mentioned
+        mentioned = check_direct_address(self.most_recent_messageS[-1], self.characters, self.player_name)
+        #print(f"Mentioned: {mentioned}")  # Debugging
+
+        if mentioned != None and mentioned != self.most_recent_messageS[-1].split(":")[0]:
+            if mentioned != self.player_name:
+                if self.yap_counter <= 1:
+                    # NPC response when mentioned
+                    self.run_single_response(mentioned)
+                    self.yap_counter += 1  # Increment yap counter for NPC responses
+
+                else:
+                    # Yap counter exceeded, player gets the option to pass or interject
+                    self.secondary_output_area.clear()
+                    self.secondary_output_area.setText(f"{mentioned} was mentioned. Do you want to interject or pass?<br>")
+                    QApplication.processEvents()
+                    self.pass_button.setEnabled(True)
+                    self.interject_button.setEnabled(True)
+                    if len(self.current_conversation) >= self.minimum_to_call_vote:
+                        self.vote_button.setEnabled(True)  # Enable the vote button after enough conversation
+
+            else:
+                # Player is mentioned, force them to respond
+                self.secondary_output_area.clear()
+                self.secondary_output_area.setText(f"You were mentioned! You must respond.<br>")
+                self.force_interject = True
+                self.pass_button.setEnabled(False)
+                self.interject_button.setEnabled(False)
+                self.interject_input.show()
+                self.say_button.show()
+                if len(self.current_conversation) >= self.minimum_to_call_vote:
+                    self.vote_button.setEnabled(True)  # Enable the vote button after enough conversation
+                cursor = self.output_area.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                self.output_area.setTextCursor(cursor)
+
+
+        else:
+            # Handle when no one is directly mentioned, or the player just spoke
+            if self.most_recent_messageS[-1].split(":")[0] != self.player_name:
+                self.secondary_output_area.clear()
+                self.secondary_output_area.setText(f"Do you want to interject or pass?<br>")
+                QApplication.processEvents()
+                self.pass_button.setEnabled(True)
+                self.interject_button.setEnabled(True)
+                if len(self.current_conversation) >= self.minimum_to_call_vote:
+                    self.vote_button.setEnabled(True)  # Enable the vote button after enough conversation
+
+            else:
+                # Handle the player passing or continuing without direct mention
+                self.run_multiple_responses()
+                QApplication.processEvents()
+                self.yap_counter += 1
+
+
+    def pass_conversation(self):
+        # Keep buttons active and just hide the interject input
+        #self.remove_last_message()
+        self.pass_button.setEnabled(False)
+        self.interject_button.setEnabled(False)
+        self.vote_button.setEnabled(False)
+
+        mentioned = check_direct_address(self.most_recent_messageS[-1], self.characters, self.player_name)
+
+        if mentioned and mentioned != self.most_recent_messageS[-1].split(":")[0]:
+            self.secondary_output_area.clear()
+            self.run_single_response(mentioned)
+
+           
+        else:
+            self.secondary_output_area.clear()
+            self.run_multiple_responses()
+
+        
+        
+
+    def player_interject(self):
+        # Pre-existing function but adapted for GUI to ask if the player wants to interject
+        return self.force_interject or (self.interject_input.isVisible() and self.interject_input.text().strip() != "")
+
+    def interject_conversation(self):
+        # Clear the interject input field before showing
+        #self.remove_last_message()
+        #self.output_area.append("You chose to interject. Please type your message.\n")
+        self.interject_input.clear()
+        self.secondary_output_area.clear()
+        self.interject_input.show()
+        self.say_button.show()  # Show the "Say" button to confirm the player's message
+        self.pass_button.setEnabled(False)  # Disable the pass button while interjecting
+        self.interject_button.setEnabled(False)  # Disable the interject button while typing
+
+    def send_interjection(self):
+        interjection = self.interject_input.text()
+        if interjection:
+            if self.force_interject == False:
+                self.secondary_output_area.clear()
+                self.secondary_output_area.setText("What will you say?<br>")
+            formatted_message = f"""<p><span style="font-size: 16px;"><strong>{self.player_name}:</strong></span><br><span style="font-size: 16px; padding-left: 20px;">{interjection}</span></p><br>"""
+            self.output_area.append(formatted_message)
+            self.vote_button.setEnabled(False)
+
+            # Move the cursor to the end of the document
+            cursor = self.output_area.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.output_area.setTextCursor(cursor)
+
+            # Ensure the scroll bar reflects the change
+            self.output_area.ensureCursorVisible()
+
+            self.interject_input.clear()
+            self.interject_input.hide()
+            self.say_button.hide()
+
+            # Add the player's message to the conversation
+            self.current_conversation.append(f"{self.player_name}: {interjection}")
+            self.most_recent_messageS.append(f"{self.player_name}: {interjection}")
+
+            # Shorten memory stack if necessary
+            if len(self.most_recent_messageS) > self.short_term_memory:
+                self.most_recent_messageS.pop(0)
+
+            # Allow NPCs to respond after the player interjects
+            self.force_interject = False  # Reset force interject
+            self.yap_counter = 0  # Reset yap counter after player speaks
+            self.run_conversation_loop()
+
+    def call_vote(self):
+        self.output_area.clear()
+        self.output_area.append("Vote called!\n")
+        self.setEnabled(False)
+        # self.pass_button.hide()
+        self.interject_input.hide()
+        # self.interject_button.hide()
+        # self.vote_button.hide()
+        self.say_button.hide()
+        self.conversation_buttons_widget.hide()
+        self.secondary_output_area.hide()
+        self.run_voting_phase()
+
+    def run_voting_phase(self):
+        self.output_area.append("Voting phase has begun.\n")
+
+        # Generate conversation summary once at the start
+        self.conversation_summary = summarise_conversation(self.current_conversation)
+        self.transcript.append(f"Conversation Phase {self.round_number} summary:\n")
+        self.transcript.append(self.conversation_summary + "\n")
+
+        # First, collect the votes from all AI characters
+        self.votes = {}  # Dictionary to store all votes from AI characters
+        self.awaiting_player_vote = True  # Indicate that we are waiting for the player's vote
+
+        for character in self.characters:
+            if self.characters[character]["alive"] and character != self.player_name:
+                worker = AIVoteWorker(character, self.characters, self.rules, self.conversation_summary, self.player_name)
+                worker.vote_ready.connect(self.collect_ai_vote)
+                worker.finished.connect(self.cleanup_worker)
+                worker.start()
+                self.active_workers.append(worker)
+
+        # Now prompt the player to vote
+        self.output_area.append("Please select who you want to vote for.\n")
+        self.display_vote_buttons()  # Display buttons for player's vote
+        # We will wait for the player's vote before tallying
+
+
+    def display_vote_buttons(self):
+        self.vote_buttons_widget = QWidget()
+        vote_layout = QVBoxLayout()
+
+        screen = QGuiApplication.primaryScreen()  # Get the primary screen
+        screen_size = screen.size()  # Get screen size
+        screen_width = screen_size.width()
+        conversation_button_font_size = max(int(32 *(screen_width/2560)), 18)
+
+        # Create buttons for each alive character (except the player)
+        for character in self.characters:
+            if self.characters[character]["alive"] and character != self.player_name:
+                vote_button = QPushButton(f"Vote for {character}", self)
+                vote_button.setStyleSheet(f"""
+                    QPushButton {{
+                        font-size: {int(conversation_button_font_size)}px;
+                        padding: 5px;
+                        color: white;
+                    }}
+                    QPushButton:hover {{
+                        color: #808080;
+                    }}
+                """)
+                vote_button.clicked.connect(lambda _, c=character: self.player_vote(c))
+                vote_layout.addWidget(vote_button)
+
+        self.vote_buttons_widget.setLayout(vote_layout)
+        self.centralWidget().layout().addWidget(self.vote_buttons_widget)
+
+    def collect_player_vote(self, vote):
+        # Store player's vote
+        self.votes[self.player_name] = vote
+        self.output_area.append(f"You voted for {vote}.\n")
+
+        # Mark that we've received the player's vote
+        self.awaiting_player_vote = False
+
+        # Check if all AI votes are collected, if so, tally the votes
+        self.tally_votes()
+
+    def player_vote(self, selected_character):
+        self.output_area.append(f"You voted for {selected_character}.\n")
+        self.transcript.append(f"Voting Phase {self.round_number} results: \n")
+        self.transcript.append(f"You voted for {selected_character}.\n")
+        self.votes[self.player_name] = selected_character
+
+        # Hide the voting buttons after the player has voted
+        self.vote_buttons_widget.hide()
+
+        # Once player votes, tally all votes
+        self.tally_votes()
+
+    def collect_ai_vote(self, character, vote):
+        self.votes[character] = vote
+        if len(self.active_workers) == 1:
+            self.setEnabled(True)
+
+        # Check if all AI votes and player vote are collected
+        if not self.awaiting_player_vote:
+            self.tally_votes()
+
+    def tally_votes(self):
+        for character in self.characters:
+            if self.characters[character]["alive"]:
+                if self.votes[character] == "NONE":
+                    self.output_area.append(f"{character} voted to skip.\n")
+                    self.transcript.append(f"{character} voted to skip.\n")
+                else:
+                    self.output_area.append(f"{character} voted for {self.votes[character]}.\n")
+                    self.transcript.append(f"{character} voted for {self.votes[character]}.\n")
+
+        # Ensure we have all votes (AI and player)
+        total_alive = len([char for char in self.characters if self.characters[char]["alive"]])
+        if len(self.votes) < total_alive:
+            return  # Wait until all votes are collected
+
+        # Now that we have all votes, tally them
+        vote_counts = Counter(self.votes.values())
+        most_common = vote_counts.most_common()
+
+        if most_common[0][1] == most_common[1][1]:
+            self.output_area.append(f"There was a tie between {most_common[0][0]} and {most_common[1][0]}. No one was voted out.\n")
+            self.transcript.append(f"There was a tie between {most_common[0][0]} and {most_common[1][0]}. No one was voted out.\n")
+            self.append_key_takeaways_tie(most_common[0][0], most_common[1][0])
+            # Continue to next action phase after tie
+            self.add_continue_button()
+
+        elif most_common[0][0] == "NONE":
+            self.output_area.append("The group decided not to rush to conclusions and no one was voted out.\n")
+            self.transcript.append("The group decided not to rush to conclusions and no one was voted out.\n")
+            # Continue to next action phase after "NONE"
+            self.add_continue_button()
+
+        else:
+            voted_out = most_common[0][0]
+            if voted_out == self.player_name:
+                final_score = 5 - sum(1 for character in self.characters if self.characters[character]["alive"])
+                #self.output_area.append(f"You were voted out! Unlucky, you lose. Final score = {final_score} / 5\n")
+                self.end_game_screen(final_score)  # End game logic
+            else:
+                self.output_area.append(f"{voted_out} was voted out! They were hanged for their crimes.\n")
+                self.transcript.append(f"{voted_out} was voted out! They were hanged for their crimes.\n")
+                if self.votes[voted_out] != "NONE":
+                    self.output_area.append(f"Their final words were 'Damn you {self.votes[voted_out]}! You'll pay for this!'")
+                    self.transcript.append(f"Their final words were 'Damn you {self.votes[voted_out]}! You'll pay for this!'")
+                self.characters[voted_out]["alive"] = False
+                self.append_key_takeaways_hang(voted_out)
+                # Continue to next action phase
+                self.add_continue_button()
+        
+        self.transcript.append("\n\n\n")
+
+    def add_continue_button(self):
+
+        screen = QGuiApplication.primaryScreen()  # Get the primary screen
+        screen_size = screen.size()  # Get screen size
+        screen_width = screen_size.width()
+        conversation_button_font_size = max(int(32 *(screen_width/2560)), 18)
+
+        # Create the "Continue" button
+        self.continue_button = QPushButton('Continue', self)
+        self.continue_button.setStyleSheet(f"""
+            QPushButton {{
+                font-size: {int(conversation_button_font_size*2)}px;
+                padding: 20px;
+                color: white;
+            }}
+            QPushButton:hover {{
+                color: #808080;
+            }}
+        """)
+        self.continue_button.clicked.connect(self.start_next_phase)
+
+        # Add the button below the output area
+        self.layout.addWidget(self.continue_button)
+
+    def start_next_phase(self):
+        # Remove the "Continue" button
+        self.continue_button.hide()
+
+        # Clear the output area if desired (optional)
+        self.output_area.clear()
+
+        # Move to the next action phase
+        self.run_action_phase()
+
+    def append_key_takeaways_tie(self, char1, char2):
+        # Update key-takeaways for characters involved in the tie and those who weren't
+        for character in self.characters:
+            if self.characters[character]["alive"]:
+                if character in [char1, char2]:
+                    self.characters[character]["key-takeaways"].append(
+                        f"During voting phase {self.round_number}, you ({character}) and {char1 if character == char2 else char2} were tied for most suspicious but were spared. The group trusts neither of you."
+                    )
+                else:
+                    if self.votes[character] != "NONE":
+                        self.characters[character]["key-takeaways"].append(
+                            f"During voting phase {self.round_number}, {char1} and {char2} were tied for most suspicious, but were spared. You voted for {self.votes[character]}, you are still suspscious of {self.votes[character]}!"
+                        )
+
+    def append_key_takeaways_hang(self, voted_out):
+        # Update key-takeaways for all characters after a hanging
+        if self.votes[voted_out] != "NONE":
+            for character in self.characters:
+                if self.characters[character]["alive"]:
+                    self.characters[character]["key-takeaways"].append(
+                        f"Previously {voted_out} was voted most suspicious and hanged. {voted_out} was later revealed to be innocent, but {voted_out} thought that {self.votes[voted_out]} must be the killer! In {voted_out}'s memory; you are suspiscious of {self.votes[voted_out]}!"
+                    )
+
+
+    def check_victory(self):
+        alive_npcs = [char for char in self.characters if self.characters[char]["alive"] and char != self.player_name]
+
+        # Determine if the player wins
+        if len(alive_npcs) <= 1:
+            score = 5 - sum(1 for char in self.characters if self.characters[char]["alive"])
+            self.end_game_screen(score)  # Pass the score to end_game_screen for final messaging
+            return True
+
+        return False
+        
+    def end_game_screen(self, final_score):
+        """Displays the game over screen with the final message."""
+        # Clear the output area and hide all buttons
+        self.room_buttons_widget.hide()
+        self.conversation_buttons_widget.hide()
+        self.interject_input.hide()
+        self.say_button.hide()
+
+        if final_score == 5:
+            message = "You win! A perfect score, you were able to deceive your way to a flawless victory.\n"
+        elif final_score == 4:
+            alive_npcs = [char for char in self.characters if self.characters[char]["alive"] and char != self.player_name]
+            message = f"You win! However, {alive_npcs[0]} figured out you must be the killer and decided to run before they ended up as your next victim.\n"
+        else:
+            message = "You were voted out! You were hanged for your crimes. \nBetter luck next time.\n\n"
+
+        # Append the final score and display the "Play Again" button
+        message += f"Final Score: {final_score}/5\n"
+        self.output_area.append(message)
+        # Create a layout for the game over screen
+        #game_over_layout = QVBoxLayout()
+
+        # Add the final message to the layout (output_area)
+        #game_over_layout.addWidget(self.output_area)
+
+        # Create the "Play Again" button
+        screen = QGuiApplication.primaryScreen()  # Get the primary screen
+        screen_size = screen.size()  # Get screen size
+        screen_width = screen_size.width()
+        conversation_button_font_size = max(int(32 *(screen_width/2560)), 18)
+
+        play_again_button = QPushButton("Play Again")
+        play_again_button.setStyleSheet(f"""
+            QPushButton {{
+                font-size: {int(conversation_button_font_size*2)}px;
+                padding: 20px;
+                color: white;
+            }}
+            QPushButton:hover {{
+                color: #808080;
+            }}
+        """)
+        play_again_button.clicked.connect(self.restart_game)
+        
+
+        # Add a spacer to push the button to the bottom
+        #game_over_layout.addStretch()
+        
+        # Add the "Play Again" button at the bottom center
+        self.layout.addWidget(play_again_button, alignment=Qt.AlignBottom | Qt.AlignCenter)
+
+        # # Create a container widget for the game over screen layout
+        # game_over_widget = QWidget()
+        # game_over_widget.setLayout(game_over_layout)
+
+        # # Set the game over layout as the central widget
+        # self.setCentralWidget(game_over_widget)
+        self.transcript_button.raise_()
+        
+
+    def display_play_again_button(self):
+        """Displays the 'Play Again' button at the bottom center of the window."""
+        
+        # Create the "Play Again" button
+        play_again_button = QPushButton("Play Again")
+        play_again_button.clicked.connect(self.restart_game)
+
+        # Create a layout for the button
+        play_again_layout = QVBoxLayout()
+
+        # Add the output area to the layout to keep it visible
+        play_again_layout.addWidget(self.output_area)
+
+        # Add a spacer to push the button to the bottom
+        play_again_layout.addStretch()
+
+        # Add the "Play Again" button at the bottom center
+        play_again_layout.addWidget(play_again_button, alignment=Qt.AlignCenter)
+
+        # Create a container widget for the layout
+        play_again_widget = QWidget()
+        play_again_widget.setLayout(play_again_layout)
+
+        # Set the play again layout as the central widget
+        self.setCentralWidget(play_again_widget)
+
+    def restart_game(self):
+        """Resets the game to its initial state."""
+        # Reset the central widget layout to the default UI
+        self.init_ui()
+        self.start_game()  # Restart the game
+    
+    def end_game(self):
+        self.output_area.append("Game Over. Thanks for playing!\n")
+
+    def run_conversation_phase(self):
+        if self.music_enabled:
+            music_url = QUrl.fromLocalFile("sounds/start.mp3")
+            self.media_player.setMedia(QMediaContent(music_url))
+            self.media_player.setVolume(10)  # Adjust volume
+            self.media_player.play()
+            self.media_player.mediaStatusChanged.connect(self.loop_music)
+
+        self.effect_player.setVolume(50)
+        self.transcript_button.show()
+        self.transcript_button.raise_()
+
+        self.output_area.clear()
+        if self.check_victory():
+            return  # End the game if the player wins
+        
+        self.output_area.append(f"Conversation Phase {self.round_number} begins! \n \n")
+
+
+        self.pass_button.setEnabled(False)
+        self.interject_button.setEnabled(False)
+        self.vote_button.setEnabled(False)  # Call vote button is enabled later in the conversation
+        self.conversation_buttons_widget.show()
+        self.secondary_output_area.show()
+        # Show the conversation buttons widget
+        # self.pass_button.show()
+        # self.interject_button.show()
+        # self.vote_button.show()
+        # self.say_button.show()
+        
+        # Initialize conversation variables
+        self.yap_counter = 0
+
+        self.current_conversation = []
+        self.most_recent_messageS = []
+
+        # Determine which characters are alive and dead
+        alive_characters = [char for char in self.characters if self.characters[char]["alive"]]
+        dead_characters = [char for char in self.characters if not self.characters[char]["alive"]]
+        available_rooms = [r for r in self.rooms if r not in self.old_crime_scenes]
+
+        for scene in self.new_crime_scenes:
+            if scene not in self.old_crime_scenes:
+                self.old_crime_scenes.append(scene)
+
+        alive_characters.append(self.player_name)  # Add the player to the list of alive characters
+        NPCs = [char for char in self.characters if self.characters[char]["alive"]]  # NPCs are the alive characters
+
+        # Choose the first character to answer the Detective's question
+        first_to_answer = random.choice(alive_characters)
+
+        # First question from the Detective
+        most_recent_message = f"Detective: {first_to_answer}, let's start with you. Where were you last night?"
+        formatted_message = f"""<p><span style="font-size: 16px;"><strong>Detective:</strong></span><br><span style="font-size: 16px; padding-left: 20px;">{first_to_answer}, let's start with you. Where were you last night?</span></p><br>"""
+        self.output_area.append(formatted_message)
+        self.most_recent_messageS.append(most_recent_message)
+        self.current_conversation.append(most_recent_message)
+
+        # Append basic information to each character's memory
+        for character in self.characters:
+            self.characters[character]["memory"].append(f" Action Phase {self.round_number} END \n")
+            self.characters[character]["memory"].append(f"\n BEGIN Day {self.round_number} (Conversation Phase {self.round_number}): \n Alive suspects = {alive_characters}, Dead suspects = {dead_characters}. \n")
+            self.characters[character]["memory"].append(f"The ONLY places / rooms able to be occupied last night = {available_rooms}, IMPORTANT: Anyone who claims to be anywhere other than one of these rooms (whether inside the house or not) is lying. \n All rooms are the same distance from each-other.")
+
+        for character in self.characters:
+            if self.characters[character]["alive"] == True:
+                print(self.characters[character]["memory"])
+
+        # If the first character to answer is the player, prompt for their response
+        if first_to_answer == self.player_name:
+            self.interject_input.show()  # Show input for the player to type their response
+            self.say_button.show()
+
+
+        # Now enter the conversation loop
+        self.alive_characters = alive_characters
+        self.NPCs = NPCs
+
+        # Reset the visibility of conversation buttons
+        # self.pass_button.setEnabled(True)
+        # self.interject_button.setEnabled(True)
+        # self.vote_button.setEnabled(False)
+
+        self.run_conversation_loop()  # Begin conversation loop
+    
+    def run_single_response(self, mentioned):
+        # Start the background worker for generating a single response
+        self.single_response_worker = SingleResponseWorker(
+            mentioned, 
+            self.characters, 
+            self.rules, 
+            self.current_conversation, 
+            self.most_recent_messageS[-1]
+        )
+        # Connect the worker result signal to handle the response when it's ready
+        self.single_response_worker.result_ready.connect(self.handle_single_response)
+        # Start the worker
+        self.single_response_worker.start()
+
+    def handle_single_response(self, mentioned, response):
+        # This function runs when the worker thread is done
+        most_recent_message = f"{mentioned}: {response}"
+        #self.output_area.append(most_recent_message + "\n")
+        formatted_message = f"""<p><span style="font-size: 16px;"><strong>{mentioned}:</strong></span><br><span style="font-size: 16px; padding-left: 20px;">{response}</span></p><br>"""
+        self.output_area.append(formatted_message)
+
+        # Move the cursor to the end of the document
+        cursor = self.output_area.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.output_area.setTextCursor(cursor)
+
+        # Ensure the scroll bar reflects the change
+        self.output_area.ensureCursorVisible()
+
+
+        #self.output_area.append(formatted_message)
+        self.current_conversation.append(most_recent_message)
+        self.most_recent_messageS.append(most_recent_message)
+
+        # Continue the conversation loop after receiving the response
+        self.run_conversation_loop()
+    
+    def run_multiple_responses(self):
+        # Start the background worker for generating multiple responses
+        self.multiple_response_worker = MultipleResponseWorker(
+            self.characters, 
+            self.rules, 
+            self.current_conversation, 
+            self.most_recent_messageS, 
+            self.NPCs
+        )
+        # Connect the worker result signal to handle the responses when they're ready
+        self.multiple_response_worker.all_responses_ready.connect(self.handle_multiple_responses)
+        # Start the worker
+        self.multiple_response_worker.start()
+
+    def handle_multiple_responses(self, responses, conversation_summary):
+        # Start the worker to select the best response based on all NPC responses
+        worker = SelectBestResponseWorker(responses, conversation_summary, self.most_recent_messageS, self.NPCs)
+        worker.best_response_ready.connect(self.handle_best_response)
+        worker.finished.connect(self.cleanup_worker)  # Connect to cleanup after the worker finishes
+        worker.start()
+
+        # Keep track of the active worker
+        self.active_workers.append(worker)
+
+    def cleanup_worker(self):
+        # Remove the finished worker from the active_workers list
+        for worker in self.active_workers:
+            if worker.isFinished():
+                self.active_workers.remove(worker)
+
+    def handle_best_response(self, best_response, speaker):
+        # Handle the best response from the SelectBestResponseWorker
+        most_recent_message = f"{speaker}: {best_response}"
+        #self.output_area.append(most_recent_message + "\n")
+
+        formatted_message = f"""<p><span style="font-size: 16px;"><strong>{speaker}:</strong></span><br><span style="font-size: 16px; padding-left: 20px;">{best_response}</span></p><br>"""
+        self.output_area.append(formatted_message)
+
+        # Move the cursor to the end of the document
+        cursor = self.output_area.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.output_area.setTextCursor(cursor)
+
+        # Ensure the scroll bar reflects the change
+        self.output_area.ensureCursorVisible()
+
+        self.current_conversation.append(most_recent_message)
+        self.most_recent_messageS.append(most_recent_message)
+
+        # Continue conversation loop
+        self.run_conversation_loop()
+
+    def remove_last_message(self):
+        # Move the cursor to the end
+        cursor = self.output_area.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        
+        # Move the cursor to the beginning of the last block (last paragraph)
+        cursor.movePosition(QTextCursor.PreviousBlock, QTextCursor.KeepAnchor)
+        
+        # Remove the selected block (last message)
+        cursor.removeSelectedText()
+        
+        # Optionally, remove the newline left over from the previous message
+        cursor.deletePreviousChar()
+
+
+
+
+
+class SingleResponseWorker(QThread):
+    result_ready = pyqtSignal(str, str)  # Emit mentioned and response
+
+    def __init__(self, mentioned, characters, rules, current_conversation, most_recent_message):
+        super().__init__()
+        self.mentioned = mentioned
+        self.characters = characters
+        self.rules = rules
+        self.current_conversation = current_conversation
+        self.most_recent_message = most_recent_message
+
+    def run(self):
+        # Long-running task: Generate a response for the mentioned character
+        conversation_summary = summarise_conversation(self.current_conversation)
+        response = generate_conversation_speech(
+            self.mentioned, 
+            self.characters, 
+            self.rules, 
+            conversation_summary, 
+            self.most_recent_message
+        ).replace("{", "").replace("}", "")
+        self.result_ready.emit(self.mentioned, response) 
+
+class GenerateResponseWorker(QThread):
+    response_ready = pyqtSignal(str, str)  # Signal to emit character and response
+
+    def __init__(self, character, characters, rules, conversation_summary, most_recent_message):
+        super().__init__()
+        self.character = character
+        self.characters = characters
+        self.rules = rules
+        self.conversation_summary = conversation_summary
+        self.most_recent_message = most_recent_message
+
+    def run(self):
+        # Long-running task: Generate a response for the character
+        response = generate_conversation_speech(
+            self.character, 
+            self.characters, 
+            self.rules, 
+            self.conversation_summary, 
+            self.most_recent_message
+        ).replace("{", "").replace("}", "")
+        self.response_ready.emit(self.character, response)  # Emit character and response
+
+class MultipleResponseWorker(QThread):
+    all_responses_ready = pyqtSignal(dict, str) 
+
+    def __init__(self, characters, rules, current_conversation, most_recent_messageS, NPCs):
+        super().__init__()
+        self.characters = characters
+        self.rules = rules
+        self.current_conversation = current_conversation
+        self.most_recent_messageS = most_recent_messageS
+        self.NPCs = [n for n in NPCs if n != self.most_recent_messageS[-1].split(":")[0]]
+        self.responses = {}  # To store all the responses
+        self.workers = []
+
+    def run(self):
+        # Step 1: Summarise the conversation (this part is not parallelized)
+        conversation_summary = summarise_conversation(self.current_conversation)
+
+        # Step 2: Create workers for each NPC to generate responses in parallel
+        for npc in self.NPCs:
+            worker = GenerateResponseWorker(npc, self.characters, self.rules, conversation_summary, self.most_recent_messageS[-1])
+            worker.response_ready.connect(self.collect_response)
+            worker.finished.connect(self.check_all_workers_done)  # Check if all workers are done
+            self.workers.append(worker)
+            worker.start()
+
+        self.conversation_summary = conversation_summary
+
+    def collect_response(self, character, response):
+        # Collect each response as workers finish
+        self.responses[character] = response
+
+    def check_all_workers_done(self):
+        # Check if all workers are finished
+        if all(worker.isFinished() for worker in self.workers):
+            # Emit the combined responses signal
+            self.all_responses_ready.emit(self.responses, self.conversation_summary)
+            self.cleanup_workers()
+
+    def cleanup_workers(self):
+        # Clean up each worker after all are finished
+        for worker in self.workers:
+            worker.deleteLater()  # Delete the worker object safely
+        self.workers.clear()  # Clear the worker list
+ 
+class SelectBestResponseWorker(QThread):
+    best_response_ready = pyqtSignal(str, str)  # Emit best response and the speaker
+
+    def __init__(self, responses, conversation_summary, most_recent_messageS, NPCs):
+        super().__init__()
+        self.responses = responses
+        self.conversation_summary = conversation_summary
+        self.most_recent_messageS = most_recent_messageS
+        self.NPCs = [n for n in NPCs if n != self.most_recent_messageS[-1].split(":")[0]]
+
+    def run(self):
+        # Long-running task: Select the best response
+        best_response, speaker = select_best_response(self.responses, self.conversation_summary, self.most_recent_messageS, self.NPCs)
+        self.best_response_ready.emit(best_response, speaker)
+
+class AIVoteWorker(QThread):
+    vote_ready = pyqtSignal(str, str)  # Signal to emit the AI character and their vote
+
+    def __init__(self, character, characters, rules, conversation_summary, player_name):
+        super().__init__()
+        self.character = character
+        self.characters = characters
+        self.rules = rules
+        self.conversation_summary = conversation_summary
+        self.player_name = player_name  # Store the player_name
+
+    def run(self):
+        vote = generate_voting_prompt(self.character, self.characters[self.character]["memory"], self.rules, self.conversation_summary)
+        
+        # Ensure AI doesn't vote for themselves or invalid choices
+        while vote == self.character or (vote != self.player_name and vote not in self.characters and vote != "NONE"):
+            vote = random.choice([char for char in self.characters if char != self.character and self.characters[char]["alive"]])
+        
+        self.vote_ready.emit(self.character, vote)  # Emit the vote result
+
+
+class TranscriptWindow(QWidget):
+    def __init__(self, transcript, font_family, parent=None):
+        super().__init__(parent)
+
+        # Store the transcript for the text area
+        self.transcript = transcript
+
+        # Set up the window without native decorations
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setStyleSheet(f"background-color: #3A3A3A;")
+
+        # Create a vertical layout
+        layout = QVBoxLayout(self)
+
+        # Create custom header with a title and close button
+        header = QWidget()
+        header_layout = QHBoxLayout()
+        header.setLayout(header_layout)
+        header.setStyleSheet("background-color: #2E2E2E; padding: 5px; border: 3px solid white;")
+
+        title = QLabel("Transcript")
+        title.setStyleSheet(f"color: #FFFFFF; font-family: {font_family}; font-size: 20px;")
+        title.setAlignment(Qt.AlignCenter)
+
+        # Close button
+        close_button = QPushButton("X")
+        close_button.setFixedSize(30, 30)
+        close_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #E74C3C;
+                color: white;
+                font-family: {font_family};
+                font-size: 16px;
+                border-radius: 5px;
+            }}
+            QPushButton:hover {{
+                background-color: #C0392B;  /* Darker red on hover */
+            }}
+        """)
+        close_button.clicked.connect(self.close)
+
+        # Add title and close button to the header
+        header_layout.addWidget(title, alignment=Qt.AlignLeft)
+        header_layout.addStretch(1)  # Push close button to the right
+        header_layout.addWidget(close_button, alignment=Qt.AlignRight)
+
+        # Add the header to the main layout
+        layout.addWidget(header)
+
+        # Create the transcript text area
+        transcript_area = QTextEdit()
+        transcript_area.setReadOnly(True)
+        transcript_area.setText("\n".join(self.transcript))  # Assuming transcript is a list of messages
+        transcript_area.setStyleSheet(f"background-color: #1E1E1E; color: #E0E0E0;  border: 1px solid white; font-family: {font_family}; font-size: 12px;")
+        layout.addWidget(transcript_area)
+
+        cursor = transcript_area.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        transcript_area.setTextCursor(cursor)
+
+        self.adjust_window_size()
+
+        # Make window resizable
+        self.setLayout(layout)
+        self.resize(500, self.dynamic_height)
+
+        # Variables for dragging the window
+        self.old_pos = None
+
+    def adjust_window_size(self):
+        line_count = len(self.transcript)
+        line_height = 100  # Approximate line height, can be adjusted based on font size
+        min_height = 200  # Minimum window height
+        max_height = 900  # Maximum window height
+
+        self.dynamic_height = min(max_height, max(min_height, line_count * line_height + 100))  # +100 for header and padding
+
+    # Override mousePressEvent for dragging
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.old_pos = event.globalPos()
+
+    # Override mouseMoveEvent to update window position during dragging
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self.old_pos:
+            delta = QPoint(event.globalPos() - self.old_pos)
+            self.move(self.x() + delta.x(), self.y() + delta.y())
+            self.old_pos = event.globalPos()
+
+class HowToPlayWindow(QWidget):
+    def __init__(self, font_family, parent=None):
+        super().__init__(parent)
+
+        # Set up the window without native decorations
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setStyleSheet(f"background-color: #2A2A2A;")
+
+        # Create a vertical layout
+        layout = QVBoxLayout(self)
+
+        # Create custom header with a title, minimize, and close buttons
+        header = QWidget()
+        header_layout = QHBoxLayout()
+        header.setLayout(header_layout)
+        header.setStyleSheet("background-color: #2E2E2E; padding: 5px; border: 3px solid white;")
+
+        title = QLabel("How to Play")
+        title.setStyleSheet(f"color: #FFFFFF; font-family: {font_family}; font-size: 20px;")
+        title.setAlignment(Qt.AlignCenter)
+
+        # Minimize button
+        minimize_button = QPushButton("-")
+        minimize_button.setFixedSize(30, 30)
+        minimize_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #FFA500;  /* Orange color */
+                color: white;
+                font-family: {font_family};
+                font-size: 16px;
+                border-radius: 5px;
+            }}
+            QPushButton:hover {{
+                background-color: #FF8C00;  /* Darker orange on hover */
+            }}
+        """)
+        minimize_button.clicked.connect(self.showMinimized)
+
+        # Close button
+        close_button = QPushButton("X")
+        close_button.setFixedSize(30, 30)
+        close_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #E74C3C;
+                color: white;
+                font-family: {font_family};
+                font-size: 16px;
+                border-radius: 5px;
+            }}
+            QPushButton:hover {{
+                background-color: #C0392B;  /* Darker red on hover */
+            }}
+        """)
+        close_button.clicked.connect(self.close)
+
+        # Add title, minimize, and close buttons to the header
+        header_layout.addWidget(title, alignment=Qt.AlignLeft)
+        header_layout.addStretch(1)  # Push buttons to the right
+        header_layout.addWidget(minimize_button, alignment=Qt.AlignRight)
+        header_layout.addWidget(close_button, alignment=Qt.AlignRight)
+
+        # Add the header to the main layout
+        layout.addWidget(header)
+
+        # Create the how-to-play text area
+        how_to_play_area = QTextEdit()
+        how_to_play_area.setReadOnly(True)
+        how_to_play_area.setText("\n\nWelcome to AlibAi. \n\n\n\n\nThe game progresses in 3 phases, Action Phases, Conversation Phases and Voting Phases. \n\n\n\n\nDuring Action Phases you will select a room to stay the night:\n\n If the room is occupied by a single character, you will kill them. \n\n If the room is occupied by 2 characters, you must select which to kill.\n\n If the room is empty, you must select again until you find a victim.\n\n\n\n\nDuring Conversation Phases the group will try to figure out who the killer is: \n\n If you wish to direct a question to a specific character, capitalize their name only. (e.g. 'to Dave not debra') \n\n It is not unlikely that an AI character will 'hallucinate' or state something that is prove-ably wrong.\n Use this to your advantage. \n\n\n\n\nOnce the Conversation reaches a certain length you will be able to call a vote:\n\n The character with the most votes will be hanged. \n\n\n\n\nGood Luck! \n\n\n\n\nFeel free to minimise / Alt + TAB to keep this in the background.")
+        how_to_play_area.setStyleSheet(f"background-color: #1E1E1E; color: #E0E0E0;  border: 1px solid white; font-family: {font_family}; font-size: 12px;")
+        layout.addWidget(how_to_play_area)
+
+        cursor = how_to_play_area.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        how_to_play_area.setTextCursor(cursor)
+
+        # Set the fixed size for the window
+        self.setLayout(layout)
+        self.resize(1400, 900)  # Static window size
+
+        # Variables for dragging the window
+        self.old_pos = None
+
+    # Override mousePressEvent for dragging
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.old_pos = event.globalPos()
+
+    # Override mouseMoveEvent to update window position during dragging
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self.old_pos:
+            delta = QPoint(event.globalPos() - self.old_pos)
+            self.move(self.x() + delta.x(), self.y() + delta.y())
+            self.old_pos = event.globalPos()
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = GameWindow()
+    window.show()
+    sys.exit(app.exec_())
