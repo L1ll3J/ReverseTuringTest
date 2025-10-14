@@ -1,5 +1,8 @@
 # Ignore environment variables
 .env
+compile_command.txt
+dist/
+build/
 
 # Ignore compiled Python files
 *.pyc
@@ -7,6 +10,14 @@ __pycache__/
 
 # Ignore virtual environment
 .venv/
+AlibAi.zip
 
 # Ignore debug script
 debug.py
+
+# Ignore compiling script (with API key)
+mainCOMP.py
+main.spec
+
+# Ignore Steampage assets
+screenshots/
