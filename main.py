@@ -15,7 +15,6 @@ from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 # Load API keys from environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-
 # Initialize API
 openai.api_key = OPENAI_API_KEY
 
@@ -132,52 +131,6 @@ def generate_voting_prompt(character, memory, rules, conversation_summary):
     #print(f"{character} votes for: {vote}")
     return vote
 
-# Collect all votes
-def ai_vote_for_killer(player_name, characters, conversation_summary, rules, round_number):
-    """Conduct the voting phase where each alive character votes for who they think the killer is."""
-    votes = {}
-    votes[player_name] = input("Who are you voting for?")
-
-    for character in characters:
-        if characters[character]["alive"]:
-            # Prompt the AI to vote for the killer
-            vote = generate_voting_prompt(character, characters[character]["memory"], rules, conversation_summary)
-            
-            # Ensure they don't vote for themselves
-            while vote == character or (vote != player_name and vote not in characters and vote != "NONE"):
-                vote = random.choice([char for char in characters if char != character and characters[char]["alive"]])
-
-            votes[character] = vote
-            print(f"{character} voted for {vote}.")
-        
-    vote_counts = Counter(votes.values())
-    most_common = vote_counts.most_common()
-
-    if most_common[0][1] == most_common[1][1]:
-        print(f"There was a tie between {most_common[0][0]} and {most_common[1][0]}, no-one was voted out.")
-    elif most_common[0][0] == "NONE":
-        print(f"The group decided not to rush to conclusions and no-one was voted out.")
-
-    else:
-        voted_out = most_common[0][0]
-        if voted_out == player_name:
-            final_score = 5 - sum(1 for character in characters if characters[character]["alive"])
-            print(f"You were voted out! Unlucky, you lose. Final score = {final_score} / 5")
-            return characters, True
-        else:
-            print(f"{voted_out} was voted out! They were hanged for their crimes.")
-            characters[voted_out]["alive"] = False
-    return characters, False
-
-
-
-room_facts = {
-    "Attic": "There is a distinct humming noise.",
-    "Kitchen": "The oven is broken.",
-    "Library": "The smell of old books is overwhelming.",
-    "Basement": "There are strange, echoing noises.",
-    "Cellar": "There are 4 kegs of beer."
-}
 
 
 def find_characters_yet_to_speak(current_conversation, alive_characters):
@@ -231,345 +184,6 @@ def check_direct_address(most_recent_message, characters, player_name):
     # Return the last mentioned character or None if none are found
     return last_mentioned_character
 
-# # Conversation Phase
-def conversation_stage(player_name, rooms, characters, old_crime_scenes, round_number):
-    print("\nConversation Phase begins. Detective asks the first question.")
-
-    short_term_memory = 2
-    yap_counter = 0
-    minimum_to_call_vote = 20 #Remember to change back to 20!
-
-    current_conversation = []
-    most_recent_messageS = []
-
-    alive_characters = [char for char in characters if characters[char]["alive"]]
-    dead_characters = [char for char in characters if not characters[char]["alive"]]
-    available_rooms = [r for r in rooms if r not in old_crime_scenes]
-
-
-    alive_characters.append(player_name)
-    NPCs = [char for char in characters if characters[char]["alive"]]
-
-
-    first_to_answer = random.choice(alive_characters)
-
-    most_recent_message = f"Detective: {first_to_answer}, let's start with you. Where were you last night? \n"
-    print(most_recent_message)
-    most_recent_messageS.append(most_recent_message)
-    current_conversation.append(most_recent_message)
-
-    if first_to_answer == player_name:
-        print(f"Possible Locations: {', '.join(available_rooms)}")
-        player_response = handle_player_interjection()
-        most_recent_message = f"{player_name}: {player_response}"
-        most_recent_messageS.append(most_recent_message)
-        current_conversation.append(most_recent_message)
-    
-    
-    for character in characters:
-        characters[character]["memory"].append(f"\n BEGIN Day {round_number} (Conversation Phase {round_number}): \n Alive suspects = {alive_characters}, Dead suspects = {dead_characters}. \n")
-        characters[character]["memory"].append(f"Rooms that were able to be occupied last night = {available_rooms}, anyone who claims to be anywhere other than one of these rooms is lying. \n")
-    
-    while True:
-
-        #Ensure no-one gets away with saying nothing
-        if len(current_conversation) >= 6 and len(current_conversation) % 3 == 0:
-            unspoken = find_characters_yet_to_speak(current_conversation, alive_characters)
-            if len(unspoken) >= 1:
-                forced_to_speak_up = random.choice(unspoken)
-                most_recent_message = f"Detective: Hold on a moment. {forced_to_speak_up}; you've remained awfully quiet - care to explain where you were last night?"
-                #print(most_recent_message, "\n")
-                most_recent_messageS.append(most_recent_message)
-                current_conversation.append(most_recent_message)
-
-        #After a certain length, player can call the vote.
-        if len(current_conversation) == minimum_to_call_vote: 
-            print("CONVERSATION LENGTH REQUIREMENT MET: TYPE 'vote' AT ANY TIME TO INITIATE VOTING")
-
-        mentioned = check_direct_address(most_recent_message, characters, player_name)
-        #print("Mentioned: ", mentioned)
-        if mentioned != None and mentioned != most_recent_message.split(":")[0]:
-            if mentioned != player_name:
-                if yap_counter >= 3 and player_interject():
-                    player_response = handle_player_interjection()
-                    if (player_response.strip().lower() == "vote" and len(current_conversation) >= minimum_to_call_vote):
-                        conversation_summary = summarise_conversation(current_conversation)
-                        characters, game_over = ai_vote_for_killer(player_name, characters, conversation_summary, rules, round_number)
-                        return characters, game_over
-
-                    most_recent_message = f"{player_name}: {player_response}"
-                    yap_counter = 0
-                else:
-                    conversation_summary = summarise_conversation(current_conversation)
-                    response = generate_conversation_speech(mentioned, characters, rules, conversation_summary, most_recent_message).replace("{", "").replace("}", "")
-                    most_recent_message = f"{mentioned}: {response}"
-                    yap_counter += 1
-                    print(most_recent_message, "\n")
-
-                most_recent_messageS.append(most_recent_message)
-                if len(most_recent_messageS) > short_term_memory :
-                    most_recent_messageS.pop(0)
-                current_conversation.append(most_recent_message)
-            else:
-                player_response = handle_player_interjection()
-
-                if (player_response.strip().lower() == "vote" and len(current_conversation) >= minimum_to_call_vote):
-                    conversation_summary = summarise_conversation(current_conversation)
-                    characters, game_over = ai_vote_for_killer(player_name, characters, conversation_summary, rules, round_number)
-                    return characters, game_over
-                most_recent_message = f"{player_name}: {player_response}"
-
-                most_recent_messageS.append(most_recent_message)
-                if len(most_recent_messageS) > short_term_memory :
-                    most_recent_messageS.pop(0)
-                current_conversation.append(most_recent_message)
-
-                yap_counter = 0
-
-        
-        else:
-            if most_recent_message.split(":")[0] != player_name and player_interject():
-
-                player_response = handle_player_interjection()
-                if (player_response.strip().lower() == "vote" and len(current_conversation) >= minimum_to_call_vote):
-                    conversation_summary = summarise_conversation(current_conversation)
-                    characters, game_over = ai_vote_for_killer(player_name, characters, conversation_summary, rules, round_number)
-                    return characters, game_over
-                most_recent_message = f"{player_name}: {player_response}"
-
-                most_recent_messageS.append(most_recent_message)
-                if len(most_recent_messageS) > short_term_memory :
-                    most_recent_messageS.pop(0)
-                current_conversation.append(most_recent_message)
-
-                yap_counter = 0
-                
-            else:
-                #print("No direct address detected and player passes")
-                conversation_summary = summarise_conversation(current_conversation)
-                #print(conversation_summary)
-                responses = generate_responses(characters, rules,  conversation_summary, most_recent_messageS)
-                best_response, speaker = select_best_response(responses, conversation_summary, most_recent_messageS, NPCs)
-                most_recent_message = f"{speaker}: {best_response}"
-
-                print(most_recent_message, "\n")
-                most_recent_messageS.append(most_recent_message)
-                if len(most_recent_messageS) > short_term_memory :
-                    most_recent_messageS.pop(0)
-                current_conversation.append(most_recent_message)
-
-
-        
-        if len(current_conversation) >= 40:
-            conversation_summary = summarise_conversation(current_conversation)
-            characters, game_over = ai_vote_for_killer(player_name, characters, conversation_summary, rules, round_number)
-            return characters, game_over
-
-
-def action_phase(player_name, rooms, characters, old_crime_scenes, round_number):
-    print(f"Action phase {round_number} begins.\n")
-    new_crime_scenes = []
-    # Room assignments for each character
-    room_assignments = {room: [] for room in rooms}
-    
-    # Randomly assign each NPC to a room
-    for character in characters:
-        if characters[character]["alive"]:
-            room = random.choice([r for r in rooms if r not in old_crime_scenes])
-            room_assignments[room].append(character)
-    
-    # Display room assignments for debugging purposes
-    print("Room Assignments:", room_assignments)
-
-    # Prompt the player to choose a room
-    rooms_visited = []
-    available_rooms = [r for r in rooms if r not in old_crime_scenes]
-    print(f"Available Rooms: {available_rooms}")
-    player_room = input(f"{player_name}, choose a room to stay the night: ")
-
-    # Check if the player's chosen room is valid
-    while player_room not in available_rooms:
-        print(f"{player_room} is not a valid room. Please choose from {available_rooms}. \n")
-        player_room = input(f"{player_name}, choose a room to stay the night: ")
-
-    # Handle the outcome based on the occupants of the chosen room
-    occupants = room_assignments[player_room]
-    rooms_visited.append(player_room)
-    new_crime_scenes.append(player_room)
-
-    had_to_change_rooms = False
-
-
-    while len(occupants) == 0:
-        # No one is in the room, player gets another choice
-        had_to_change_rooms = True
-        print(f"The {player_room} is empty. You must move to another room but {player_room} will also become a crime scene. \n")
-
-        
-        
-        available_rooms = [r for r in rooms if r not in new_crime_scenes and r not in old_crime_scenes]
-
-        player_room = input(f"{player_name}, choose another room: ")
-        
-        while player_room not in available_rooms:
-            print(f"{player_room} is not a valid room. Please choose from {available_rooms}. \n")
-            player_room = input(f"{player_name}, choose a room to stay the night: ")
-        
-        rooms_visited.append(player_room)
-        new_crime_scenes.append(player_room)
-        occupants = room_assignments[player_room]
-
-    #Re-Initialise Action-Phase Information, Including Key Take-Aways From Previous Nights
-    for character in characters:
-        if characters[character]["alive"] == True:
-            characters[character]["memory"] = [f"BEGIN Action Phase Information: \n"]
-            if len(characters[character]["key-takeaways"]) >=2:
-                for key_takeaway in characters[character]["key-takeaways"]:
-                        characters[character]["memory"].append(key_takeaway)
-
-    if len(occupants) == 1:
-        # One character in the room, kill them
-        victim = occupants[0]
-        characters[victim]["alive"] = False
-        new_crime_scenes.append(player_room)
-        print(f"You killed {victim} in the {player_room}. The {player_room} is now a crime scene.")
-        
-    
-    elif len(occupants) == 2:
-        # 2 characters, player must choose who to kill
-        print(f"The {player_room} is occupied by {', '.join(occupants)}.")
-        victim = input(f"{player_name}, choose a character to kill: {occupants}: ")
-        
-        while victim not in occupants:
-            print(f"{victim} is not in the {player_room}.")
-            victim = input(f"{player_name}, choose a character to kill: {occupants}: ")
-
-        characters[victim]["alive"] = False
-        new_crime_scenes.append(player_room)
-        print(f"You killed {victim} in the {player_room}. The {player_room} is now a crime scene.")
-        
-        # Update memory for the witness
-        for occupant in occupants:
-            if occupant != victim:
-                characters[occupant]["key-takeaways"].append(f"{player_name} is the killer! You witnessed {player_name} kill {victim} in the {player_room} during a previous night! This is an un-deniable fact. \n")
-
-                if had_to_change_rooms:
-                    characters[occupant]["memory"].append(f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {player_room} with {player_name} and {victim} and no-one else. \n {player_name} arrives late from another room and you witness {player_name} killing {victim} in the {player_room} - {player_name} is the killer. \n Expect {player_name} to lie, cheat and do everything possible to shift blame, you must defend your innocence. \n Since you know for a fact that {player_name} is the killer, DO NOT EVER ATTEMPT TO CAST SUSPISCION ON ANYONE OTHER THAN {player_name}. \n")
-                else:
-                    characters[occupant]["memory"].append(f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {player_room} with {player_name} and {victim} and no-one else. \n You witness {player_name} killing {victim} in the {player_room} - {player_name} is the killer. \n Expect {player_name} to lie, cheat and do everything possible to shift blame, you must defend your innocence. \n Since you know for a fact that {player_name} is the killer,  DO NOT EVER ATTEMPT TO CAST SUSPISCION ON ANYONE OTHER THAN {player_name}. \n")
-        
-    
-    else:
-        # Multiple characters, player must choose who to kill
-        print(f"The {player_room} is occupied by {', '.join(occupants)}.")
-        victim = input(f"{player_name}, choose a character to kill: {occupants}: ")
-        
-        while victim not in occupants:
-            print(f"{victim} is not in the {player_room}.")
-            victim = input(f"{player_name}, choose a character to kill: {occupants}: ")
-
-        characters[victim]["alive"] = False
-        new_crime_scenes.append(player_room)
-        print(f"You killed {victim} in the {player_room}. The {player_room} is now a crime scene.")
-        
-        # Update memory for each witness
-        for occupant in occupants:
-            if occupant != victim:
-                other_occupants = [o for o in occupants if (o != occupant) and (o != victim)]
-                characters[occupant]["key-takeaways"].append(f"{player_name} is the killer! You witnessed {player_name} kill {victim} during a previous night! This is an un-deniable fact; {', and'.join(other_occupants)} were there with you to witness and can back you up! \n")
-
-                if had_to_change_rooms:
-                    characters[occupant]["memory"].append(f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {player_room} with {player_name}, {', '.join(other_occupants)} and {victim} and no-one else. \n {player_name} arrives late from another room and you witness {player_name} killing {victim} in the {player_room} - {player_name} is the killer. \n Expect {player_name} to lie, cheat and do everything possible to shift blame, you must defend your innocence. \n Since you know for a fact that {player_name} is the killer, DO NOT EVER ATTEMPT TO CAST SUSPISCION ON ANYONE OTHER THAN {player_name}. \n")
-                else:
-                    characters[occupant]["memory"].append(f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {player_room} with {player_name}, {', '.join(other_occupants)} and {victim} and no-one else. \n You witness {player_name} killing {victim} in the {player_room} - {player_name} is the killer. \n Expect {player_name} to lie, cheat and do everything possible to shift blame, you must defend your innocence. \n Since you know for a fact that {player_name} is the killer, DO NOT EVER ATTEMPT TO CAST SUSPISCION ON ANYONE OTHER THAN {player_name}. \n")
-
-
-                characters[occupant]["memory"].append(f"{' and '.join(other_occupants)} also spent the night with you in the {player_room} and also witnessed the murder, they are NOT the killer and can validate your testimony. \n")
-        
-    
-    # Update memory for other characters not in the room
-    for room, occupants in room_assignments.items():
-        if room != player_room:
-            for occupant in occupants:
-                if characters[occupant]["alive"]:
-
-                    if len(occupants) >=2:
-                        other_occupants = [o for o in occupants if (o != occupant)]
-                        
-                        characters[occupant]["key-takeaways"].append(f"You know with certainty that {' and '.join(other_occupants)} is / are NOT the killer! You spent a previous night with them while the killer was active and they never left your sight. You MUST defend {' and '.join(other_occupants)} from suspiscion since you are certain of their innocence!")
-
-                        characters[occupant]["memory"].append(
-                            f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {room}, {' and '.join(other_occupants)} was there with you and no-one else. \n"
-                        )
-                        characters[occupant]["memory"].append(
-                            f"Because of this you know for a FACT that {' and '.join(other_occupants)} are NOT the killer because you can support their alibi, you MUST assert the innocence of {' and '.join(other_occupants)} and defend them from suspiscion. \n"
-                        )
-                    else:
-                        characters[occupant]["memory"].append(
-                            f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {room}, no-one else was there with you. \n \n"
-                        )
-
-                    characters[occupant]["memory"].append(f"In the morning the Detective reveals to everyone that {victim}'s corpse was found in the {player_room}. \n")
-
-                    if had_to_change_rooms:
-                        characters[occupant]["memory"].append(f"The killer must be someone who spent the night in the {player_room}, however the Detective also tells everyone that the killer silently made their way from the {' to the '.join(rooms_visited)} during the night and so all have been marked as crime scenes. \n")
-                    else:
-                        characters[occupant]["memory"].append(f"The killer must be someone who spent the night in the {player_room}. \n")
-
-    for character in characters:
-        if characters[character]["alive"]:
-            characters[character]["memory"].append(f" \n END Action Phase Information \n")
-            #print("\n".join(characters[character]["memory"]))
-            #print(character, characters[character]["key-takeaways"])
-    
-    return characters, new_crime_scenes
-
-# Handle player interjection
-def handle_player_interjection():
-    player_input = input("What would you like to say?")
-    #print(f"You: {player_input} \n")
-    return player_input
-
-# Check if the player wants to interject
-def player_interject():
-    choice = input("Do you want to interject? (y/n): ").strip().lower()
-    return choice == "y"
-
-# Main game loop
-def start_game():
-    player_name = input("You there, what is your name?")
-    print("The game begins with an action stage.")
-    round_number = 0
-    # Character profiles
-    characters = {
-        "Jerry": {"alive": True, "profile": ["you are slightly impatient and occasionally rush to conclusions but you are not irrational and can recognise when you are over-stepping the mark"], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
-        "Dave": {"alive": True, "profile": ["you are are a pacifist in all meanings of the word, you are averse to conflict and would much prefer if everyone could just get along"], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
-        "Owen": {"alive": True, "profile": ["you are quite conspiratorial and you're certain that this is all a part of something much bigger and much more sinister that the others will entertain"], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
-        "Hank": {"alive": True, "profile": ["you are deeply religious, although which particular religion or denomination you belong to is intensely ambigious"], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]},
-        "Debra": {"alive": True, "profile": ["you're somewhere between apathetic and non-chalant, nothing really phases you and you're not taking this as seriously as you perhaps should"], "memory": [], "key-takeaways": [f"From your experiences in previous nights (before last night) you know, as FACT, that: \n"]}
-    }
-    # Rooms in the mansion
-    rooms = ["Attic", "Kitchen", "Library", "Basement", "Cellar"]
-    old_crime_scenes = []
-
-    game_over = False
-
-    while not game_over:
-        round_number += 1
-        # Action Stage
-        characters, new_crime_scenes = action_phase(player_name, rooms, characters, old_crime_scenes, round_number)
-        
-        if sum(1 for character in characters if characters[character]["alive"]) == 0:
-            print("Congratulations! You were able to murder everyone without being caught! Score: 5 / 5")
-            break
-        # Conversation Stage
-        characters, game_over = conversation_stage(player_name, rooms, characters, old_crime_scenes, round_number)
-
-        for scene in new_crime_scenes:
-            old_crime_scenes.append(scene)
-
-
-
 class GameWindow(QMainWindow):
     def __init__(self):
         super().__init__()  # Ensure the parent class is initialized
@@ -599,11 +213,11 @@ class GameWindow(QMainWindow):
         self.most_recent_messageS = []  # Holds the short-term memory stack of recent messages
         self.alive_characters = []  # Holds the list of alive characters
         self.NPCs = []  # Holds the list of NPC characters
-        self.short_term_memory = 3  # Short-term memory limit for conversation
+        self.short_term_memory = 2  # Short-term memory limit for conversation
         self.yap_counter = 0  # Counter for how many times a character/NPC can speak
-        self.minimum_to_call_vote = 2  # Minimum conversation length to call a vote
+        self.minimum_to_call_vote = 20  # Minimum conversation length to call a vote
         self.force_interject = False  # Tracks if the player is forced to interject
-        self.rules = load_system_prompt()  # Placeholder for game rules (if needed)
+        self.rules = load_system_prompt()  
 
         # Set a consistent window size
         self.setFixedSize(800, 600)
@@ -1087,7 +701,7 @@ class GameWindow(QMainWindow):
 
         # Initialize characters
         self.characters = {
-            "Jerry": {"alive": True, "profile": ["you MUST occasionally emphasize how desperately lonely you are and how you will never find true love in this (cold / cruel / synonym) world (non-negotiable)"], "memory": [], "key-takeaways": [f"From your experiences in previous nights you know, as FACT, that: \n"]},
+            "Jerry": {"alive": True, "profile": ["you MUST never reveal that your 'wife' is actually a dead rat that you found and your 'children' are the droppings you found next to it (non-negotiable)"], "memory": [], "key-takeaways": [f"From your experiences in previous nights you know, as FACT, that: \n"]},
             "Dave": {"alive": True, "profile": ["you MUST constantly be offended by the statements of others (this is non-negotiable)"], "memory": [], "key-takeaways": [f"From your experiences in previous nights you know, as FACT, that: \n"]},
             "Owen": {"alive": True, "profile": ["you MUST be overly-flirtatious and full of flattery, especially directed towards Jerry (this is non-negotiable)"], "memory": [], "key-takeaways": [f"From your experiences in previous nights you know, as FACT, that: \n"]},
             "Hank": {"alive": True, "profile": ["you MUST include subtle praise of the keto-diet in every message (this is non-negotiable)"], "memory": [], "key-takeaways": [f"From your experiences in previous nights you know, as FACT, that: \n"]},
@@ -1095,7 +709,7 @@ class GameWindow(QMainWindow):
         }
 
         for character in self.characters:
-            if character in self.player_name or self.player_name == "David":
+            if character in self.player_name or self.player_name == "David" or self.player_name == "Debbie":
                 self.player_name = "Einstein"
 
         self.old_crime_scenes = []
@@ -1133,12 +747,26 @@ class GameWindow(QMainWindow):
 
         # Room assignments for each character
         self.room_assignments = {room: [] for room in self.rooms}
+        room_with_two_people = None  # Track if a room already has two people
+
         for character in self.characters:
             if self.characters[character]["alive"]:
                 available_rooms = [r for r in self.rooms if r not in self.old_crime_scenes]
-                available_rooms_for_assignment = [room for room in available_rooms if len(self.room_assignments[room]) < 2]
+
+                if room_with_two_people is None:
+                    # No room has two people yet, so all rooms can be considered
+                    available_rooms_for_assignment = [room for room in available_rooms if len(self.room_assignments[room]) < 2]
+                else:
+                    # If a room already has two people, remaining characters must be placed alone in rooms
+                    available_rooms_for_assignment = [room for room in available_rooms if len(self.room_assignments[room]) == 0]
+
+                # Randomly assign the character to a valid room
                 room = random.choice(available_rooms_for_assignment)
                 self.room_assignments[room].append(character)
+
+                # Check if the room now has two people
+                if len(self.room_assignments[room]) == 2 and self.round_number == 1:
+                    room_with_two_people = room  # Mark that a room with two people exists
 
         # Display room assignments if in normal mode
         if self.show_room_allocations:
@@ -1149,7 +777,7 @@ class GameWindow(QMainWindow):
                     formatted_assignments.append(f"{room}: {occupants_str}")
 
                 elif room not in self.old_crime_scenes:
-                    formatted_assignments.append(f"{room}: empty")
+                    formatted_assignments.append(f"{room}: EMPTY")
             
             assignments_output = "\n \n ".join(formatted_assignments)
             self.output_area.append(f"Room Assignments; \n \n {assignments_output} \n")
@@ -1559,13 +1187,31 @@ class GameWindow(QMainWindow):
                 vote_button.clicked.connect(lambda _, c=character: self.player_vote(c))
                 vote_layout.addWidget(vote_button)
 
+        #Player can also vote to skip
+        vote_button = QPushButton(f"Vote to skip", self)
+        vote_button.setStyleSheet(f"""
+            QPushButton {{
+                font-size: {int(conversation_button_font_size)}px;
+                padding: 5px;
+                color: white;
+            }}
+            QPushButton:hover {{
+                color: #808080;
+            }}
+        """)
+        vote_button.clicked.connect(lambda _, c="NONE": self.player_vote(c))
+        vote_layout.addWidget(vote_button)
+
         self.vote_buttons_widget.setLayout(vote_layout)
         self.centralWidget().layout().addWidget(self.vote_buttons_widget)
 
     def collect_player_vote(self, vote):
         # Store player's vote
         self.votes[self.player_name] = vote
-        self.output_area.append(f"You voted for {vote}.\n")
+        if vote != "NONE":
+            self.output_area.append(f"You voted for {vote}.\n")
+        else:
+            self.output_area.append(f"You voted to skip.\n")
 
         # Mark that we've received the player's vote
         self.awaiting_player_vote = False
@@ -1574,9 +1220,14 @@ class GameWindow(QMainWindow):
         self.tally_votes()
 
     def player_vote(self, selected_character):
-        self.output_area.append(f"You voted for {selected_character}.\n")
-        self.transcript.append(f"Voting Phase {self.round_number} results: \n")
-        self.transcript.append(f"You voted for {selected_character}.\n")
+        if selected_character != "NONE":
+            self.output_area.append(f"You voted for {selected_character}.\n")
+            self.transcript.append(f"Voting Phase {self.round_number} results: \n")
+            self.transcript.append(f"You voted for {selected_character}.\n")
+        else:
+            self.output_area.append(f"You voted to skip.\n")
+            self.transcript.append(f"Voting Phase {self.round_number} results: \n")
+            self.transcript.append(f"You voted to skip.\n")           
         self.votes[self.player_name] = selected_character
 
         # Hide the voting buttons after the player has voted
@@ -1613,17 +1264,17 @@ class GameWindow(QMainWindow):
         vote_counts = Counter(self.votes.values())
         most_common = vote_counts.most_common()
 
-        if most_common[0][1] == most_common[1][1]:
+        if most_common[0][0] == "NONE":
+            self.output_area.append("The group decided not to rush to conclusions and no one was voted out.\n")
+            self.transcript.append("The group decided not to rush to conclusions and no one was voted out.\n")
+            # Continue to next action phase after "NONE"
+            self.add_continue_button()
+
+        elif most_common[0][1] == most_common[1][1]:
             self.output_area.append(f"There was a tie between {most_common[0][0]} and {most_common[1][0]}. No one was voted out.\n")
             self.transcript.append(f"There was a tie between {most_common[0][0]} and {most_common[1][0]}. No one was voted out.\n")
             self.append_key_takeaways_tie(most_common[0][0], most_common[1][0])
             # Continue to next action phase after tie
-            self.add_continue_button()
-
-        elif most_common[0][0] == "NONE":
-            self.output_area.append("The group decided not to rush to conclusions and no one was voted out.\n")
-            self.transcript.append("The group decided not to rush to conclusions and no one was voted out.\n")
-            # Continue to next action phase after "NONE"
             self.add_continue_button()
 
         else:
@@ -1855,6 +1506,7 @@ class GameWindow(QMainWindow):
                 self.old_crime_scenes.append(scene)
 
         alive_characters.append(self.player_name)  # Add the player to the list of alive characters
+        random.shuffle(alive_characters)
         NPCs = [char for char in self.characters if self.characters[char]["alive"]]  # NPCs are the alive characters
 
         # Choose the first character to answer the Detective's question
