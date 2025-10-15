@@ -7,8 +7,8 @@ import re
 from collections import Counter
 
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl
+from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
 from PyQt5.QtGui import QTextCursor, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
@@ -221,6 +221,50 @@ class GameWindow(QMainWindow):
 
         # Set a consistent window size
         self.setFixedSize(800, 600)
+
+        #WEAPONS
+        self.selected_weapon = None           
+        self.weapon_pen_backfire = 0.1     
+        self.pending_pen_note_text = None          
+        self.black_magic_controller = None
+        self.black_magic_target = None
+        self.knife_extra_target = None      
+        self.knife_used_bloodlust = False
+        self.c4_target_room = None
+        self.c4_cooldown_nights = 0
+
+        self.weapon_action_panel = None
+        self._weapon_windows = {"pen": None, "blackmagic": None, "knife": None, "c4": None}
+
+        
+
+        # weapon registry (easy to extend)
+        self.weapons = [
+            {"id": "bare", "name": "Bare Hands", "desc": "No effect, no gimmick. \n A hardcore killer's weapon of choice.", "image": "icons/weapons/bare.png"},
+            {"id": "pen", "name": "Pen", "desc": "Before a kill, write a fake 'last note' your victim will be found with. "+ 
+                                                  f"{int(self.weapon_pen_backfire*100)}% chance to implicate yourself.", "image": "icons/weapons/pen.png"}, 
+            {"id": "knife", "name": "Knife",
+            "desc": "Gain the ability to kill twice per night, but your bloodlust will be visible.",
+            "image": "icons/weapons/knife.png"},
+
+            {"id": "c4", "name": "C4",
+            "desc": "Not very subtle. \n Allows you to kill from a distance. \n One night cooldown.",
+            "image": "icons/weapons/c4.png"},
+
+            {"id": "stopwatch", "name": "Stopwatch",
+            "desc": "Witnesses to night kills will vouch for you instead of accuse.",
+            "image": "icons/weapons/stopwatch.png"},
+            {"id": "voodoo", "name": "Voodoo Blade", "desc": "Possess the body of whoever you stab; the body you previously inhabited is the one that is found dead.", "image": "icons/weapons/voodoo.png"},
+            {"id": "blackmagic", "name": "Dark Magic", "desc": "Mind-control someone to kill for you each night, but they'll know it was you.", "image": "icons/weapons/blackmagic.png"},
+            {"id": "love", "name": "Love",
+            "desc": "\n Can't we all just get along?",
+            "image": "icons/weapons/love.png"}
+        ]
+
+
+        # For ESC menu
+        self._esc_overlay = None
+        self._esc_sound_btn = None
 
         # Call init_ui after initializing game variables
         self.init_ui()
@@ -522,6 +566,13 @@ class GameWindow(QMainWindow):
         self.say_button.clicked.connect(self.send_interjection)
         self.say_button.hide()  # Hidden until needed
 
+        # Weapon Picker
+        self.weapon_grid = QGridLayout()
+        self.weapon_grid.setSpacing(16)
+        self.weapon_picker_widget = QWidget()
+        self.weapon_picker_widget.setLayout(self.weapon_grid)
+        self.weapon_picker_widget.hide()
+
         # Main Layout
         self.start_layout = QVBoxLayout()
         self.start_layout.addWidget(self.title_label)  # Add the title at the top
@@ -532,6 +583,7 @@ class GameWindow(QMainWindow):
         #self.start_layout.setAlignment(Qt.AlignCenter)  # Align everything centrally
 
         self.layout = QVBoxLayout()
+        self.layout.insertWidget(1, self.weapon_picker_widget)
         #self.layout.addWidget(self.top_right_widget)
         self.layout.addLayout(self.start_layout)
         self.layout.addWidget(self.room_buttons_widget)
@@ -603,11 +655,28 @@ class GameWindow(QMainWindow):
         self.mute_button = QPushButton(self)
         self.update_mute_button_icon()
         self.mute_button.clicked.connect(self.toggle_mute)
-        self.mute_button.setGeometry(0, button_y, button_width, button_height)
+        self.mute_button.setGeometry(0, button_y, button_width/2, button_height)
         self.mute_button.setIconSize(QSize(64, 64))
         self.mute_button.show()
 
         self.showFullScreen()  # Make the window fullscreen
+
+        # Weapon action panel (used in Action Phase)
+        self.weapon_action_panel = QFrame(self.centralWidget())
+        self.weapon_action_panel.setObjectName("weaponActionPanel")
+        self.weapon_action_panel.setVisible(False)         # only shown during Action Phase
+        self.weapon_action_panel.setFixedWidth(260)        # card width; tweak as needed
+        self.weapon_action_panel.setStyleSheet("""
+            #weaponActionPanel {
+                border: none;
+                background: transparent;
+            }
+        """)
+        self.weapon_action_panel.setLayout(QVBoxLayout())
+        self.weapon_action_panel.layout().setContentsMargins(0, 0, 0, 0)
+        self.weapon_action_panel.layout().setSpacing(0)
+        self.room_buttons_widget.installEventFilter(self)
+        QTimer.singleShot(0, self.position_weapon_panel)
 
         #Start-screen Music
         self.media_player = QMediaPlayer()
@@ -622,6 +691,11 @@ class GameWindow(QMainWindow):
         # Configure the output area
         self.output_area.setStyleSheet(f"background-color: #1E1E1E; color: #E0E0E0; border: none; font-family: {font_family}; font-size: 16px; padding-left: 8px; padding-right: 20px;")
         self.setStyleSheet(f"color: white; background-color: black; font-family: {font_family};")
+
+    def eventFilter(self, obj, event):
+        if obj is self.room_buttons_widget and event.type() in (QEvent.Show, QEvent.Resize, QEvent.Move):
+            QTimer.singleShot(0, self.position_weapon_panel)  # schedule after layout settles
+        return super().eventFilter(obj, event)
 
     def apply_opacity(self, button, opacity_level):
         # Helper function to set the opacity of buttons
@@ -672,13 +746,19 @@ class GameWindow(QMainWindow):
             self.effect_player.play()
 
     def toggle_mode(self):
+        screen = QGuiApplication.primaryScreen()  # Get the primary screen
+        screen_size = screen.size()  # Get screen size
+        screen_width = screen_size.width()
+        start_buttons_font_size = max(int(50*(screen_width/2560)), 37)
         # Toggle between Normal and Super Hard modes
         if self.show_room_allocations:
             self.difficulty_button.setText("Mode: Super Hard")
             self.show_room_allocations = False
+            self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: #EF5350")
         else:
             self.difficulty_button.setText("Mode: Normal")
             self.show_room_allocations = True
+            self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: grey")
 
     def start_game(self):
         self.how_to_play_button.hide()
@@ -717,6 +797,98 @@ class GameWindow(QMainWindow):
         self.game_over = False
 
         # Start the first action phase
+        self.show_weapon_select_screen()
+
+
+    def show_weapon_select_screen(self):
+        """Populate and show a grid of square weapon buttons with image + name; tooltip on hover."""
+        self.mute_button.hide()
+        self.output_area.hide() 
+        self.room_buttons_widget.hide()
+        # Clear previous (if restarting)
+        while self.weapon_grid.count():
+            item = self.weapon_grid.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+
+        columns = 4        
+        card_w  = 320
+        card_h  = 460
+        icon_sz = 256
+
+        for i, wpn in enumerate(self.weapons):
+            row = i // columns
+            col = i % columns
+
+            card = QFrame(self.weapon_picker_widget)
+            card.setFixedSize(QSize(card_w, card_h))
+            card.setCursor(Qt.PointingHandCursor)
+            card.setFocusPolicy(Qt.NoFocus)
+            card.setStyleSheet("""
+                QFrame {
+                    border: 1px solid #555;
+                    border-radius: 16px;
+                    background-color: rgba(255,255,255,0.04);
+                }
+                QFrame:hover {
+                    background-color: rgba(255,255,255,0.10);
+                    border-color: #777;
+                }
+            """)
+
+            v = QVBoxLayout(card)
+            v.setContentsMargins(10, 10, 10, 10)
+            v.setSpacing(8)
+
+            # --- Image ---
+            img = QLabel(card)
+            img.setAlignment(Qt.AlignCenter)
+            img.setFocusPolicy(Qt.NoFocus)
+            img.setStyleSheet("border: none; background: transparent;")  # no outline
+            pix = QPixmap(wpn.get("image", ""))
+            if pix.isNull():
+                ph = QPixmap(icon_sz, icon_sz); ph.fill(Qt.transparent); pix = ph
+            img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            # Make child transparent to mouse so the FRAME gets hover/click even over the image
+            img.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            v.addWidget(img, alignment=Qt.AlignHCenter)
+
+            # --- Name ---
+            name = QLabel(wpn["name"], card)
+            name.setAlignment(Qt.AlignHCenter)
+            name.setFocusPolicy(Qt.NoFocus)
+            name.setStyleSheet("font-size: 18px; font-weight: 600; color: white; border: none; background: transparent;")
+            name.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            v.addWidget(name)
+
+            # --- Description (smaller, grey, wrapped) ---
+            desc = QLabel(wpn["desc"], card)
+            desc.setWordWrap(True)
+            desc.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+            desc.setFocusPolicy(Qt.NoFocus)
+            desc.setStyleSheet("font-size: 13px; color: #A0A0A0; border: none; background: transparent;")
+            desc.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            v.addWidget(desc, stretch=1)
+
+            # Click anywhere on the card to select
+            def _click_handler(_evt=None, wpn=wpn):
+                self.select_weapon_and_start(wpn)
+            card.mousePressEvent = _click_handler
+
+            self.weapon_grid.addWidget(card, row, col)
+
+        self.weapon_picker_widget.show()
+
+
+    def select_weapon_and_start(self, weapon):
+        self.selected_weapon = weapon
+        self.output_area.append(f"\nSelected weapon: {weapon['name']}\n")
+        if hasattr(self, "weapon_picker_widget") and self.weapon_picker_widget:
+            self.weapon_picker_widget.hide()
+        # proceed into the normal loop
+        self.output_area.show()
+        self.room_buttons_widget.show()
         self.run_action_phase()
 
     def show_how_to_play(self):
@@ -735,7 +907,225 @@ class GameWindow(QMainWindow):
         self.transcript_window = TranscriptWindow(self.transcript, font_family)
         self.transcript_window.show()
 
+    def build_weapon_action_panel(self):
+        """Right-side card for the currently equipped weapon during Action Phase."""
+        # clear panel
+        lay = self.weapon_action_panel.layout()
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+
+        # guard
+        wpn = getattr(self, "selected_weapon", None)
+        if not wpn:
+            self.weapon_action_panel.hide()
+            return
+
+        self.weapon_action_panel.show()
+
+        card_w, card_h, icon_sz = 240, 260, 120
+
+        # --- Card ---
+        card = QFrame(self.weapon_action_panel)
+        card.setFixedSize(QSize(card_w, card_h))
+        card.setCursor(Qt.PointingHandCursor)
+        interactive = wpn["id"] in ("pen", "blackmagic", "knife", "c4") and not (
+            wpn["id"] == "c4" and self.c4_cooldown_nights > 0
+        )
+
+        # Passive weapons: no hover effect or pointer
+        if not interactive:
+            card.setCursor(Qt.ArrowCursor)
+
+        card.setStyleSheet(f"""
+            QFrame {{
+                border: 1px solid #555;
+                border-radius: 16px;
+                background-color: rgba(255,255,255,0.04);
+            }}
+            {'QFrame:hover { background-color: rgba(255,255,255,0.10); border-color: #777; }' if interactive else ''}
+        """)
+
+        if wpn["id"] == "knife" and self.knife_extra_target:
+            card.setStyleSheet(f"""
+                QFrame {{
+                    border: 2px solid #C62828; 
+                    border-radius: 16px;
+                    background-color: rgba(198,40,40,0.12);
+                }}
+                {'QFrame:hover { background-color: rgba(198,40,40,0.18); border-color: #EF5350; }' if interactive else ''}
+            """)
+
+        v = QVBoxLayout(card)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(8)
+
+        # Image
+        img = QLabel(card)
+        img.setAlignment(Qt.AlignCenter)
+        img.setStyleSheet("border:none;background:transparent;")
+        pix = QPixmap(wpn.get("image", ""))
+        if pix.isNull():
+            ph = QPixmap(icon_sz, icon_sz); ph.fill(Qt.transparent); pix = ph
+        img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        img.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        v.addWidget(img, alignment=Qt.AlignHCenter)
+
+        # Name
+        name = QLabel(wpn["name"], card)
+        name.setAlignment(Qt.AlignHCenter)
+        name.setStyleSheet("font-size:18px;font-weight:600;color:white;border:none;background:transparent;")
+        name.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        v.addWidget(name)
+
+        # Description (depends on weapon)
+        if wpn["id"] == "pen":
+            desc_text = "Write note."
+        elif wpn["id"] == "blackmagic":
+            desc_text = "Choose victims."
+        elif wpn["id"] == "knife":
+            if self.knife_extra_target:
+                desc_text = f"\nACTIVE \n({self.knife_extra_target})"
+            else:
+                desc_text = "Choose extra victim. \n (optional)"
+        elif wpn["id"] == "c4":
+            desc_text = "Plant explosives." if self.c4_cooldown_nights == 0 else f"On Cooldown. \n (that stuff aint cheap)"
+        else:
+            desc_text = "No active effect."
+
+        desc = QLabel(desc_text, card)
+        desc.setWordWrap(True)
+        desc.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        desc.setStyleSheet("font-size:13px;color:#A0A0A0;border:none;background:transparent;")
+        if self.knife_extra_target:
+            desc.setStyleSheet("font-size:13px;color:#EF5350;border:none;background:transparent;")
+        desc.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        v.addWidget(desc, stretch=1)
+
+        # Click behavior
+        def on_card_click(_evt=None):
+            if not interactive:
+                return
+            if wpn["id"] == "pen":
+                self.open_pen_editor()
+            elif wpn["id"] == "blackmagic":
+                self.open_blackmagic_dialog()
+            elif wpn["id"] == "knife":
+                self.open_knife_dialog()
+            elif wpn["id"] == "c4":
+                self.open_c4_dialog()
+
+        card.mousePressEvent = on_card_click
+
+        # mount
+        lay.addWidget(card, alignment=Qt.AlignTop)
+
+        # mandatory gating
+        self.apply_weapon_gating()
+
+        QTimer.singleShot(0, self.position_weapon_panel)
+        self.weapon_action_panel.raise_()
+
+    def position_weapon_panel(self):
+        """Right-anchored, clamped placement that never goes off-screen.
+        Works across 1080p/1440p/4K and narrow gaps."""
+        if not getattr(self, "weapon_action_panel", None):
+            return
+        parent = self.centralWidget()
+        rb = getattr(self, "room_buttons_widget", None)
+        if not parent or not rb:
+            return
+
+        pw, ph = parent.width(), parent.height()
+
+        # Responsive margins & gaps
+        margin_x = max(int(pw * 0.03), 32)   # >= 32px from right edge
+        margin_y = max(int(ph * 0.03), 24)   # >= 24px from top/bottom
+        min_gap  = max(int(pw * 0.015), 24)  # >= 24px gap from room buttons
+
+        desired_w, desired_h = 280, 280
+        # Clamp size to available viewport
+        panel_w = min(max(220, desired_w), max(200, pw - 2 * margin_x))
+        panel_h = min(max(220, desired_h), max(200, ph - 2 * margin_y))
+
+        # Room buttons geometry
+        rb_pos = rb.mapTo(parent, rb.rect().topLeft())
+        rb_right = rb_pos.x() + rb.width()
+        rb_center_y = rb_pos.y() + rb.height() // 2
+
+        # Horizontal limits inside viewport
+        left_limit  = margin_x
+        right_limit = pw - panel_w - margin_x
+        if right_limit < left_limit:
+            # Window too narrow: stretch into the safe band
+            panel_w = max(200, pw - 2 * margin_x)
+            right_limit = pw - panel_w - margin_x
+
+        # Place no closer than min_gap from room buttons, and clamp to limits
+        desired_x = rb_right + min_gap
+        panel_x = max(left_limit, min(desired_x, right_limit))
+
+        # Vertically center on the room row, then clamp to limits
+        ideal_y = rb_center_y - panel_h // 2
+        panel_y = max(margin_y, min(ideal_y, ph - panel_h - margin_y))
+
+        self.weapon_action_panel.setGeometry(panel_x, panel_y, panel_w, panel_h)
+        self.weapon_action_panel.show()
+        self.weapon_action_panel.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.position_weapon_panel()
+
+    # Weapon-gating logic
+    def weapon_is_mandatory(self):
+        wpn = getattr(self, "selected_weapon", None)
+        if not wpn:
+            return False
+        if wpn["id"] == "c4":
+            return self.c4_cooldown_nights == 0  # mandatory only when usable
+        return wpn["id"] in ("pen", "blackmagic")
+
+    def weapon_configured(self):
+        wpn = getattr(self, "selected_weapon", None)
+        if not wpn:
+            return True
+        if wpn["id"] == "pen":
+            return bool(self.pending_pen_note_text)
+        if wpn["id"] == "blackmagic":
+            return bool(self.black_magic_controller and self.black_magic_target and self.black_magic_controller != self.black_magic_target)
+        if wpn["id"] == "c4":
+            # mandatory: must plant a room this night
+            return (self.c4_cooldown_nights > 0) or bool(self.c4_target_room)
+        # Knife / Stopwatch / Love are optional passives
+        return True
+
+    def set_room_buttons_enabled(self, enabled: bool):
+        for btn in getattr(self, "room_buttons", {}).values():
+            btn.setEnabled(enabled)
+
+    def apply_weapon_gating(self):
+        if self.weapon_is_mandatory():
+            self.set_room_buttons_enabled(self.weapon_configured())
+        else:
+            self.set_room_buttons_enabled(True)
+
+    def mandatory_weapon_reset(self):
+        self.pending_pen_note_text = None
+        self.black_magic_controller = None
+        self.black_magic_target = None
+        self.knife_extra_target = None
+        self.knife_used_bloodlust = False
+        self.c4_target_room = None
+
+        # Tick down C4 cooldown if active
+        if self.c4_cooldown_nights > 0:
+            self.c4_cooldown_nights -= 1
+
     def run_action_phase(self):
+        self.mandatory_weapon_reset()
         self.mute_button.hide()
         self.media_player.stop()
         self.effect_player.setVolume(25)
@@ -798,6 +1188,10 @@ class GameWindow(QMainWindow):
         self.update_room_button_states()
 
         self.room_buttons_widget.show()  # Show room selection buttons
+        self.build_weapon_action_panel()  # build right-side card
+        self.apply_weapon_gating()        # enforce mandatory fill-ins
+        QTimer.singleShot(0, self.position_weapon_panel)
+        self.weapon_action_panel.raise_()
 
 
     def choose_room(self, selected_room):
@@ -819,6 +1213,7 @@ class GameWindow(QMainWindow):
 
         # If the room is occupied
         self.room_buttons_widget.hide()
+        self.weapon_action_panel.hide()
         self.handle_room_occupants(selected_room, occupants)
 
     def handle_room_occupants(self, player_room, occupants):
@@ -1452,11 +1847,54 @@ class GameWindow(QMainWindow):
         self.setCentralWidget(play_again_widget)
 
     def restart_game(self):
-        """Resets the game to its initial state."""
-        # Reset the central widget layout to the default UI
-        self.init_ui()
-        self.start_game()  # Restart the game
-    
+        """Hard restart: spawn a new main window with the same window state, then close this one."""
+        # Close the ESC overlay if it’s open
+        if self._esc_overlay and self._esc_overlay.isVisible():
+            self.close_escape_menu()
+
+        app = QApplication.instance()
+
+        # Remember state & geometry
+        old_state = self.windowState()
+        old_geo   = self.geometry()
+
+        # Ensure the app doesn't quit during the handoff
+        app.setQuitOnLastWindowClosed(False)
+
+        def _spawn():
+            new_win = self.__class__()              # re-runs __init__()
+
+            # Preserve window state
+            if old_state & Qt.WindowFullScreen:
+                new_win.showFullScreen()
+            elif old_state & Qt.WindowMaximized:
+                new_win.showMaximized()
+            else:
+                # Normal window: restore geometry on the current screen
+                # (If you always run fullscreen, you can remove this branch)
+                scr = self.screen() or app.primaryScreen()
+                avail = scr.availableGeometry()
+                # Clamp geometry into the visible area
+                g = old_geo
+                x = max(avail.left(), min(g.x(), avail.right() - g.width()))
+                y = max(avail.top(),  min(g.y(), avail.bottom() - g.height()))
+                new_win.setGeometry(x, y, g.width(), g.height())
+                new_win.showNormal()
+
+            new_win.show()
+            app.setActiveWindow(new_win)
+
+            # Keep a strong ref so Python GC doesn't collect it
+            app._main_window = new_win
+
+            # Close old window *after* the new one is visible
+            QTimer.singleShot(50, self.close)
+
+            # Restore normal quit behavior
+            app.setQuitOnLastWindowClosed(True)
+
+        QTimer.singleShot(0, _spawn)
+        
     def end_game(self):
         self.output_area.append("Game Over. Thanks for playing!\n")
 
@@ -1649,6 +2087,503 @@ class GameWindow(QMainWindow):
         # Optionally, remove the newline left over from the previous message
         cursor.deletePreviousChar()
 
+    # Weapon-specific windows
+    def open_pen_editor(self):
+        if self._weapon_windows.get("pen") and self._weapon_windows["pen"].isVisible():
+            self._weapon_windows["pen"].raise_()
+            self._weapon_windows["pen"].activateWindow()
+            return
+
+        font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
+        font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+
+        w = QWidget(self)
+        w.setWindowFlags(Qt.FramelessWindowHint)
+        w.setStyleSheet("background-color: #2A2A2A;")
+        self._weapon_windows["pen"] = w
+        w.destroyed.connect(lambda: self._weapon_windows.__setitem__("pen", None))
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0)
+
+        # Header
+        header = QWidget(); hl = QHBoxLayout(header); header.setLayout(hl)
+        header.setStyleSheet("background-color:#2E2E2E; padding:5px; border:3px solid white;")
+        title = QLabel("Pen — Forge a note"); title.setStyleSheet(f"color:white; font-family:{font_family}; font-size:20px;")
+        close_btn = QPushButton("X"); close_btn.setFixedSize(30,30)
+        close_btn.setStyleSheet("QPushButton{background:#E74C3C; color:white; font-size:16px; border-radius:5px;} QPushButton:hover{background:#C0392B;}")
+        close_btn.clicked.connect(w.close)
+        hl.addWidget(title); hl.addStretch(1); hl.addWidget(close_btn)
+        lay.addWidget(header)
+
+        # Body
+        body = QWidget(); bl = QVBoxLayout(body)
+        lbl = QLabel("Write a note to be revealed at the start of the next conversation.")
+        lbl.setStyleSheet("color:#CFCFCF;")
+        edit = QTextEdit(); 
+        if self.pending_pen_note_text: edit.setPlainText(self.pending_pen_note_text)
+        bl.addWidget(lbl); bl.addWidget(edit)
+
+        save = QPushButton("Save"); 
+        save.setStyleSheet("background-color:#2e7d32;color:white;padding:6px 14px;border-radius:8px;")
+        def do_save():
+            txt = edit.toPlainText().strip()
+            self.pending_pen_note_text = txt if txt else None
+            self.apply_weapon_gating()
+            w.close()
+        save.clicked.connect(do_save)
+        bl.addWidget(save, alignment=Qt.AlignRight)
+
+        lay.addWidget(body)
+
+        # Drag support like your other windows
+        w.old_pos = None
+        def mp(ev): 
+            if ev.button()==Qt.LeftButton: w.old_pos = ev.globalPos()
+        def mm(ev):
+            if ev.buttons()==Qt.LeftButton and w.old_pos:
+                d = ev.globalPos() - w.old_pos; w.move(w.x()+d.x(), w.y()+d.y()); w.old_pos = ev.globalPos()
+        w.mousePressEvent = mp; w.mouseMoveEvent = mm
+
+        screen = self.window().screen() or QApplication.primaryScreen()
+        rect = screen.availableGeometry()
+        w.resize(700, 440)  # keep your size or tweak
+        w.move(rect.x() + (rect.width() - w.width()) // 2,
+            rect.y() + (rect.height() - w.height()) // 2)
+        w.show()
+        w.raise_()
+
+    def open_blackmagic_dialog(self):
+        if self._weapon_windows.get("blackmagic") and self._weapon_windows["blackmagic"].isVisible():
+            self._weapon_windows["blackmagic"].raise_()
+            self._weapon_windows["blackmagic"].activateWindow()
+            return
+        
+        font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
+        fams = QFontDatabase.applicationFontFamilies(font_id)
+        font_family = fams[0] if fams else "Sans-Serif"
+
+        alive = [c for c in self.characters if self.characters[c]["alive"]]
+
+        w = QWidget(self)
+        w.setWindowFlags(Qt.FramelessWindowHint)
+        w.setAttribute(Qt.WA_StyledBackground, True)
+        w.setStyleSheet("background-color:#2A2A2A;")
+        self._weapon_windows["blackmagic"] = w
+        w.destroyed.connect(lambda: self._weapon_windows.__setitem__("blackmagic", None))
+        outer = QVBoxLayout(w); outer.setContentsMargins(0,0,0,0); outer.setSpacing(0)
+
+        # Header (same style as your other windows)
+        header = QWidget()
+        header.setStyleSheet("background-color:#2E2E2E; padding:5px; border:3px solid white;")
+        hl = QHBoxLayout(header); hl.setContentsMargins(8,4,8,4); hl.setSpacing(8)
+        title = QLabel("Black Magic — Choose victims")
+        title.setStyleSheet(f"color:white; font-family:{font_family}; font-size:20px;")
+        close_btn = QPushButton("X"); close_btn.setFixedSize(30,30)
+        close_btn.setStyleSheet(
+            "QPushButton{background:#E74C3C;color:white;font-size:16px;border-radius:5px;}"
+            "QPushButton:hover{background:#C0392B;}"
+        )
+        close_btn.clicked.connect(w.close)
+        hl.addWidget(title); hl.addStretch(1); hl.addWidget(close_btn)
+        outer.addWidget(header)
+
+        # Body
+        content = QFrame()
+        content.setObjectName("bmContent")
+        content.setAttribute(Qt.WA_StyledBackground, True)
+        content.setStyleSheet("""
+            #bmContent {
+                background-color: #2A2A2A;
+                border: 3px solid white;
+                border-top: 0;            /* let the header's top border be the top edge */
+            }
+        """)
+
+        bl = QVBoxLayout(content)
+        bl.setContentsMargins(16,16,16,16)   # comfy breathing room inside the outline
+        bl.setSpacing(14)
+
+        row = QHBoxLayout(); row.setSpacing(12)
+
+        lbl1 = QLabel("Control")
+        lbl1.setStyleSheet("color:#E0E0E0; font-size:16px;")
+        row.addWidget(lbl1)
+
+        ctrl = QComboBox(); ctrl.addItems(alive)
+        if self.black_magic_controller in alive: ctrl.setCurrentText(self.black_magic_controller)
+        ctrl.setMinimumHeight(38)
+        ctrl.setStyleSheet(
+            "QComboBox{font-size:16px; padding:6px 10px; min-width:180px;}"
+            "QAbstractItemView{font-size:16px;}"
+        )
+        row.addWidget(ctrl)
+
+        lbl2 = QLabel("to kill")
+        lbl2.setStyleSheet("color:#E0E0E0; font-size:16px;")
+        row.addWidget(lbl2)
+
+        tgt = QComboBox(); tgt.addItems(alive)
+        if self.black_magic_target in alive: tgt.setCurrentText(self.black_magic_target)
+        tgt.setMinimumHeight(38)
+        tgt.setStyleSheet(
+            "QComboBox{font-size:16px; padding:6px 10px; min-width:180px;}"
+            "QAbstractItemView{font-size:16px;}"
+        )
+        row.addWidget(tgt)
+
+        row.addStretch(1)
+        bl.addLayout(row)
+
+        hint = QLabel()
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#BDBDBD; font-size:15px;")
+        bl.addWidget(hint)
+
+        save = QPushButton("Save")
+        save.setCursor(Qt.PointingHandCursor)
+        save.setStyleSheet("background-color:#2e7d32;color:white;padding:8px 16px;border-radius:8px; font-size:16px;")
+        def do_save():
+            c, t = ctrl.currentText(), tgt.currentText()
+            if c and t and c != t:
+                self.black_magic_controller, self.black_magic_target = c, t
+                self.apply_weapon_gating()
+                w.close()
+            else:
+                hint.setText("Your dark grip is not powerful enough for that.")
+                hint.setStyleSheet("color:#e57373; font-size:15px;")
+        save.clicked.connect(do_save)
+        bl.addWidget(save, alignment=Qt.AlignRight)
+
+        outer.addWidget(content, 1)
+
+        # Drag to move (same pattern as your other windows)
+        w._old = None
+        def mp(e):
+            if e.button()==Qt.LeftButton: w._old = e.globalPos()
+        def mm(e):
+            if e.buttons()==Qt.LeftButton and w._old:
+                d = e.globalPos() - w._old
+                w.move(w.x()+d.x(), w.y()+d.y())
+                w._old = e.globalPos()
+        w.mousePressEvent = mp; w.mouseMoveEvent = mm
+
+        # Center on active screen and start larger
+        screen = self.window().screen() or QApplication.primaryScreen()
+        rect = screen.availableGeometry()
+        w.resize(760, 360)  # bigger start size
+        w.move(rect.x() + (rect.width() - w.width()) // 2,
+            rect.y() + (rect.height() - w.height()) // 2)
+        w.show()
+        w.raise_()
+
+    def open_knife_dialog(self):
+        if self._weapon_windows.get("knife") and self._weapon_windows["knife"].isVisible():
+            self._weapon_windows["knife"].raise_()
+            self._weapon_windows["knife"].activateWindow()
+            return
+        
+        alive = [c for c in self.characters if self.characters[c]["alive"]]
+        w = QWidget(self); w.setWindowFlags(Qt.FramelessWindowHint)
+        w.setAttribute(Qt.WA_StyledBackground, True)
+        w.setStyleSheet("background-color:#2A2A2A;")
+        self._weapon_windows["knife"] = w
+        w.destroyed.connect(lambda: self._weapon_windows.__setitem__("knife", None))
+        outer = QVBoxLayout(w); outer.setContentsMargins(0,0,0,0)
+
+        # Header
+        header = QWidget()
+        header.setStyleSheet("background-color:#2E2E2E; padding:5px; border:3px solid white;")
+        hl = QHBoxLayout(header); hl.setContentsMargins(8,4,8,4)
+        title = QLabel("Knife — Extra victim")
+        title.setStyleSheet("color:white; font-size:20px;")
+        close_btn = QPushButton("X"); close_btn.setFixedSize(30,30)
+        close_btn.setStyleSheet("QPushButton{background:#E74C3C;color:white;font-size:16px;border-radius:5px;} QPushButton:hover{background:#C0392B;}")
+        close_btn.clicked.connect(w.close)
+        hl.addWidget(title); hl.addStretch(1); hl.addWidget(close_btn)
+        outer.addWidget(header)
+
+        # Content (outlined)
+        content = QFrame(); content.setObjectName("knifeContent")
+        content.setAttribute(Qt.WA_StyledBackground, True)
+        content.setStyleSheet("#knifeContent{background:#2A2A2A; border:3px solid white; border-top:0;}")
+        bl = QVBoxLayout(content); bl.setContentsMargins(16,16,16,16); bl.setSpacing(12)
+
+        row = QHBoxLayout(); row.setSpacing(12)
+        lbl = QLabel("Extra victim:")
+        lbl.setStyleSheet("color:#E0E0E0; font-size:16px;")
+        lbl.setMinimumHeight(28)   
+        row.addWidget(lbl, 0, Qt.AlignVCenter)
+        victim = QComboBox(); victim.addItem("(none)")  # allow “no extra kill”
+        victim.addItems(alive)
+        if self.knife_extra_target and self.knife_extra_target in alive:
+            victim.setCurrentText(self.knife_extra_target)
+        victim.setMinimumHeight(38)
+        victim.setStyleSheet("QComboBox{font-size:16px; padding:6px 10px; min-width:220px;} QAbstractItemView{font-size:16px;}")
+        row.addWidget(victim); row.addStretch(1)
+        bl.addLayout(row)
+
+        hint = QLabel("You may kill a second target tonight. Detective may notice you’re covered in blood.")
+        hint.setWordWrap(True); hint.setStyleSheet("color:#BDBDBD; font-size:15px;")
+        bl.addWidget(hint)
+
+        save = QPushButton("Save")
+        save.setStyleSheet("background:#2e7d32;color:white;padding:8px 16px;border-radius:8px; font-size:16px;")
+        def do_save():
+            choice = victim.currentText()
+            if choice == "(none)":
+                self.knife_extra_target = None
+                self.knife_used_bloodlust = False
+            else:
+                self.knife_extra_target = choice
+                self.knife_used_bloodlust = True
+            w.close()
+            self.build_weapon_action_panel()
+            QTimer.singleShot(0, self.position_weapon_panel)
+        save.clicked.connect(do_save)
+        bl.addWidget(save, alignment=Qt.AlignRight)
+        outer.addWidget(content, 1)
+
+        # drag + center
+        w._old=None
+        def mp(e): 
+            if e.button()==Qt.LeftButton: w._old=e.globalPos()
+        def mm(e):
+            if e.buttons()==Qt.LeftButton and w._old:
+                d=e.globalPos()-w._old; w.move(w.x()+d.x(), w.y()+d.y()); w._old=e.globalPos()
+        w.mousePressEvent=mp; w.mouseMoveEvent=mm
+
+        screen = self.window().screen() or QApplication.primaryScreen()
+        rect = screen.availableGeometry()
+        w.resize(640, 260)
+        w.move(rect.x() + (rect.width()-w.width())//2, rect.y() + (rect.height()-w.height())//2)
+        w.show(); w.raise_()
+
+    def open_c4_dialog(self):
+        if self._weapon_windows.get("c4") and self._weapon_windows["c4"].isVisible():
+            self._weapon_windows["c4"].raise_()
+            self._weapon_windows["c4"].activateWindow()
+            return
+        
+        # Planting is mandatory (unless on cooldown)
+        rooms = list(self.rooms.keys()) if isinstance(self.rooms, dict) else list(self.rooms)
+
+        w = QWidget(self); w.setWindowFlags(Qt.FramelessWindowHint)
+        w.setAttribute(Qt.WA_StyledBackground, True)
+        w.setStyleSheet("background-color:#2A2A2A;")
+        self._weapon_windows["c4"] = w
+        w.destroyed.connect(lambda: self._weapon_windows.__setitem__("c4", None))
+        outer = QVBoxLayout(w); outer.setContentsMargins(0,0,0,0)
+
+        header = QWidget()
+        header.setStyleSheet("background-color:#2E2E2E; padding:5px; border:3px solid white;")
+        hl = QHBoxLayout(header); hl.setContentsMargins(8,4,8,4)
+        title = QLabel("C4 — Plant explosives")
+        title.setStyleSheet("color:white; font-size:20px;")
+        close_btn = QPushButton("X"); close_btn.setFixedSize(30,30)
+        close_btn.setStyleSheet("QPushButton{background:#E74C3C;color:white;font-size:16px;border-radius:5px;} QPushButton:hover{background:#C0392B;}")
+        close_btn.clicked.connect(w.close)
+        hl.addWidget(title); hl.addStretch(1); hl.addWidget(close_btn)
+        outer.addWidget(header)
+
+        content = QFrame(); content.setObjectName("c4Content")
+        content.setAttribute(Qt.WA_StyledBackground, True)
+        content.setStyleSheet("#c4Content{background:#2A2A2A; border:3px solid white; border-top:0;}")
+        bl = QVBoxLayout(content); bl.setContentsMargins(16,16,16,16); bl.setSpacing(12)
+
+        row = QHBoxLayout(); row.setSpacing(12)
+        lbl = QLabel("Plant in room:")
+        lbl.setStyleSheet("color:#E0E0E0; font-size:16px;")
+        lbl.setMinimumHeight(28)                        
+        row.addWidget(lbl, 0, Qt.AlignVCenter)
+        room_box = QComboBox(); room_box.addItems(rooms)
+        if self.c4_target_room in rooms:
+            room_box.setCurrentText(self.c4_target_room)
+        room_box.setMinimumHeight(38)
+        room_box.setStyleSheet("QComboBox{font-size:16px; padding:6px 10px; min-width:240px;} QAbstractItemView{font-size:16px;}")
+        row.addWidget(room_box); row.addStretch(1)
+        bl.addLayout(row)
+
+        hint = QLabel("Explodes at night, killing everyone in the planted room.")
+        hint.setWordWrap(True); hint.setStyleSheet("color:#BDBDBD; font-size:15px;")
+        bl.addWidget(hint)
+
+        # Drawback hint (see balance notes below)
+        drawback = QLabel("Drawback: \n It's really expensive (1-night cooldown).")
+        drawback.setWordWrap(True); drawback.setStyleSheet("color:#FFC36B; font-size:14px;")
+        bl.addWidget(drawback)
+
+        save = QPushButton("Save")
+        save.setStyleSheet("background:#2e7d32;color:white;padding:8px 16px;border-radius:8px; font-size:16px;")
+        def do_save():
+            sel = room_box.currentText().strip()
+            if sel:
+                self.c4_target_room = sel
+                self.apply_weapon_gating()  # allows rooms now
+                w.close()
+            else:
+                hint.setText("Pick a room to plant the C4.")
+                hint.setStyleSheet("color:#e57373; font-size:15px;")
+        save.clicked.connect(do_save)
+        bl.addWidget(save, alignment=Qt.AlignRight)
+        outer.addWidget(content, 1)
+
+        # drag + center
+        w._old=None
+        def mp(e): 
+            if e.button()==Qt.LeftButton: w._old=e.globalPos()
+        def mm(e):
+            if e.buttons()==Qt.LeftButton and w._old:
+                d=e.globalPos()-w._old; w.move(w.x()+d.x(), w.y()+d.y()); w._old=e.globalPos()
+        w.mousePressEvent=mp; w.mouseMoveEvent=mm
+
+        screen = self.window().screen() or QApplication.primaryScreen()
+        rect = screen.availableGeometry()
+        w.resize(680, 300)
+        w.move(rect.x() + (rect.width()-w.width())//2, rect.y() + (rect.height()-w.height())//2)
+        w.show(); w.raise_()
+
+
+    # ESC Menu
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            # toggle ESC menu
+            if self._esc_overlay and self._esc_overlay.isVisible():
+                self.close_escape_menu()
+            else:
+                self.open_escape_menu()
+            return
+        super().keyPressEvent(e)
+
+    def open_escape_menu(self):
+        # If already open, bring to front
+        if self._esc_overlay and self._esc_overlay.isVisible():
+            self._esc_overlay.close()
+            return
+
+        parent = self  
+        overlay = QWidget(parent)
+        overlay.setObjectName("escOverlay")
+        overlay.setAttribute(Qt.WA_StyledBackground, True)
+        overlay.setStyleSheet("#escOverlay { background: rgba(0,0,0,0.45); }")
+
+        # Fill the window's content rect
+        cr = self.contentsRect()
+        # contentsRect() is in the window's local coords already
+        overlay.setGeometry(cr)
+        overlay.show()
+        overlay.raise_()
+
+        # Swallow clicks on overlay (so it acts modal-ish)
+        def swallow(_ev): pass
+        overlay.mousePressEvent = lambda ev: None
+        overlay.mouseReleaseEvent = lambda ev: None
+
+        # Content panel (outlined, matches your style)
+        panel = QFrame(overlay)
+        panel.setObjectName("escPanel")
+        panel.setAttribute(Qt.WA_StyledBackground, True)
+        panel.setStyleSheet("""
+            #escPanel {
+                background-color: #2A2A2A;
+                border: 3px solid white;
+            }
+        """)
+        panel.resize(520, 220)
+
+        # Center panel inside overlay
+        pw, ph = panel.width(), panel.height()
+        cw, ch = overlay.width(), overlay.height()
+        panel.move((cw - pw)//2, (ch - ph)//2)
+        panel.show()
+
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(14)
+
+        # Title
+        title = QLabel("Menu")
+        title.setStyleSheet("color:white; background-color:rgba(0,0,0,0.45); font-size:20px;")
+        v.addWidget(title, 0, Qt.AlignHCenter)
+
+        # BUTTONS COLUMN
+        col = QVBoxLayout()
+        col.setSpacing(10)
+
+        btn_w = 360   # target width inside panel
+        btn_h = 44
+
+        def style_btn(bg):
+            return (
+                f"QPushButton{{background:{bg}; color:white; padding:10px 18px; "
+                f"border-radius:8px; font-size:16px;}} "
+                f"QPushButton:hover{{filter: brightness(1.05);}}"
+            )
+
+        # Restart (top, green)
+        restart_btn = QPushButton("Restart")
+        restart_btn.setFixedSize(btn_w, btn_h)
+        restart_btn.setCursor(Qt.PointingHandCursor)
+        restart_btn.setStyleSheet(style_btn("#2e7d32"))
+        restart_btn.clicked.connect(self._esc_restart_click)
+        col.addWidget(restart_btn, 0, Qt.AlignHCenter)
+
+        # Sound (middle, neutral)
+        sound_btn = QPushButton()
+        sound_btn.setFixedSize(btn_w, btn_h)
+        sound_btn.setCursor(Qt.PointingHandCursor)
+        # If you have a real mute button with an icon, reuse its icon:
+        if hasattr(self, "mute_button") and isinstance(self.mute_button, QPushButton):
+            sound_btn.setText(self.mute_button.text() or "Sound")
+        
+            sound_btn.clicked.connect(self.mute_button.click)   # proxy to your existing toggle
+        else:
+            sound_btn.setText("Sound")
+            if hasattr(self, "toggle_sound"):
+                sound_btn.clicked.connect(self.toggle_sound)
+        sound_btn.setStyleSheet(style_btn("#444"))
+        col.addWidget(sound_btn, 0, Qt.AlignHCenter)
+
+        # Exit (bottom, red)
+        exit_btn = QPushButton("Exit")
+        exit_btn.setFixedSize(btn_w, btn_h)
+        exit_btn.setCursor(Qt.PointingHandCursor)
+        exit_btn.setStyleSheet(style_btn("#E74C3C"))
+        exit_btn.clicked.connect(self._esc_quit_click)
+        col.addWidget(exit_btn, 0, Qt.AlignHCenter)
+
+        v.addLayout(col)
+
+        # make sure the panel stays above everything
+        panel.show()
+        self._esc_overlay = overlay
+        self._esc_overlay.raise_()
+        QTimer.singleShot(0, self._esc_overlay.raise_)
+        QTimer.singleShot(25, self._esc_overlay.raise_())
+
+        # recenter on resize (unchanged, but ensure it uses contentsRect)
+        def on_resize_recenter():
+            if not (self._esc_overlay and self._esc_overlay.isVisible()):
+                return
+            cr = self.contentsRect()
+            self._esc_overlay.setGeometry(cr)
+            panel.move((cr.width() - panel.width()) // 2,
+                    (cr.height() - panel.height()) // 2)
+            self._esc_overlay.raise_()
+
+        QTimer.singleShot(0, on_resize_recenter)
+
+    def close_escape_menu(self):
+        if self._esc_overlay:
+            self._esc_overlay.hide()
+            self._esc_overlay.deleteLater()
+            self._esc_overlay = None
+
+    def _esc_restart_click(self):
+        self.close_escape_menu()
+        self.restart_game()  
+    
+    def _esc_quit_click(self):
+        self.close_escape_menu()
+        QApplication.instance().quit()
 
 
 
@@ -1960,6 +2895,7 @@ class HowToPlayWindow(QWidget):
             delta = QPoint(event.globalPos() - self.old_pos)
             self.move(self.x() + delta.x(), self.y() + delta.y())
             self.old_pos = event.globalPos()
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

@@ -19,5 +19,6 @@ debug.py
 mainCOMP.py
 main.spec
 
-# Ignore Steampage assets
+# Ignore unused assets
 screenshots/
+icons/unscaled/
