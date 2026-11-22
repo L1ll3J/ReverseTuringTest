@@ -1,10 +1,29 @@
 ﻿"""Small, state-driven inventory and room-offer widgets."""
 
+from pathlib import Path
+import sys
+
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QVBoxLayout, QWidget,
 )
+
+
+def item_sprite(item_id, parent=None, *, icon_root=None):
+    """Return a bounded sprite label using source or packaged resources."""
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    directory = Path(icon_root) if icon_root is not None else root / "icons" / "items"
+    label = QLabel(parent)
+    label.setObjectName(f"itemIcon_{item_id}")
+    label.setTextFormat(Qt.PlainText)
+    label.setFixedSize(64, 64)
+    label.setAlignment(Qt.AlignCenter)
+    pixmap = QPixmap(str(directory / f"{item_id}.png"))
+    if not pixmap.isNull():
+        label.setPixmap(pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.FastTransformation))
+    return label
 
 
 class ItemDraftDialog(QDialog):
@@ -33,6 +52,7 @@ class ItemDraftDialog(QDialog):
             card.setObjectName("itemOfferCard")
             card.setStyleSheet("QFrame#itemOfferCard { border: 1px solid #555; padding: 8px; }")
             row = QHBoxLayout(card)
+            row.addWidget(item_sprite(item_id), 0, Qt.AlignTop)
             description = QLabel(f"{definition.name}\n{definition.description}")
             description.setWordWrap(True)
             row.addWidget(description, 1)
@@ -81,9 +101,12 @@ class InventoryDialog(QDialog):
             definition = definitions[entry.item_id]
             card = QFrame()
             row = QVBoxLayout(card)
+            description = QHBoxLayout()
+            description.addWidget(item_sprite(entry.item_id), 0, Qt.AlignTop)
             label = QLabel(f"{definition.name}\n{definition.description}")
             label.setWordWrap(True)
-            row.addWidget(label)
+            description.addWidget(label, 1)
+            row.addLayout(description)
             controls = QHBoxLayout()
             target = None
             if definition.target_kind == "living_npc":

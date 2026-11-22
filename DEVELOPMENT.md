@@ -41,6 +41,14 @@ Set model overrides before launching the game. `ALIBAI_MODEL` supplies the fallb
 
 For example, a role override can be set with `$env:ALIBAI_SELECTOR_MODEL = 'gpt-6.2-sol'`. These strings configure requests; access to the chosen models still depends on the API account. Dialogue models must support the structured Responses requests used in `ai_runtime.py`. Request limits and reasoning effort are fields of `AIConfig`, rather than additional environment variables.
 
+## Microphone dictation
+
+When the conversation is waiting for your message, choose **Record voice**, speak, then choose **Stop recording**. Recording stops after at most 60 seconds. A background transcription request appends the result to the current editable draft, including text you typed while waiting. Review or change the draft and choose **Say** yourself. Transcription never sends a message automatically.
+
+**Cancel** discards the recording or invalidates a pending transcription. Sending, passing, calling a vote, changing phase, restarting, or closing also invalidates it. A late result cannot enter a later conversation. An already running API request can continue until it finishes or times out; another recording is unavailable during that request, while typing and the normal conversation actions remain available.
+
+Audio stays in memory locally and is sent to the configured OpenAI transcription endpoint. It is not written as a recording file. Unsubmitted transcription and microphone bytes are excluded from gameplay traces; text you choose to say is recorded like any other submitted dialogue when tracing is enabled. `ALIBAI_TRANSCRIPTION_MODEL` controls this request independently of the dialogue models. Test actual microphone access and model availability manually, since automated tests substitute both the device and API.
+
 ## Local progression and item testing
 
 The Windows progression profile defaults to `%LOCALAPPDATA%\AlibAi\profile.json`. It contains unlock counters, unlocked content IDs, optional item-pool preferences, and event sequence bookkeeping. Inventory and the active run are held in memory; the profile does not resume a saved game.
