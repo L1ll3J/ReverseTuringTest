@@ -1,13 +1,11 @@
-import google.generativeai as palm
 import os
 import openai
-import cohere
 import random
 import re
 from collections import Counter
 from openai import OpenAI
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy
+from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
 from PyQt5.QtGui import QTextCursor, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
@@ -18,15 +16,24 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # Initialize API
 openai.api_key = OPENAI_API_KEY
 
+def resource_path(relative_path):
+    root = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, relative_path)
+
+
 def load_system_prompt():
-    with open("System Prompt.txt", "r") as file:
+    with open(resource_path("System Prompt.txt"), "r", encoding="utf-8") as file:
         return file.read()
 
 rules = load_system_prompt()
-client = OpenAI()
+client = None
 # # Functions to interact with OpenAI
 # Conversational Speech from a single character
 def generate_conversation_speech(character, characters, rules, current_context, most_recent):
+
+    global client
+    if client is None:
+        client = OpenAI()
 
     #prompt = "It is your turn to speak, what will you say?"
     full_prompt = "\n".join(characters[character]["memory"]) + "\n" + "Current conversational context:" + "\n" + current_context + "Most recent message(s):" + "\n" + "\n".join(most_recent)
@@ -153,6 +160,14 @@ def find_characters_yet_to_speak(current_conversation, alive_characters):
     return characters_yet_to_speak
 
 
+def validate_vote(voter, vote, characters, player_name):
+    if not isinstance(vote, str) or vote == voter:
+        return "NONE"
+    if vote == "NONE" or vote == player_name or characters.get(vote, {}).get("alive", False):
+        return vote
+    return "NONE"
+
+
 def check_direct_address(most_recent_message, characters, player_name):
     """Check if a character is directly addressed by name in the player's message."""
     most_recent_message = most_recent_message.split(":")[1]
@@ -201,13 +216,14 @@ class GameWindow(QMainWindow):
         self.old_crime_scenes = []
         self.room_assignments = {}
         self.round_number = 0
-        self.phase = "action"  # Track the current phase (action or conversation)
+        self.phase = "start"
         self.conversation_length = 0  # To track when the "Call Vote" button should appear
         self.show_room_allocations = True  # Track mode for room allocation display
         self.game_over = False
         self.active_workers = []
         self.votes = {}  # To store all votes (including player's)
         self.vote_buttons_widget = None  # Widget for player vote buttons
+        self.voting_resolved = False
 
         # New Variables for the conversation phase
         self.transcript = []
@@ -282,8 +298,9 @@ class GameWindow(QMainWindow):
     def init_ui(self):
         self.setWindowTitle("AlibAi")
 
-        font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
-        font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+        font_id = QFontDatabase.addApplicationFont(resource_path("fonts/PressStart2P-Regular.ttf"))
+        font_families = QFontDatabase.applicationFontFamilies(font_id)
+        font_family = font_families[0] if font_families else "Sans-Serif"
 
         # Output area (TextEdit) to display game output, hidden initially
         self.output_area = QTextEdit(self)
@@ -391,12 +408,12 @@ class GameWindow(QMainWindow):
 
             # Set the image for each room based on the room name
             if room == "Attic":
-                button.setIcon(QIcon("House_images/scaled/Attic.png"))
+                button.setIcon(QIcon(resource_path("House_images/Scaled/Attic.png")))
                 button.setIconSize(attic_size)
                 button.setFixedSize(attic_size)  # Adjust size for attic
                 room_layout.addWidget(button, 0, 0, 1, 2, Qt.AlignCenter)  # Attic spans 2 columns
             else:
-                button.setIcon(QIcon(f"House_images/scaled/{room}.png"))
+                button.setIcon(QIcon(resource_path(f"House_images/Scaled/{room}.png")))
                 button.setIconSize(room_size)
                 button.setFixedSize(room_size)
 
@@ -580,7 +597,11 @@ class GameWindow(QMainWindow):
         self.weapon_grid.setSpacing(16)
         self.weapon_picker_widget = QWidget()
         self.weapon_picker_widget.setLayout(self.weapon_grid)
-        self.weapon_picker_widget.hide()
+        self.weapon_scroll = QScrollArea()
+        self.weapon_scroll.setWidgetResizable(True)
+        self.weapon_scroll.setFrameShape(QFrame.NoFrame)
+        self.weapon_scroll.setWidget(self.weapon_picker_widget)
+        self.weapon_scroll.hide()
 
         # Main Layout
         self.start_layout = QVBoxLayout()
@@ -592,7 +613,7 @@ class GameWindow(QMainWindow):
         #self.start_layout.setAlignment(Qt.AlignCenter)  # Align everything centrally
 
         self.layout = QVBoxLayout()
-        self.layout.insertWidget(1, self.weapon_picker_widget)
+        self.layout.insertWidget(1, self.weapon_scroll, 1)
         #self.layout.addWidget(self.top_right_widget)
         self.layout.addLayout(self.start_layout)
         self.layout.addWidget(self.room_buttons_widget)
@@ -664,7 +685,7 @@ class GameWindow(QMainWindow):
         self.mute_button = QPushButton(self)
         self.update_mute_button_icon()
         self.mute_button.clicked.connect(self.toggle_mute)
-        self.mute_button.setGeometry(0, button_y, button_width/2, button_height)
+        self.mute_button.setGeometry(0, button_y, button_width // 2, button_height)
         self.mute_button.setIconSize(QSize(64, 64))
         self.mute_button.show()
 
@@ -689,7 +710,7 @@ class GameWindow(QMainWindow):
 
         #Start-screen Music
         self.media_player = QMediaPlayer()
-        music_url = QUrl.fromLocalFile("sounds/start.mp3")
+        music_url = QUrl.fromLocalFile(resource_path("sounds/start.mp3"))
         self.media_player.setMedia(QMediaContent(music_url))
         self.media_player.setVolume(50)  # Adjust volume
         self.media_player.play()
@@ -717,6 +738,8 @@ class GameWindow(QMainWindow):
         for room, button in self.room_buttons.items():
             if button.isEnabled():  # If the button is enabled, apply regular opacity and hover effects
                 self.apply_opacity(button, 0.5)  # Default opacity for enabled buttons
+                self.room_labels[room].show()
+                self.room_containers[room].show()
             else:
                 self.apply_opacity(button, 0.1)
                 self.room_labels[room].hide()   # Low opacity for disabled buttons (crime scenes)
@@ -725,9 +748,9 @@ class GameWindow(QMainWindow):
     def update_mute_button_icon(self):
         """Update the mute button icon based on whether sound is enabled."""
         if self.sfx_enabled:
-            self.mute_button.setIcon(QIcon("icons/audio.png"))  # Sound on icon
+            self.mute_button.setIcon(QIcon(resource_path("icons/audio.png")))  # Sound on icon
         else:
-            self.mute_button.setIcon(QIcon("icons/audio-off.png"))  # Muted icon
+            self.mute_button.setIcon(QIcon(resource_path("icons/audio-off.png")))  # Muted icon
 
     def toggle_mute(self):
         """Toggle sound on/off and update icon."""
@@ -751,7 +774,7 @@ class GameWindow(QMainWindow):
     def play_sound_effect(self, sound_path):
         """Plays the given sound effect, if sound is enabled."""
         if self.sfx_enabled:
-            self.effect_player.setMedia(QMediaContent(QUrl.fromLocalFile(sound_path)))
+            self.effect_player.setMedia(QMediaContent(QUrl.fromLocalFile(resource_path(sound_path))))
             self.effect_player.play()
 
     def toggle_mode(self):
@@ -770,11 +793,12 @@ class GameWindow(QMainWindow):
             self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: #8CFF9E")
 
     def start_game(self):
-        self.how_to_play_button.hide()
-        self.player_name = self.player_name_input.text().capitalize().split(" ")[0]
+        self.player_name = self.player_name_input.text().strip().capitalize().split(" ")[0]
         if not self.player_name:
-            self.output_area.append("Please enter your name to start the game.")
+            self.player_name_label.setText("Please enter your name to start the game.")
+            self.player_name_input.setFocus()
             return
+        self.how_to_play_button.hide()
         
 
         # Hide name input, start button, and difficulty button
@@ -811,6 +835,7 @@ class GameWindow(QMainWindow):
 
     def show_weapon_select_screen(self):
         """Populate and show a grid of square weapon buttons with image + name; tooltip on hover."""
+        self.phase = "weapon_select"
         self.mute_button.hide()
         self.output_area.hide() 
         self.room_buttons_widget.hide()
@@ -819,12 +844,13 @@ class GameWindow(QMainWindow):
             item = self.weapon_grid.takeAt(0)
             w = item.widget()
             if w:
-                w.setParent(None)
+                w.deleteLater()
 
-        columns = 4        
-        card_w  = 320
-        card_h  = 460
-        icon_sz = 256
+        available_width = max(240, self.centralWidget().width() - 60)
+        columns = max(1, min(4, available_width // 300))
+        card_w = min(320, (available_width - 16 * (columns - 1)) // columns)
+        card_h = 380
+        icon_sz = min(200, card_w - 32)
 
         for i, wpn in enumerate(self.weapons):
             row = i // columns
@@ -855,7 +881,7 @@ class GameWindow(QMainWindow):
             img.setAlignment(Qt.AlignCenter)
             img.setFocusPolicy(Qt.NoFocus)
             img.setStyleSheet("border: none; background: transparent;")  # no outline
-            pix = QPixmap(wpn.get("image", ""))
+            pix = QPixmap(resource_path(wpn.get("image", "")))
             if pix.isNull():
                 ph = QPixmap(icon_sz, icon_sz); ph.fill(Qt.transparent); pix = ph
             img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -887,14 +913,13 @@ class GameWindow(QMainWindow):
 
             self.weapon_grid.addWidget(card, row, col)
 
-        self.weapon_picker_widget.show()
+        self.weapon_scroll.show()
 
 
     def select_weapon_and_start(self, weapon):
         self.selected_weapon = weapon
         self.output_area.append(f"\nSelected weapon: {weapon['name']}\n")
-        if hasattr(self, "weapon_picker_widget") and self.weapon_picker_widget:
-            self.weapon_picker_widget.hide()
+        self.weapon_scroll.hide()
 
         # weapon-specific one-time flags
         wid = weapon["id"]
@@ -908,16 +933,18 @@ class GameWindow(QMainWindow):
         self.run_action_phase()
 
     def show_how_to_play(self):
-        font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
-        font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+        font_id = QFontDatabase.addApplicationFont(resource_path("fonts/PressStart2P-Regular.ttf"))
+        font_families = QFontDatabase.applicationFontFamilies(font_id)
+        font_family = font_families[0] if font_families else "Sans-Serif"
 
         # Create the 'How to Play' window
         self.how_to_play_window = HowToPlayWindow(font_family)
         self.how_to_play_window.show()
 
     def show_transcript(self):
-        font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
-        font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+        font_id = QFontDatabase.addApplicationFont(resource_path("fonts/PressStart2P-Regular.ttf"))
+        font_families = QFontDatabase.applicationFontFamilies(font_id)
+        font_family = font_families[0] if font_families else "Sans-Serif"
 
         # Create the custom transcript window
         self.transcript_window = TranscriptWindow(self.transcript, font_family)
@@ -982,7 +1009,7 @@ class GameWindow(QMainWindow):
         img = QLabel(card)
         img.setAlignment(Qt.AlignCenter)
         img.setStyleSheet("border:none;background:transparent;")
-        pix = QPixmap(wpn.get("image", ""))
+        pix = QPixmap(resource_path(wpn.get("image", "")))
         if pix.isNull():
             ph = QPixmap(icon_sz, icon_sz); ph.fill(Qt.transparent); pix = ph
         img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -1048,6 +1075,10 @@ class GameWindow(QMainWindow):
         """Right-anchored, clamped placement that never goes off-screen.
         Works across 1080p/1440p/4K and narrow gaps."""
         if not getattr(self, "weapon_action_panel", None):
+            return
+        if (self.phase != "action" or self.game_over or not self.selected_weapon
+                or self.room_buttons_widget.isHidden()):
+            self.weapon_action_panel.hide()
             return
         parent = self.centralWidget()
         rb = getattr(self, "room_buttons_widget", None)
@@ -1119,8 +1150,10 @@ class GameWindow(QMainWindow):
         return True
 
     def set_room_buttons_enabled(self, enabled: bool):
-        for btn in getattr(self, "room_buttons", {}).values():
-            btn.setEnabled(enabled)
+        unavailable = set(self.old_crime_scenes) | set(getattr(self, "new_crime_scenes", []))
+        for room, btn in self.room_buttons.items():
+            btn.setEnabled(enabled and room not in unavailable)
+        self.update_room_button_states()
 
     def apply_weapon_gating(self):
         if self.weapon_is_mandatory():
@@ -1143,6 +1176,9 @@ class GameWindow(QMainWindow):
             self.c4_cooldown_nights -= 1
 
     def run_action_phase(self):
+        if self.game_over:
+            return
+        self.phase = "action"
         self.mandatory_weapon_reset()
         self.mute_button.hide()
         self.media_player.stop()
@@ -1213,6 +1249,10 @@ class GameWindow(QMainWindow):
 
 
     def choose_room(self, selected_room):
+        if (self.phase != "action" or self.game_over
+                or self.room_buttons_widget.isHidden()
+                or not self.room_buttons[selected_room].isEnabled()):
+            return
         #self.remove_last_message()
         self.output_area.append(f"\nYou have chosen to stay in the {selected_room}.\n")
         occupants = self.room_assignments[selected_room]
@@ -1256,6 +1296,7 @@ class GameWindow(QMainWindow):
 
             if wpn_id == "c4":
                 if self.c4_cooldown_nights > 0:
+                    self.new_crime_scenes = []
                     self.update_witness_memories(None)
                     return self.run_conversation_phase()
                 if not self.c4_target_room:
@@ -1586,6 +1627,8 @@ class GameWindow(QMainWindow):
 
 
     def run_conversation_loop(self):
+        if self.phase != "conversation" or self.game_over:
+            return
         self.secondary_output_area.clear()
         self.play_sound_effect(f"sounds/voices/{self.most_recent_messageS[-1].split(':')[0]}.mp3")
         self.vote_button.setEnabled(False)
@@ -1678,6 +1721,8 @@ class GameWindow(QMainWindow):
 
 
     def pass_conversation(self):
+        if self.phase != "conversation" or self.game_over:
+            return
         # Keep buttons active and just hide the interject input
         #self.remove_last_message()
         self.pass_button.setEnabled(False)
@@ -1703,6 +1748,8 @@ class GameWindow(QMainWindow):
         return self.force_interject or (self.interject_input.isVisible() and self.interject_input.text().strip() != "")
 
     def interject_conversation(self):
+        if self.phase != "conversation" or self.game_over:
+            return
         # Clear the interject input field before showing
         #self.remove_last_message()
         #self.output_area.append("You chose to interject. Please type your message.\n")
@@ -1714,6 +1761,8 @@ class GameWindow(QMainWindow):
         self.interject_button.setEnabled(False)  # Disable the interject button while typing
 
     def send_interjection(self):
+        if self.phase != "conversation" or self.game_over:
+            return
         interjection = self.interject_input.text()
         if interjection:
             if self.force_interject == False:
@@ -1749,9 +1798,10 @@ class GameWindow(QMainWindow):
             self.run_conversation_loop()
 
     def call_vote(self):
+        if self.phase != "conversation" or self.game_over:
+            return
         self.output_area.clear()
         self.output_area.append("Vote called!\n")
-        self.setEnabled(False)
         # self.pass_button.hide()
         self.interject_input.hide()
         # self.interject_button.hide()
@@ -1762,6 +1812,13 @@ class GameWindow(QMainWindow):
         self.run_voting_phase()
 
     def run_voting_phase(self):
+        if self.phase != "conversation" or self.game_over:
+            return
+        self.phase = "voting"
+        self.voting_resolved = False
+        self.expected_voters = {self.player_name} | {
+            char for char, data in self.characters.items() if data["alive"]
+        }
         self.output_area.append("Voting phase has begun.\n")
 
         # Generate conversation summary once at the start
@@ -1778,8 +1835,8 @@ class GameWindow(QMainWindow):
                 worker = AIVoteWorker(character, self.characters, self.rules, self.conversation_summary, self.player_name)
                 worker.vote_ready.connect(self.collect_ai_vote)
                 worker.finished.connect(self.cleanup_worker)
-                worker.start()
                 self.active_workers.append(worker)
+                worker.start()
 
         # Now prompt the player to vote
         self.output_area.append("Please select who you want to vote for.\n")
@@ -1836,20 +1893,15 @@ class GameWindow(QMainWindow):
         self.centralWidget().layout().addWidget(self.vote_buttons_widget)
 
     def collect_player_vote(self, vote):
-        # Store player's vote
-        self.votes[self.player_name] = vote
-        if vote != "NONE":
-            self.output_area.append(f"You voted for {vote}.\n")
-        else:
-            self.output_area.append(f"You voted to skip.\n")
-
-        # Mark that we've received the player's vote
-        self.awaiting_player_vote = False
-
-        # Check if all AI votes are collected, if so, tally the votes
-        self.tally_votes()
+        self.player_vote(vote)
 
     def player_vote(self, selected_character):
+        if (self.phase != "voting" or self.voting_resolved
+                or self.player_name in self.votes):
+            return
+        selected_character = validate_vote(
+            self.player_name, selected_character, self.characters, self.player_name
+        )
         if selected_character != "NONE":
             self.output_area.append(f"You voted for {selected_character}.\n")
             self.transcript.append(f"Voting Phase {self.round_number} results: \n")
@@ -1859,6 +1911,7 @@ class GameWindow(QMainWindow):
             self.transcript.append(f"Voting Phase {self.round_number} results: \n")
             self.transcript.append(f"You voted to skip.\n")           
         self.votes[self.player_name] = selected_character
+        self.awaiting_player_vote = False
 
         # Hide the voting buttons after the player has voted
         self.vote_buttons_widget.hide()
@@ -1867,31 +1920,31 @@ class GameWindow(QMainWindow):
         self.tally_votes()
 
     def collect_ai_vote(self, character, vote):
-        self.votes[character] = vote
-        if len(self.active_workers) == 1:
-            self.setEnabled(True)
-
-        # Check if all AI votes and player vote are collected
-        if not self.awaiting_player_vote:
-            self.tally_votes()
+        if (self.phase != "voting" or self.voting_resolved
+                or character not in self.expected_voters or character == self.player_name
+                or character in self.votes):
+            return
+        self.votes[character] = validate_vote(
+            character, vote, self.characters, self.player_name
+        )
+        self.tally_votes()
 
     def tally_votes(self):
-        for character in self.characters:
-            if self.characters[character]["alive"]:
-                if self.votes[character] == "NONE":
-                    self.output_area.append(f"{character} voted to skip.\n")
-                    self.transcript.append(f"{character} voted to skip.\n")
-                else:
-                    self.output_area.append(f"{character} voted for {self.votes[character]}.\n")
-                    self.transcript.append(f"{character} voted for {self.votes[character]}.\n")
+        if (self.phase != "voting" or self.voting_resolved
+                or not self.expected_voters.issubset(self.votes)):
+            return
+        self.voting_resolved = True
 
-        # Ensure we have all votes (AI and player)
-        total_alive = len([char for char in self.characters if self.characters[char]["alive"]])
-        if len(self.votes) < total_alive:
-            return  # Wait until all votes are collected
+        for character in sorted(self.expected_voters):
+            if self.votes[character] == "NONE":
+                message = f"{character} voted to skip.\n"
+            else:
+                message = f"{character} voted for {self.votes[character]}.\n"
+            self.output_area.append(message)
+            self.transcript.append(message)
 
         # Now that we have all votes, tally them
-        vote_counts = Counter(self.votes.values())
+        vote_counts = Counter(self.votes[char] for char in self.expected_voters)
         most_common = vote_counts.most_common()
 
         if most_common[0][0] == "NONE":
@@ -1900,7 +1953,7 @@ class GameWindow(QMainWindow):
             # Continue to next action phase after "NONE"
             self.add_continue_button()
 
-        elif most_common[0][1] == most_common[1][1]:
+        elif len(most_common) > 1 and most_common[0][1] == most_common[1][1]:
             self.output_area.append(f"There was a tie between {most_common[0][0]} and {most_common[1][0]}. No one was voted out.\n")
             self.transcript.append(f"There was a tie between {most_common[0][0]} and {most_common[1][0]}. No one was voted out.\n")
             self.append_key_takeaways_tie(most_common[0][0], most_common[1][0])
@@ -1951,6 +2004,8 @@ class GameWindow(QMainWindow):
         self.layout.addWidget(self.continue_button)
 
     def start_next_phase(self):
+        if self.phase != "voting" or not self.voting_resolved or self.game_over:
+            return
         # Remove the "Continue" button
         self.continue_button.hide()
 
@@ -1997,6 +2052,11 @@ class GameWindow(QMainWindow):
         
     def end_game_screen(self, final_score):
         """Displays the game over screen with the final message."""
+        if self.game_over:
+            return
+        self.game_over = True
+        self.phase = "game_over"
+        self.weapon_action_panel.hide()
         # Clear the output area and hide all buttons
         self.room_buttons_widget.hide()
         self.conversation_buttons_widget.hide()
@@ -2134,8 +2194,12 @@ class GameWindow(QMainWindow):
         self.output_area.append("Game Over. Thanks for playing!\n")
 
     def run_conversation_phase(self):
+        if self.game_over:
+            return
+        self.phase = "conversation"
+        self.weapon_action_panel.hide()
         if self.music_enabled:
-            music_url = QUrl.fromLocalFile("sounds/start.mp3")
+            music_url = QUrl.fromLocalFile(resource_path("sounds/start.mp3"))
             self.media_player.setMedia(QMediaContent(music_url))
             self.media_player.setVolume(10)  # Adjust volume
             self.media_player.play()
@@ -2200,6 +2264,14 @@ class GameWindow(QMainWindow):
         self.most_recent_messageS.append(most_recent_message)
         self.current_conversation.append(most_recent_message)
 
+        note = None
+        if ((self.selected_weapon or {}).get("id") == "pen"
+                and self.pending_pen_note_text and self.victims_last_night):
+            sig = self.victims_last_night[-1]
+            backfires = random.random() < self.weapon_pen_backfire
+            signed_name = self.player_name if backfires else sig
+            note = self.pending_pen_note_text + " - Signed: " + signed_name
+
         # Append basic information to each character's memory
         for character in self.characters:
             self.characters[character]["memory"].append(f" Action Phase {self.round_number} END \n")
@@ -2213,11 +2285,7 @@ class GameWindow(QMainWindow):
                 else:
                     self.characters[character]["memory"].append(f"The Detective informs everyone that **no murder occurred last night**, however the killer is still on the loose! The Detective states that you should expect everyone to have a concrete alibi today and instead focus on loose ends from previous days/nights when murders actually took place.")
 
-            if (self.selected_weapon or {}).get("id") == "pen" and self.pending_pen_note_text:
-                sig = self.victims_last_night[-1]
-                backfires = (random.random() < self.weapon_pen_backfire)
-                signed_name = self.player_name if backfires else sig
-                note = self.pending_pen_note_text + " - Signed: " + signed_name
+            if note is not None:
                 self.characters[character]["memory"].append(f"\n **The Detective reveals that a note was found by the body**, it reads: \n " + note)
             
             if (self.selected_weapon or {}).get("id") == "knife" and self.knife_used_bloodlust:
@@ -2245,6 +2313,8 @@ class GameWindow(QMainWindow):
         self.run_conversation_loop()  # Begin conversation loop
     
     def run_single_response(self, mentioned):
+        if self.phase != "conversation" or self.game_over:
+            return
         # Start the background worker for generating a single response
         self.single_response_worker = SingleResponseWorker(
             mentioned, 
@@ -2259,6 +2329,8 @@ class GameWindow(QMainWindow):
         self.single_response_worker.start()
 
     def handle_single_response(self, mentioned, response):
+        if self.phase != "conversation" or self.game_over:
+            return
         # This function runs when the worker thread is done
         most_recent_message = f"{mentioned}: {response}"
         #self.output_area.append(most_recent_message + "\n")
@@ -2282,6 +2354,8 @@ class GameWindow(QMainWindow):
         self.run_conversation_loop()
     
     def run_multiple_responses(self):
+        if self.phase != "conversation" or self.game_over:
+            return
         # Start the background worker for generating multiple responses
         self.multiple_response_worker = MultipleResponseWorker(
             self.characters, 
@@ -2296,6 +2370,8 @@ class GameWindow(QMainWindow):
         self.multiple_response_worker.start()
 
     def handle_multiple_responses(self, responses, conversation_summary):
+        if self.phase != "conversation" or self.game_over:
+            return
         # Start the worker to select the best response based on all NPC responses
         worker = SelectBestResponseWorker(responses, conversation_summary, self.most_recent_messageS, self.NPCs)
         worker.best_response_ready.connect(self.handle_best_response)
@@ -2306,12 +2382,11 @@ class GameWindow(QMainWindow):
         self.active_workers.append(worker)
 
     def cleanup_worker(self):
-        # Remove the finished worker from the active_workers list
-        for worker in self.active_workers:
-            if worker.isFinished():
-                self.active_workers.remove(worker)
+        self.active_workers = [worker for worker in self.active_workers if not worker.isFinished()]
 
     def handle_best_response(self, best_response, speaker):
+        if self.phase != "conversation" or self.game_over:
+            return
         # Handle the best response from the SelectBestResponseWorker
         most_recent_message = f"{speaker}: {best_response}"
         #self.output_area.append(most_recent_message + "\n")
@@ -2354,7 +2429,7 @@ class GameWindow(QMainWindow):
             self._weapon_windows["pen"].activateWindow()
             return
 
-        font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
+        font_id = QFontDatabase.addApplicationFont(resource_path("fonts/PressStart2P-Regular.ttf"))
         fams = QFontDatabase.applicationFontFamilies(font_id)
         font_family = fams[0] if fams else "Sans-Serif"
 
@@ -2448,7 +2523,7 @@ class GameWindow(QMainWindow):
             self._weapon_windows["blackmagic"].activateWindow()
             return
         
-        font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
+        font_id = QFontDatabase.addApplicationFont(resource_path("fonts/PressStart2P-Regular.ttf"))
         fams = QFontDatabase.applicationFontFamilies(font_id)
         font_family = fams[0] if fams else "Sans-Serif"
 
@@ -2848,7 +2923,7 @@ class GameWindow(QMainWindow):
         self._esc_overlay = overlay
         self._esc_overlay.raise_()
         QTimer.singleShot(0, self._esc_overlay.raise_)
-        QTimer.singleShot(25, self._esc_overlay.raise_())
+        QTimer.singleShot(25, self._esc_overlay.raise_)
 
         # recenter on resize (unchanged, but ensure it uses contentsRect)
         def on_resize_recenter():
@@ -2936,28 +3011,33 @@ class MultipleResponseWorker(QThread):
         self.NPCs = [n for n in NPCs if n != self.most_recent_messageS[-1].split(":")[0]]
         self.responses = {}  # To store all the responses
         self.workers = []
+        self.completed = False
 
     def run(self):
         # Step 1: Summarise the conversation (this part is not parallelized)
-        conversation_summary = summarise_conversation(self.current_conversation)
+        self.conversation_summary = summarise_conversation(self.current_conversation)
 
         # Step 2: Create workers for each NPC to generate responses in parallel
         for npc in self.NPCs:
-            worker = GenerateResponseWorker(npc, self.characters, self.rules, conversation_summary, self.most_recent_messageS[-1])
+            worker = GenerateResponseWorker(npc, self.characters, self.rules, self.conversation_summary, self.most_recent_messageS[-1])
             worker.response_ready.connect(self.collect_response)
             worker.finished.connect(self.check_all_workers_done)  # Check if all workers are done
             self.workers.append(worker)
-            worker.start()
 
-        self.conversation_summary = conversation_summary
+        for worker in self.workers:
+            worker.start()
 
     def collect_response(self, character, response):
         # Collect each response as workers finish
         self.responses[character] = response
+        self.check_all_workers_done()
 
     def check_all_workers_done(self):
         # Check if all workers are finished
-        if all(worker.isFinished() for worker in self.workers):
+        if (not self.completed and self.workers
+                and len(self.responses) == len(self.workers)
+                and all(worker.isFinished() for worker in self.workers)):
+            self.completed = True
             # Emit the combined responses signal
             self.all_responses_ready.emit(self.responses, self.conversation_summary)
             self.cleanup_workers()
@@ -2997,9 +3077,7 @@ class AIVoteWorker(QThread):
     def run(self):
         vote = generate_voting_prompt(self.character, self.characters[self.character]["memory"], self.rules, self.conversation_summary)
         
-        # Ensure AI doesn't vote for themselves or invalid choices
-        while vote == self.character or (vote != self.player_name and vote not in self.characters and vote != "NONE"):
-            vote = random.choice([char for char in self.characters if char != self.character and self.characters[char]["alive"]])
+        vote = validate_vote(self.character, vote, self.characters, self.player_name)
         
         self.vote_ready.emit(self.character, vote)  # Emit the vote result
 
