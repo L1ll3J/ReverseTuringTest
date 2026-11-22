@@ -2143,6 +2143,10 @@ class GameWindow(QMainWindow):
 
     def restart_game(self):
         """Hard restart: spawn a new main window with the same window state, then close this one."""
+        if self.phase == "restarting":
+            return
+        self.game_over = True
+        self.phase = "restarting"
         # Close the ESC overlay if it’s open
         if self._esc_overlay and self._esc_overlay.isVisible():
             self.close_escape_menu()

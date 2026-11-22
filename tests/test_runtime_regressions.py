@@ -17,7 +17,7 @@ from unittest.mock import patch
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PyQt5.QtCore import QCoreApplication, QEvent, Qt
+from PyQt5.QtCore import QCoreApplication, QEvent, Qt, QTimer
 from PyQt5.QtTest import QSignalSpy, QTest
 from PyQt5.QtWidgets import QApplication, QScrollArea
 
@@ -294,6 +294,64 @@ class RuntimeRegressionTests(unittest.TestCase):
                 resume.assert_not_called()
                 self.assertEqual(self.window.current_conversation, ["Alex: Original"])
                 self.assertEqual(self.window.most_recent_messageS, ["Alex: Original"])
+
+    def test_restart_rejects_queued_old_results_and_creates_one_new_window(self):
+        self.window.phase = "conversation"
+        self.window.current_conversation = ["Alex: Original"]
+        self.window.most_recent_messageS = ["Alex: Original"]
+        self.window.NPCs = ["Jerry", "Dave", "Hank"]
+        previous_quit_setting = self.app.quitOnLastWindowClosed()
+        had_main_window = hasattr(self.app, "_main_window")
+        previous_main_window = getattr(self.app, "_main_window", None)
+        original_init = game.GameWindow.__init__
+        created = []
+        delivered = []
+
+        def record_init(window):
+            created.append(window)
+            original_init(window)
+
+        def deliver(callback, *args):
+            delivered.append(callback.__name__)
+            callback(*args)
+
+        callbacks = (
+            (self.window.handle_single_response, ("Jerry", "Late reply")),
+            (self.window.handle_multiple_responses, ({"Jerry": "Late reply"}, "Late summary")),
+            (self.window.handle_best_response, ("Late reply", "Jerry")),
+        )
+        try:
+            with patch.object(game.GameWindow, "__init__", new=record_init), patch.object(
+                game.QThread, "start"
+            ) as start_worker, patch.object(self.window, "run_conversation_loop") as resume:
+                for delay, (callback, args) in enumerate(callbacks, start=5):
+                    QTimer.singleShot(delay, lambda callback=callback, args=args: deliver(callback, *args))
+                self.window.restart_game()
+                self.window.restart_game()
+                QTest.qWait(80)
+                self.assertEqual(len(created), 1)
+                self.assertIs(self.app._main_window, created[0])
+                self.assertTrue(created[0].isVisible())
+                self.assertEqual(created[0].phase, "start")
+                self.assertEqual(len(delivered), 3)
+                self.assertEqual(self.window.phase, "restarting")
+                self.assertTrue(self.window.game_over)
+                self.assertEqual(self.window.current_conversation, ["Alex: Original"])
+                self.assertEqual(self.window.most_recent_messageS, ["Alex: Original"])
+                start_worker.assert_not_called()
+                resume.assert_not_called()
+        finally:
+            self.app.setQuitOnLastWindowClosed(False)
+            for window in created:
+                window.close()
+                window.deleteLater()
+            self.app.processEvents()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            if had_main_window:
+                self.app._main_window = previous_main_window
+            elif hasattr(self.app, "_main_window"):
+                del self.app._main_window
+            self.app.setQuitOnLastWindowClosed(previous_quit_setting)
 
     def test_parallel_responses_emit_once_with_real_queued_signals(self):
         worker = game.MultipleResponseWorker(
