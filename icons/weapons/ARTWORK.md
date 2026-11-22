@@ -31,4 +31,3 @@ Final prompt:
 ```text
 Use case: precise-object-edit. Asset type: refreshed pixel-art weapon inventory icon for AlibAi. The attached image is the edit target and visual reference. Polish its rough drawing while preserving its recognizable subject, palette and dark playful murder-mystery style. Use crisp chunky square-pixel clusters with consistent pixel size, a clean dark outline, deliberate simple highlights, 4 to 6 shade families, a strong legible silhouette at 64 pixels. Center the complete item with balanced transparent padding in a square canvas. Keep genuine transparent alpha. No text, lettering, frame, floor, background, gradient glow or photorealistic texture. Specific request: polish the existing two tan spellcasting hands framing a purple spectral skull. Give both hands clear finger anatomy and matching chunky pixel clusters, simplify the purple magic into a strong small skull-and-smoke silhouette, no soft glow.
 ```
-
