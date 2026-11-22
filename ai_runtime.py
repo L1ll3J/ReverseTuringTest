@@ -1,6 +1,7 @@
 """Structured OpenAI requests over immutable, character-scoped game context."""
 
 from dataclasses import dataclass, field
+import io
 import os
 from pathlib import Path
 import sys
@@ -9,6 +10,7 @@ from time import monotonic_ns
 from uuid import uuid4
 from typing import Annotated, Literal, Mapping
 from xml.etree import ElementTree
+import wave
 
 from openai import (
     APIConnectionError,
@@ -52,9 +54,10 @@ class AIConfig:
     timeout_seconds: float = 45.0
     max_retries: int = 1
     max_output_tokens: int = 2048
+    transcription_model: str = field(default_factory=lambda: (os.getenv("ALIBAI_TRANSCRIPTION_MODEL") or "gpt-transcribe").strip())
 
     def __post_init__(self):
-        if not all(model.strip() for model in (self.speech_model, self.vote_model, self.selector_model)):
+        if not all(model.strip() for model in (self.speech_model, self.vote_model, self.selector_model, self.transcription_model)):
             raise ValueError("Each AI role requires a model name")
         if self.reasoning_effort not in {"low", "medium", "high", "xhigh", "max"}:
             raise ValueError("Unsupported reasoning effort")
@@ -78,6 +81,48 @@ class AIRuntime:
         self._client_lock = Lock()
         default_root = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
         self.prompt_root = Path(prompt_root if prompt_root is not None else default_root)
+
+    def transcribe(self, wav_audio: bytes) -> str:
+        """Transcribe a bounded PCM WAV clip without dialogue context or persistence."""
+        self._validate_audio(wav_audio)
+        try:
+            response = self._get_client().audio.transcriptions.create(
+                model=self.config.transcription_model,
+                file=("dictation.wav", wav_audio, "audio/wav"),
+                timeout=self.config.timeout_seconds,
+            )
+            text = response.text
+            if not isinstance(text, str) or not text.strip():
+                raise AIRequestError("No speech was transcribed. Please try recording again.")
+            return text.strip()
+        except AuthenticationError:
+            raise AIRequestError("The API key was rejected. Check your OpenAI credentials before retrying.") from None
+        except (PermissionDeniedError, NotFoundError):
+            raise AIRequestError("The transcription model is unavailable. Check model access and settings.") from None
+        except RateLimitError:
+            raise AIRequestError("OpenAI's usage limit was reached. Check your quota or wait before retrying.") from None
+        except APITimeoutError:
+            raise AIRequestError("Transcription timed out. Please try again.") from None
+        except APIConnectionError:
+            raise AIRequestError("Could not connect to OpenAI. Check your connection and retry.") from None
+        except OpenAIError:
+            raise AIRequestError("OpenAI could not transcribe this recording. Check your settings and try again.") from None
+        except (TypeError, ValueError, AttributeError):
+            raise AIRequestError("The transcription response was invalid. Please try again.") from None
+
+    @staticmethod
+    def _validate_audio(wav_audio):
+        if not isinstance(wav_audio, bytes) or not 44 < len(wav_audio) <= 24_000_000:
+            raise AIRequestError("The recording is empty or exceeds the audio size limit.")
+        try:
+            with wave.open(io.BytesIO(wav_audio), "rb") as wav:
+                channels, width, rate, frames, compression, _ = wav.getparams()
+                if (compression != "NONE" or width != 2 or channels not in (1, 2)
+                        or not 8000 <= rate <= 48000 or not 0 < frames <= rate * 120
+                        or len(wav.readframes(frames)) != frames * channels * width):
+                    raise ValueError("Unsupported audio")
+        except (wave.Error, EOFError, ValueError):
+            raise AIRequestError("The recording is not a supported PCM WAV clip.") from None
 
     def speech(self, context: CharacterContext, *, trace_scope=None) -> SpeechProposal:
         eligible = self._eligible_targets(context)
