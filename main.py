@@ -21,6 +21,32 @@ def load_system_prompt():
         return file.read()
 
 
+def readable_body_font():
+    font = QFontDatabase.systemFont(QFontDatabase.GeneralFont)
+    font.setPixelSize(18)
+    return font
+
+
+def fit_window_to_screen(window, preferred_width, preferred_height):
+    screen = window.screen() or QGuiApplication.primaryScreen()
+    available = screen.availableGeometry()
+    width = min(preferred_width, max(1, int(available.width() * 0.9)))
+    height = min(preferred_height, max(1, int(available.height() * 0.9)))
+    window.resize(width, height)
+    window.move(available.x() + (available.width() - width) // 2,
+                available.y() + (available.height() - height) // 2)
+
+
+def vote_conversation_minimum():
+    if os.getenv("ALIBAI_DEV_MODE") != "1":
+        return 20
+    try:
+        minimum = int(os.getenv("ALIBAI_DEV_VOTE_MINIMUM", "20"))
+    except ValueError:
+        return 20
+    return minimum if minimum >= 2 else 20
+
+
 def validate_vote(voter, vote, characters, player_name):
     if not isinstance(vote, str) or vote == voter:
         return "NONE"
@@ -86,14 +112,11 @@ class GameWindow(QMainWindow):
         self.most_recent_messageS = []  # Holds the short-term memory stack of recent messages
         self.alive_characters = []  # Holds the list of alive characters
         self.NPCs = []  # Holds the list of NPC characters
-        self.yap_counter = 0  # Counter for how many times a character/NPC can speak
-        self.minimum_to_call_vote = 2  # Minimum conversation length to call a vote
-        self.force_interject = False  # Tracks if the player is forced to interject
+        self.minimum_to_call_vote = vote_conversation_minimum()
         self.ai_runtime = AIRuntime(prompt_root=os.path.dirname(resource_path("System Prompt.txt")))
         self.public_events = []
         self.public_dialogue = []
         self.night_rooms = tuple(self.rooms)
-        self.next_addressee = None
         self.ai_busy = False
         self.request_serial = 0
         self.retry_action = None
@@ -184,13 +207,13 @@ class GameWindow(QMainWindow):
         self.retry_action = None
         self.retry_button.hide()
         self.request_serial += 1
-        self.next_addressee = addressee
-        self.public_dialogue.append(DialogueLine(self.round_number, speaker, speech))
+        self.public_dialogue.append(DialogueLine(self.round_number, speaker, speech, addressee))
         message = f"{speaker}: {speech}"
         self.current_conversation.append(message)
         self.most_recent_messageS.append(message)
         self.transcript.append(message)
-        self.output_area.append(f"<p><strong>{escape(speaker)}:</strong><br>{escape(speech)}</p><br>")
+        name_style = f'font-family: "{escape(self.pixel_font_family, quote=True)}"; font-size: 12px;'
+        self.output_area.append(f"<p><span style='{name_style}'><strong>{escape(speaker)}:</strong></span><br>{escape(speech)}</p><br>")
         self.output_area.ensureCursorVisible()
         if speaker == "Detective" or speaker in self.characters:
             self.play_sound_effect(f"sounds/voices/{speaker}.mp3")
@@ -208,7 +231,7 @@ class GameWindow(QMainWindow):
         self.vote_button.setEnabled(False)
         self.interject_input.setEnabled(False)
         self.say_button.setEnabled(False)
-        self.secondary_output_area.setText(status)
+        self.secondary_output_area.setText("...")
         self.secondary_output_area.show()
 
         def current():
@@ -233,9 +256,9 @@ class GameWindow(QMainWindow):
             self.retry_action = lambda: self.start_ai_request(operation, on_success, status)
             self.retry_button.show()
             if phase == "conversation":
-                self.pass_button.setEnabled(not self.force_interject)
-                self.interject_button.setEnabled(not self.force_interject)
-                self.vote_button.setEnabled(len(self.current_conversation) >= self.minimum_to_call_vote)
+                self.pass_button.setEnabled(True)
+                self.interject_button.setEnabled(True)
+                self.vote_button.setEnabled(self.can_call_vote())
 
         worker = AIWorker(operation)
         worker.result_ready.connect(ready)
@@ -285,10 +308,14 @@ class GameWindow(QMainWindow):
         font_id = QFontDatabase.addApplicationFont(resource_path("fonts/PressStart2P-Regular.ttf"))
         font_families = QFontDatabase.applicationFontFamilies(font_id)
         font_family = font_families[0] if font_families else "Sans-Serif"
+        self.pixel_font_family = font_family
+        body_font = readable_body_font()
+        body_family = body_font.family()
 
         # Output area (TextEdit) to display game output, hidden initially
         self.output_area = QTextEdit(self)
         self.output_area.setReadOnly(True)
+        self.output_area.document().setDefaultFont(body_font)
         self.output_area.hide()  # Hide until game starts
 
 
@@ -511,7 +538,7 @@ class GameWindow(QMainWindow):
         #User Information Widet
         self.secondary_output_area = QLabel(self)
         self.secondary_output_area.setAlignment(Qt.AlignCenter)
-        self.secondary_output_area.setStyleSheet("color: grey; font-size: 18px;")  # Style it for better appearance
+        self.secondary_output_area.setStyleSheet(f'color: grey; font-family: "{body_family}"; font-size: 18px;')
         self.secondary_output_area.hide()  # Initially hidden
 
 
@@ -551,11 +578,13 @@ class GameWindow(QMainWindow):
 
         # Input field for interjecting during conversation
         self.interject_input = QLineEdit(self)
+        self.interject_input.setFont(body_font)
         self.interject_input.setPlaceholderText("Type here...")
         self.interject_input.setAlignment(Qt.AlignCenter)
         self.interject_input.setStyleSheet(f"""
             QLineEdit {{
-                font-size: {int(conversation_button_font_size/2)}px;
+                font-family: "{body_family}";
+                font-size: 18px;
                 padding: 5px;
                 text-align: center;
                 color: #DCDCDC;
@@ -707,7 +736,7 @@ class GameWindow(QMainWindow):
         self.media_player.mediaStatusChanged.connect(self.loop_music)
 
         # Configure the output area
-        self.output_area.setStyleSheet(f"background-color: #1E1E1E; color: #E0E0E0; border: none; font-family: {font_family}; font-size: 16px; padding-left: 8px; padding-right: 20px;")
+        self.output_area.setStyleSheet(f'background-color: #1E1E1E; color: #E0E0E0; border: none; font-family: "{body_family}"; font-size: 18px; padding-left: 16px; padding-right: 24px;')
         self.setStyleSheet(f"color: white; background-color: black; font-family: {font_family};")
 
     def eventFilter(self, obj, event):
@@ -1538,50 +1567,38 @@ class GameWindow(QMainWindow):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
         self.secondary_output_area.clear()
-        self.vote_button.setEnabled(len(self.current_conversation) >= self.minimum_to_call_vote)
-        target = self.next_addressee
-        if target == self.player_name:
-            self.force_interject = True
-            self.secondary_output_area.setText("You were addressed. What will you say?")
-            self.pass_button.setEnabled(False)
-            self.interject_button.setEnabled(False)
-            self.interject_input.show()
-            self.say_button.show()
-            return
-        if target in self.characters and self.characters[target]["alive"] and self.yap_counter < 2:
-            self.yap_counter += 1
-            self.run_single_response(target)
-            return
-        if self.public_dialogue and self.public_dialogue[-1].speaker == self.player_name:
-            self.yap_counter += 1
+        self.vote_button.setEnabled(self.can_call_vote())
+        latest = self.public_dialogue[-1] if self.public_dialogue else None
+        if latest is not None and (latest.speaker == self.player_name
+                or (latest.speaker == "Detective" and latest.addressee != self.player_name)):
             self.run_multiple_responses()
             return
-        self.secondary_output_area.setText("Do you want to interject or pass?")
         self.pass_button.setEnabled(True)
         self.interject_button.setEnabled(True)
+        if latest is not None and latest.addressee == self.player_name:
+            self.interject_input.show()
+            self.say_button.show()
+        else:
+            self.interject_input.hide()
+            self.say_button.hide()
 
 
     def pass_conversation(self):
-        if self.phase != "conversation" or self.game_over or self.ai_busy or self.force_interject:
+        if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
-        target = self.next_addressee
-        if target in self.characters and self.characters[target]["alive"]:
-            self.run_single_response(target)
-        else:
-            self.run_multiple_responses()
+        self.interject_input.hide()
+        self.say_button.hide()
+        self.run_multiple_responses()
 
         
         
-
-    def player_interject(self):
-        # Pre-existing function but adapted for GUI to ask if the player wants to interject
-        return self.force_interject or (self.interject_input.isVisible() and self.interject_input.text().strip() != "")
 
     def interject_conversation(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
         self.retry_button.hide()
         self.retry_action = None
+        self.secondary_output_area.clear()
         self.interject_input.clear()
         self.interject_input.show()
         self.say_button.show()
@@ -1597,13 +1614,15 @@ class GameWindow(QMainWindow):
         self.interject_input.clear()
         self.interject_input.hide()
         self.say_button.hide()
-        self.force_interject = False
-        self.yap_counter = 0
         self.append_speech(self.player_name, speech)
         self.run_conversation_loop()
 
+    def can_call_vote(self):
+        return (self.phase == "conversation" and not self.game_over and not self.ai_busy
+                and len(self.current_conversation) >= self.minimum_to_call_vote)
+
     def call_vote(self):
-        if self.phase != "conversation" or self.game_over or self.ai_busy:
+        if not self.can_call_vote():
             return
         self.output_area.clear()
         self.output_area.append("Vote called!\n")
@@ -2000,8 +2019,6 @@ class GameWindow(QMainWindow):
         self.output_area.append(f"Conversation Phase {self.round_number} begins!\n")
         self.current_conversation = []
         self.most_recent_messageS = []
-        self.yap_counter = 0
-        self.force_interject = False
         self.alive_characters = list(self.public_state().alive)
         self.NPCs = [char for char, data in self.characters.items() if data["alive"]]
         for scene in self.new_crime_scenes:
@@ -2052,9 +2069,8 @@ class GameWindow(QMainWindow):
     def run_multiple_responses(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
-        previous = self.public_dialogue[-1].speaker if self.public_dialogue else None
         contexts = tuple(self.build_character_context(char) for char, data in self.characters.items()
-                         if data["alive"] and char not in (self.player_name, previous))
+                         if data["alive"] and char != self.player_name)
         if not contexts:
             return
         selector_snapshot = (self.public_state(), tuple(self.public_events), tuple(self.public_dialogue))
@@ -2689,8 +2705,10 @@ class TranscriptWindow(QWidget):
         # Create the transcript text area
         transcript_area = QTextEdit()
         transcript_area.setReadOnly(True)
-        transcript_area.setText("\n".join(self.transcript))  # Assuming transcript is a list of messages
-        transcript_area.setStyleSheet(f"background-color: #1E1E1E; color: #E0E0E0;  border: 1px solid white; font-family: {font_family}; font-size: 12px;")
+        body_font = readable_body_font()
+        transcript_area.document().setDefaultFont(body_font)
+        transcript_area.setPlainText("\n".join(self.transcript))
+        transcript_area.setStyleSheet(f'background-color: #1E1E1E; color: #E0E0E0; border: 1px solid white; font-family: "{body_font.family()}"; font-size: 18px; padding: 16px;')
         layout.addWidget(transcript_area)
 
         cursor = transcript_area.textCursor()
@@ -2701,7 +2719,7 @@ class TranscriptWindow(QWidget):
 
         # Make window resizable
         self.setLayout(layout)
-        self.resize(500, self.dynamic_height)
+        fit_window_to_screen(self, 700, self.dynamic_height)
 
         # Variables for dragging the window
         self.old_pos = None
@@ -2793,17 +2811,19 @@ class HowToPlayWindow(QWidget):
         # Create the how-to-play text area
         how_to_play_area = QTextEdit()
         how_to_play_area.setReadOnly(True)
-        how_to_play_area.setText("\n\nWelcome to AlibAi. \n\n\n\n\nThe game progresses in 3 phases, Action Phases, Conversation Phases and Voting Phases. \n\n\n\n\nDuring Action Phases you will select a room to stay the night:\n\n If the room is occupied by a single character, you will kill them. \n\n If the room is occupied by 2 characters, you must select which to kill.\n\n If the room is empty, you must select again until you find a victim.\n\n\n\n\nDuring Conversation Phases the group will try to figure out who the killer is: \n\n If you wish to direct a question to a specific character, capitalize their name only. (e.g. 'to Dave not debra') \n\n It is not unlikely that an AI character will 'hallucinate' or state something that is prove-ably wrong.\n Use this to your advantage. \n\n\n\n\nOnce the Conversation reaches a certain length you will be able to call a vote:\n\n The character with the most votes will be hanged. \n\n\n\n\nGood Luck! \n\n\n\n\nFeel free to minimise / Alt + TAB to keep this in the background.")
-        how_to_play_area.setStyleSheet(f"background-color: #1E1E1E; color: #E0E0E0;  border: 1px solid white; font-family: {font_family}; font-size: 12px;")
+        body_font = readable_body_font()
+        how_to_play_area.document().setDefaultFont(body_font)
+        how_to_play_area.setText('Welcome to AlibAi. \n\nThe game progresses in 3 phases, Action Phases, Conversation Phases and Voting Phases. \n\nDuring Action Phases you will select a room to stay the night:\n\n If the room is occupied by a single character, you will kill them. \n\n If the room is occupied by 2 characters, you must select which to kill.\n\n If the room is empty, you must select again until you find a victim.\n\nDuring Conversation Phases the group will try to figure out who the killer is. \n\nOnce the Conversation reaches a certain length you will be able to call a vote:\n\n The character with the most votes will be hanged. \n\nGood Luck! \n\nFeel free to minimise / Alt + TAB to keep this in the background.')
+        how_to_play_area.setStyleSheet(f'background-color: #1E1E1E; color: #E0E0E0; border: 1px solid white; font-family: "{body_font.family()}"; font-size: 18px; padding: 16px;')
         layout.addWidget(how_to_play_area)
 
         cursor = how_to_play_area.textCursor()
-        cursor.movePosition(QTextCursor.End)
+        cursor.movePosition(QTextCursor.Start)
         how_to_play_area.setTextCursor(cursor)
 
         # Set the fixed size for the window
         self.setLayout(layout)
-        self.resize(1400, 900)  # Static window size
+        fit_window_to_screen(self, 1100, 800)
 
         # Variables for dragging the window
         self.old_pos = None

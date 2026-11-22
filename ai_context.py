@@ -18,6 +18,7 @@ class DialogueLine:
     round_number: int
     speaker: str
     text: str
+    addressee: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,10 +86,13 @@ def _append_records(
 def _append_dialogue(parent: ET.Element, dialogue: tuple[DialogueLine, ...]) -> None:
     section = ET.SubElement(parent, "public_dialogue")
     for line in dialogue:
+        attributes = {"round": str(line.round_number), "speaker": line.speaker}
+        if line.addressee is not None:
+            attributes["addressee"] = line.addressee
         ET.SubElement(
             section,
             "utterance",
-            {"round": str(line.round_number), "speaker": line.speaker},
+            attributes,
         ).text = line.text
 
 

@@ -16,11 +16,14 @@ import unittest
 from unittest.mock import Mock, patch
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+if sys.platform == "win32":
+    os.environ.setdefault("QT_QPA_FONTDIR", str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PyQt5.QtCore import QCoreApplication, QEvent, Qt, QTimer
+from PyQt5.QtGui import QFont, QFontInfo
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QScrollArea
+from PyQt5.QtWidgets import QApplication, QScrollArea, QTextEdit, QLabel
 
 with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
     import main as game
@@ -36,10 +39,15 @@ class RuntimeRegressionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication(["runtime-regressions"])
         cls.app.setQuitOnLastWindowClosed(False)
+        if sys.platform == "win32" and cls.app.platformName() == "offscreen":
+            QFont.insertSubstitution("Helvetica", "Segoe UI")
 
     def setUp(self):
         self.patches = contextlib.ExitStack()
         self.addCleanup(self.patches.close)
+        self.patches.enter_context(patch.dict(os.environ, {
+            "ALIBAI_DEV_MODE": "0", "ALIBAI_DEV_VOTE_MINIMUM": ""
+        }))
         self.patches.enter_context(patch.object(
             socket.socket, "connect", side_effect=AssertionError("Network access in offline test")
         ))
@@ -83,6 +91,11 @@ class RuntimeRegressionTests(unittest.TestCase):
             QTest.qWait(5)
         self.assertTrue(condition(), message)
 
+    def prepare_vote_call(self):
+        self.window.phase = "conversation"
+        for index in range(20):
+            self.window.append_speech("Dave", f"Account {index + 1}.")
+
     def test_title_screen_opens_without_api_key_or_client(self):
         self.assertEqual(self.window.phase, "start")
         self.assertTrue(self.window.start_button.isVisible())
@@ -95,6 +108,191 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertTrue(self.window.player_name_label.isVisible())
         self.assertIn("Please enter your name", self.window.player_name_label.text())
         self.assertTrue(self.window.how_to_play_button.isVisible())
+
+    def test_development_observability_does_not_shorten_voting_without_explicit_override(self):
+        self.assertEqual(self.window.minimum_to_call_vote, 20)
+        cases = (
+            ({"ALIBAI_DEV_MODE": "0", "ALIBAI_DEV_VOTE_MINIMUM": "2"}, 20),
+            ({"ALIBAI_DEV_MODE": "1", "ALIBAI_DEV_VOTE_MINIMUM": ""}, 20),
+            ({"ALIBAI_DEV_MODE": "1", "ALIBAI_DEV_VOTE_MINIMUM": "2"}, 2),
+            ({"ALIBAI_DEV_MODE": "1", "ALIBAI_DEV_VOTE_MINIMUM": "1"}, 20),
+            ({"ALIBAI_DEV_MODE": "1", "ALIBAI_DEV_VOTE_MINIMUM": "invalid"}, 20),
+        )
+        for configuration, expected in cases:
+            with self.subTest(configuration=configuration), patch.dict(os.environ, configuration):
+                self.assertEqual(game.vote_conversation_minimum(), expected)
+        with patch.dict(os.environ, {"ALIBAI_DEV_MODE": "1", "ALIBAI_DEV_VOTE_MINIMUM": "2"}):
+            development_window = game.GameWindow()
+        try:
+            self.assertEqual(development_window.minimum_to_call_vote, 2)
+        finally:
+            development_window.close()
+            development_window.deleteLater()
+
+    def test_vote_eligibility_is_enforced_at_the_twentieth_message(self):
+        self.window.phase = "conversation"
+        self.window.append_speech("Detective", "Where were you last night?")
+        with patch.object(self.window, "run_voting_phase") as vote:
+            for index in range(18):
+                self.window.append_speech("Dave", f"Account {index + 1}.")
+            self.window.run_conversation_loop()
+            self.assertEqual(len(self.window.current_conversation), 19)
+            self.assertFalse(self.window.can_call_vote())
+            self.assertFalse(self.window.vote_button.isEnabled())
+            self.window.call_vote()
+            vote.assert_not_called()
+            self.window.append_speech("Dave", "One more account.")
+            self.window.run_conversation_loop()
+            self.assertTrue(self.window.can_call_vote())
+            self.assertTrue(self.window.vote_button.isEnabled())
+            self.window.ai_busy = True
+            self.window.call_vote()
+            vote.assert_not_called()
+            self.window.ai_busy = False
+            self.window.call_vote()
+            vote.assert_called_once()
+
+    def test_request_progress_is_one_quiet_indicator_across_stages(self):
+        self.window.phase = "conversation"
+        for status in ("The group is responding...", "The conversation is continuing..."):
+            with self.subTest(status=status):
+                entered, release = Event(), Event()
+
+                def operation():
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("Activity probe was not released")
+                    return "complete"
+
+                try:
+                    self.window.start_ai_request(operation, Mock(), status)
+                    self.wait_for(entered.is_set)
+                    self.assertEqual(self.window.secondary_output_area.text(), "...")
+                    self.assertNotIn(status, self.window.output_area.toPlainText())
+                    release.set()
+                    self.wait_for(lambda: not self.window.ai_busy and not self.window.active_workers)
+                    self.assertEqual(self.window.secondary_output_area.text(), "")
+                finally:
+                    release.set()
+                    for worker in list(self.window.active_workers):
+                        worker.wait(3000)
+                    self.app.processEvents()
+
+    def test_addressed_statements_and_questions_invite_without_forcing_player_speech(self):
+        self.window.phase = "conversation"
+        for speech in ("I spent the night alone in the attic.", "Where were you?"):
+            with self.subTest(speech=speech), patch.object(
+                self.window, "run_multiple_responses"
+            ) as group, patch.object(self.window, "run_single_response") as single:
+                self.window.append_speech("Dave", speech, "Alex")
+                before = tuple(self.window.public_dialogue)
+                self.window.run_conversation_loop()
+                self.assertTrue(self.window.pass_button.isEnabled())
+                self.assertTrue(self.window.interject_button.isEnabled())
+                self.assertTrue(self.window.interject_input.isVisible())
+                self.assertTrue(self.window.say_button.isVisible())
+                self.assertEqual(self.window.secondary_output_area.text(), "")
+                group.assert_not_called()
+                single.assert_not_called()
+                self.window.pass_button.click()
+                group.assert_called_once()
+                single.assert_not_called()
+                self.assertEqual(tuple(self.window.public_dialogue), before)
+                self.assertFalse(any(line.speaker == "Alex" for line in self.window.public_dialogue))
+
+    def test_npc_addressee_never_automatically_hands_the_floor_to_that_npc(self):
+        self.window.phase = "conversation"
+        self.window.append_speech("Dave", "Jerry, where were you?", "Jerry")
+        with patch.object(self.window, "run_multiple_responses") as group, patch.object(
+            self.window, "run_single_response"
+        ) as single:
+            self.window.run_conversation_loop()
+            group.assert_not_called()
+            single.assert_not_called()
+            self.assertTrue(self.window.pass_button.isEnabled())
+            self.assertTrue(self.window.interject_button.isEnabled())
+            self.window.pass_button.click()
+            group.assert_called_once()
+            single.assert_not_called()
+
+    def test_player_submission_starts_group_selection_with_only_user_supplied_words(self):
+        self.window.phase = "conversation"
+        self.window.interject_input.setText("Those are my words.")
+        with patch.object(self.window, "run_multiple_responses") as group, patch.object(
+            self.window, "run_single_response"
+        ) as single:
+            self.window.send_interjection()
+            group.assert_called_once()
+            single.assert_not_called()
+        self.assertEqual(tuple(self.window.public_dialogue),
+                         (game.DialogueLine(0, "Alex", "Those are my words."),))
+
+    def test_opening_detective_invitation_keeps_player_choice_and_uses_group_for_npcs(self):
+        self.window.phase = "conversation"
+        with patch.object(self.window, "run_multiple_responses") as group, patch.object(
+            self.window, "run_single_response"
+        ) as single:
+            self.window.append_speech("Detective", "Where were you last night?", "Alex")
+            self.window.run_conversation_loop()
+            group.assert_not_called()
+            single.assert_not_called()
+            self.assertTrue(self.window.pass_button.isEnabled())
+            self.assertTrue(self.window.interject_input.isVisible())
+            self.window.append_speech("Detective", "Where were you last night?", "Jerry")
+            self.window.run_conversation_loop()
+            group.assert_called_once()
+            single.assert_not_called()
+
+    def test_dialogue_and_input_use_readable_body_font_with_pixel_speaker_names(self):
+        self.window.append_speech("Dave", "A readable <b>literal</b> account.")
+        document = self.window.output_area.document()
+        body_font = game.readable_body_font()
+        self.assertEqual(document.defaultFont().family(), body_font.family())
+        self.assertEqual(document.defaultFont().pixelSize(), 18)
+        self.assertEqual(self.window.interject_input.font().family(), body_font.family())
+        self.assertEqual(self.window.interject_input.font().pixelSize(), 18)
+        speaker_format = document.find("Dave:").charFormat()
+        self.assertEqual(speaker_format.fontFamily(), self.window.pixel_font_family)
+        self.assertEqual(speaker_format.font().pixelSize(), 12)
+        body_format = document.find("A readable").charFormat()
+        resolved_body = QFontInfo(body_format.font().resolve(document.defaultFont())).family()
+        resolved_speaker = QFontInfo(speaker_format.font().resolve(document.defaultFont())).family()
+        self.assertNotEqual(resolved_body, resolved_speaker)
+        self.assertNotEqual(QFontInfo(self.window.interject_input.font()).family(), resolved_speaker)
+        self.assertIn("A readable <b>literal</b> account.", self.window.output_area.toPlainText())
+        self.assertEqual(self.window.conversation_buttons_layout.count(), 3)
+        self.assertEqual([self.window.conversation_buttons_layout.itemAt(i).widget().text()
+                          for i in range(3)], ["Pass", "Interject", "Call Vote"])
+
+    def test_help_and_transcript_are_readable_and_fit_the_available_screen(self):
+        windows = [game.HowToPlayWindow(self.window.pixel_font_family),
+                   game.TranscriptWindow(["Dave: A <b>literal</b> account."], self.window.pixel_font_family)]
+        try:
+            for window in windows:
+                window.show()
+            self.app.processEvents()
+            for window in windows:
+                with self.subTest(window=type(window).__name__):
+                    self.assertTrue(window.screen().availableGeometry().contains(window.geometry()))
+                    body = window.findChild(QTextEdit)
+                    self.assertEqual(body.document().defaultFont().family(), game.readable_body_font().family())
+                    self.assertEqual(body.document().defaultFont().pixelSize(), 18)
+                    first_word = body.toPlainText().split()[0]
+                    body_format = body.document().find(first_word).charFormat()
+                    resolved_body = QFontInfo(body_format.font().resolve(body.document().defaultFont())).family()
+                    self.assertNotEqual(resolved_body, QFontInfo(QFont(self.window.pixel_font_family)).family())
+                    self.assertTrue(any(label.font().family() == self.window.pixel_font_family
+                                        for label in window.findChildren(QLabel)))
+            help_body = windows[0].findChild(QTextEdit)
+            self.assertEqual(help_body.textCursor().position(), 0)
+            self.assertNotIn("hallucinate", help_body.toPlainText())
+            self.assertNotIn("capitalize", help_body.toPlainText())
+            self.assertNotIn("\n\n\n", help_body.toPlainText())
+            self.assertEqual(windows[1].findChild(QTextEdit).toPlainText(), "Dave: A <b>literal</b> account.")
+        finally:
+            for window in windows:
+                window.close()
+                window.deleteLater()
 
     def test_escape_menu_timer_runs_and_menu_closes(self):
         QTest.keyClick(self.window, Qt.Key_Escape)
@@ -154,7 +352,7 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.assertFalse(self.window.awaiting_player_vote)
 
     def test_voting_buttons_stay_enabled_while_ai_votes_are_pending(self):
-        self.window.phase = "conversation"
+        self.prepare_vote_call()
         with patch.object(game.AIWorker, "start"):
             self.window.call_vote()
         self.assertTrue(self.window.isEnabled())
@@ -388,7 +586,7 @@ class RuntimeRegressionTests(unittest.TestCase):
 
     def test_parallel_private_drafts_commit_only_the_selected_reply(self):
         self.window.phase = "conversation"
-        self.window.append_speech("Alex", "Where were you?")
+        self.window.append_speech("Dave", "Where were you?", "Jerry")
         self.window.add_public_event("The cellar is sealed.")
         for name in ("Jerry", "Dave", "Hank"):
             self.window.remember(name, "experience", name + " private observation")
@@ -421,9 +619,11 @@ class RuntimeRegressionTests(unittest.TestCase):
                     self.assertEqual([record.text for record in context.experiences], [name + " private observation"])
                     self.assertEqual([record.text for record in context.dispositions], [name + " private feeling"])
                     self.assertEqual(context.dialogue, before)
+                    self.assertEqual(context.dialogue[-1].addressee, "Jerry")
                     self.assertEqual(context.public_events, tuple(self.window.public_events))
                 state, events, dialogue, proposals = self.selector.call_args.args
                 self.assertEqual(dialogue, before)
+                self.assertEqual(dialogue[-1].addressee, "Jerry")
                 self.assertEqual(events, tuple(self.window.public_events))
                 self.assertEqual(set(proposals), set(contexts))
                 release_selector.set()
@@ -540,7 +740,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertIsNone(self.window.retry_action)
 
     def test_failed_vote_batch_keeps_player_ballot_and_retries_atomically(self):
-        self.window.phase = "conversation"
+        self.prepare_vote_call()
         failed_once = Event()
 
         def vote(context):
