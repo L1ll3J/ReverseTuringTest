@@ -121,13 +121,16 @@ class RuntimeRegressionTests(unittest.TestCase):
         for configuration, expected in cases:
             with self.subTest(configuration=configuration), patch.dict(os.environ, configuration):
                 self.assertEqual(game.vote_conversation_minimum(), expected)
-        with patch.dict(os.environ, {"ALIBAI_DEV_MODE": "1", "ALIBAI_DEV_VOTE_MINIMUM": "2"}):
+        with tempfile.TemporaryDirectory() as trace_directory, patch.dict(os.environ, {
+            "ALIBAI_DEV_MODE": "1", "ALIBAI_DEV_VOTE_MINIMUM": "2",
+            "ALIBAI_TRACE_DIR": trace_directory,
+        }):
             development_window = game.GameWindow()
-        try:
-            self.assertEqual(development_window.minimum_to_call_vote, 2)
-        finally:
-            development_window.close()
-            development_window.deleteLater()
+            try:
+                self.assertEqual(development_window.minimum_to_call_vote, 2)
+            finally:
+                development_window.close()
+                development_window.deleteLater()
 
     def test_vote_eligibility_is_enforced_at_the_twentieth_message(self):
         self.window.phase = "conversation"

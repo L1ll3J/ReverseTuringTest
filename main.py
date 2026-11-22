@@ -3,6 +3,8 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 from html import escape
 from collections import Counter
+from dataclasses import asdict
+from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fingerprint
 from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal
 from ai_runtime import AIRuntime, AIRequestError
 import sys
@@ -55,11 +57,11 @@ def validate_vote(voter, vote, characters, player_name):
     return "NONE"
 
 
-def parallel_requests(operation, contexts):
+def parallel_requests(operation, contexts, *, trace_scope=None):
     if not contexts:
         return {}
     with ThreadPoolExecutor(max_workers=len(contexts)) as executor:
-        futures = {context.character: executor.submit(operation, context) for context in contexts}
+        futures = {context.character: executor.submit(call_with_trace, operation, context, trace_scope=trace_scope) for context in contexts}
         return {character: future.result() for character, future in futures.items()}
 
 
@@ -83,6 +85,8 @@ class AIWorker(QThread):
 
 
 class GameWindow(QMainWindow):
+    development_trace_notice = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()  # Ensure the parent class is initialized
         self.sfx_enabled = True
@@ -113,7 +117,11 @@ class GameWindow(QMainWindow):
         self.alive_characters = []  # Holds the list of alive characters
         self.NPCs = []  # Holds the list of NPC characters
         self.minimum_to_call_vote = vote_conversation_minimum()
-        self.ai_runtime = AIRuntime(prompt_root=os.path.dirname(resource_path("System Prompt.txt")))
+        self.trace = TraceRun(on_error=self.development_trace_notice.emit)
+        self.development_trace_notice.connect(self.show_development_trace_notice)
+        self.trace_callback_scope = None
+        self.last_completed_trace_job_id = None
+        self.ai_runtime = AIRuntime(prompt_root=os.path.dirname(resource_path("System Prompt.txt")), trace=self.trace)
         self.public_events = []
         self.public_dialogue = []
         self.night_rooms = tuple(self.rooms)
@@ -179,12 +187,56 @@ class GameWindow(QMainWindow):
         self.init_ui()
 
 
+    def show_development_trace_notice(self, message):
+        self.output_area.append("[Development] " + message)
+
+    def start_development_trace(self):
+        if not self.trace.enabled or self.trace.run_id is not None:
+            return
+        root = os.path.dirname(resource_path("System Prompt.txt"))
+        self.trace.start({"source": source_fingerprint(root), "prompts": prompt_fingerprints(root),
+                          "models": asdict(self.ai_runtime.config),
+                          "settings": {"show_room_allocations": self.show_room_allocations},
+                          "replay": "captured_inputs_not_deterministic_simulation"})
+        self.trace_state("game_started")
+
+    def trace_state(self, reason):
+        if not self.trace.enabled or self.trace.run_id is None:
+            return
+        fields = ("player_name", "characters", "rooms", "room_assignments", "round_number", "phase",
+                  "game_over", "show_room_allocations", "old_crime_scenes", "new_crime_scenes",
+                  "rooms_visited", "night_rooms", "selected_weapon", "weapon_pen_backfire", "pending_pen_note_text",
+                  "black_magic_controller", "black_magic_target", "knife_extra_target",
+                  "knife_used_bloodlust", "c4_target_room", "c4_cooldown_nights",
+                  "player_sleep_room", "voodoo_current_identity", "stopwatch_selected",
+                  "victims_last_night", "public_events", "public_dialogue", "votes",
+                  "_c4_exploded_last_night", "_c4_last_room", "_override_murder_room",
+                  "pen_last_victim_name", "had_to_change_rooms", "awaiting_player_vote", "voting_resolved",
+                  "ai_busy", "request_serial")
+        state = {name: getattr(self, name, None) for name in fields}
+        state["expected_voters"] = sorted(getattr(self, "expected_voters", ()))
+        state["last_addressee"] = self.public_dialogue[-1].addressee if self.public_dialogue else None
+        self.trace.snapshot(state, reason=reason)
+
+    def trace_action(self, action, **details):
+        self.trace.record("action_applied", {"action": action, "round": self.round_number,
+                                            "phase": self.phase, **details})
+        self.trace_state(action)
+
+    def trace_job_options(self, task, actor=None, parent_job_id=None):
+        if not self.trace.enabled or self.trace.run_id is None:
+            return {}
+        return {"trace_task": task, "trace_actor": actor, "trace_parent_job_id": parent_job_id}
+
     def remember(self, character, kind, text):
         section = {"experience": "experiences", "disposition": "dispositions"}[kind]
         self.characters[character][section].append(MemoryRecord(self.round_number, kind, text, "self"))
+        self.trace.record("memory_added", {"character": character, "kind": kind,
+                                          "round": self.round_number, "text": text})
 
     def add_public_event(self, text, source="Detective", display=True):
         self.public_events.append(MemoryRecord(self.round_number, "public_event", text, source))
+        self.trace.record("public_event", {"source": source, "round": self.round_number, "text": text})
         self.transcript.append(text)
         if display and self.phase in ("conversation", "voting"):
             self.output_area.append(escape(text))
@@ -208,6 +260,9 @@ class GameWindow(QMainWindow):
         self.retry_button.hide()
         self.request_serial += 1
         self.public_dialogue.append(DialogueLine(self.round_number, speaker, speech, addressee))
+        self.trace.record("speech_committed", {"round": self.round_number, "speaker": speaker,
+                                              "speech": speech, "addressee": addressee},
+                          scope=self.trace_callback_scope)
         message = f"{speaker}: {speech}"
         self.current_conversation.append(message)
         self.most_recent_messageS.append(message)
@@ -218,11 +273,18 @@ class GameWindow(QMainWindow):
         if speaker == "Detective" or speaker in self.characters:
             self.play_sound_effect(f"sounds/voices/{speaker}.mp3")
 
-    def start_ai_request(self, operation, on_success, status):
+    def start_ai_request(self, operation, on_success, status, *, trace_task=None,
+                         trace_actor=None, trace_parent_job_id=None, trace_scope=None):
         if self.game_over or self.ai_busy:
             return
         self.request_serial += 1
         token, phase = self.request_serial, self.phase
+        scope = trace_scope or self.trace.new_job(trace_task or "operation",
+            parent_job_id=trace_parent_job_id,
+            metadata={"actor": trace_actor, "round": self.round_number, "phase": phase})
+        if scope is not None:
+            scope.record("job_started", {"request_serial": token, "round": self.round_number,
+                                         "phase": phase, "status": status})
         self.ai_busy = True
         self.retry_action = None
         self.retry_button.hide()
@@ -238,29 +300,50 @@ class GameWindow(QMainWindow):
             return not self.game_over and self.phase == phase and self.request_serial == token
 
         def ready(result):
+            if scope is not None:
+                scope.record("job_result", {"result": result})
             if not current():
+                if scope is not None:
+                    scope.record("job_ignored", {"reason": "stale_result", "current_phase": self.phase,
+                                                 "current_serial": self.request_serial})
                 return
             self.ai_busy = False
             self.interject_input.setEnabled(True)
             self.say_button.setEnabled(True)
             self.secondary_output_area.clear()
-            on_success(result)
+            self.last_completed_trace_job_id = scope.job_id if scope is not None else None
+            previous_scope = self.trace_callback_scope
+            self.trace_callback_scope = scope
+            try:
+                on_success(result)
+            finally:
+                self.trace_callback_scope = previous_scope
+            if scope is not None:
+                scope.record("job_applied", {"round": self.round_number, "phase": self.phase})
 
         def failed(message):
+            if scope is not None:
+                scope.record("job_failed", {"error_type": "request_failed"})
             if not current():
+                if scope is not None:
+                    scope.record("job_ignored", {"reason": "stale_failure", "current_phase": self.phase,
+                                                 "current_serial": self.request_serial})
                 return
             self.ai_busy = False
             self.interject_input.setEnabled(True)
             self.say_button.setEnabled(True)
             self.secondary_output_area.setText(message)
-            self.retry_action = lambda: self.start_ai_request(operation, on_success, status)
+            self.retry_action = lambda: self.start_ai_request(
+                operation, on_success, status, trace_task=trace_task, trace_actor=trace_actor,
+                trace_parent_job_id=trace_parent_job_id,
+                trace_scope=scope.retry() if scope is not None else None)
             self.retry_button.show()
             if phase == "conversation":
                 self.pass_button.setEnabled(True)
                 self.interject_button.setEnabled(True)
                 self.vote_button.setEnabled(self.can_call_vote())
 
-        worker = AIWorker(operation)
+        worker = AIWorker(lambda: operation(scope) if trace_task is not None else operation())
         worker.result_ready.connect(ready)
         worker.failed.connect(failed)
         worker.finished.connect(lambda: self.release_ai_worker(worker))
@@ -296,6 +379,8 @@ class GameWindow(QMainWindow):
         self.request_serial += 1
         if not restarting:
             self.phase = "closed"
+            self.trace_action("window_closed")
+            self.trace.end("closed")
             app = QApplication.instance()
             if getattr(app, "_ai_workers", None) and app.quitOnLastWindowClosed():
                 app.setQuitOnLastWindowClosed(False)
@@ -847,6 +932,7 @@ class GameWindow(QMainWindow):
         self.game_over = False
 
         # Start the first action phase
+        self.start_development_trace()
         self.show_weapon_select_screen()
 
 
@@ -935,6 +1021,7 @@ class GameWindow(QMainWindow):
 
     def select_weapon_and_start(self, weapon):
         self.selected_weapon = weapon
+        self.trace_action("weapon_selected", weapon_id=weapon["id"])
         self.output_area.append(f"\nSelected weapon: {weapon['name']}\n")
         self.weapon_scroll.hide()
 
@@ -1231,6 +1318,8 @@ class GameWindow(QMainWindow):
                 if len(self.room_assignments[room]) == 2 and self.round_number == 1:
                     room_with_two_people = room  # Mark that a room with two people exists
 
+        self.trace_action("night_rooms_assigned", assignments=self.room_assignments)
+
         # Display room assignments if in normal mode
         if self.show_room_allocations:
             formatted_assignments = []
@@ -1278,6 +1367,7 @@ class GameWindow(QMainWindow):
 
         self.rooms_visited.append(selected_room)
         self.new_crime_scenes.append(selected_room)
+        self.trace_action("room_entered", room=selected_room, occupants=list(occupants))
 
         wpn_id = (self.selected_weapon or {}).get("id")
 
@@ -1330,14 +1420,16 @@ class GameWindow(QMainWindow):
                         if self.characters.get(v, {}).get("alive"):
                             self.characters[v]["alive"] = False
                             self.victims_last_night.append(v)
-
                     self.new_crime_scenes = [target_room]
                     self._override_murder_room = target_room
+                    self.trace_action("explosion_resolved", room=target_room,
+                                      victims=list(self.victims_last_night))
                     self.update_witness_memories(' and '.join(victims))
     
                 else:
                     self.output_area.append(f"The C4 detonates in the {target_room}, but nobody was there.\n")
                     self.new_crime_scenes = [target_room]
+                    self.trace_action("explosion_resolved", room=target_room, victims=[])
                     self.update_witness_memories(None)
                 # No witnesses for blast; go to convo
                 self.transcript.append(f"You blew up the {target_room}.")
@@ -1371,6 +1463,7 @@ class GameWindow(QMainWindow):
                 self.room_assignments[controlled_current_room].remove(ctrl)
                 self.room_assignments[target_room].append(ctrl)
 
+                self.trace_action("controlled_kill_resolved", controller=ctrl, victim=tgt, room=target_room)
                 # Reuse your existing witness writer, but weapon-aware
                 self.update_witness_memories(tgt)
                 self._override_murder_room = None
@@ -1414,9 +1507,11 @@ class GameWindow(QMainWindow):
                 self.room_assignments[player_room].remove(self.player_name)
                 self.room_assignments[player_room].append(victim)
                 self.transcript.append(f"You possessed the body of {self.player_name} in the {player_room} and left behind {victim} as a corpse.")
+                self.trace_action("identity_changed", previous_body=victim, current_body=self.player_name)
 
             self.new_crime_scenes.append(player_room)
 
+            self.trace_action("kill_resolved", victim=victim, room=player_room)
             # Update witnesses' memories (even if they are not in the same room)
             self.update_witness_memories(victim)
 
@@ -1480,7 +1575,9 @@ class GameWindow(QMainWindow):
             self.room_assignments[current_room].remove(self.player_name)
             self.room_assignments[current_room].append(victim)
             self.transcript.append(f"You possessed the body of {self.player_name} in the {current_room} and left behind {victim} as a corpse.")
+            self.trace_action("identity_changed", previous_body=victim, current_body=self.player_name)
 
+        self.trace_action("kill_resolved", victim=victim, room=self.rooms_visited[-1])
         # Update witnesses' memories after a multiple-person murder
         self.update_witness_memories(victim)
 
@@ -1569,6 +1666,13 @@ class GameWindow(QMainWindow):
         self.secondary_output_area.clear()
         self.vote_button.setEnabled(self.can_call_vote())
         latest = self.public_dialogue[-1] if self.public_dialogue else None
+        self.trace.record("conversation_routed", {
+            "round": self.round_number,
+            "addressee": latest.addressee if latest is not None else None,
+            "speaker": latest.speaker if latest is not None else None,
+            "player": self.player_name,
+            "player_invited": latest is not None and latest.addressee == self.player_name,
+        })
         if latest is not None and (latest.speaker == self.player_name
                 or (latest.speaker == "Detective" and latest.addressee != self.player_name)):
             self.run_multiple_responses()
@@ -1586,6 +1690,7 @@ class GameWindow(QMainWindow):
     def pass_conversation(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
+        self.trace_action("conversation_passed")
         self.interject_input.hide()
         self.say_button.hide()
         self.run_multiple_responses()
@@ -1626,6 +1731,7 @@ class GameWindow(QMainWindow):
             return
         self.output_area.clear()
         self.output_area.append("Vote called!\n")
+        self.trace_action("vote_called")
         # self.pass_button.hide()
         self.interject_input.hide()
         # self.interject_button.hide()
@@ -1647,13 +1753,14 @@ class GameWindow(QMainWindow):
         self.awaiting_player_vote = True
         self.output_area.append("Voting phase has begun. Choose your vote below.")
         self.display_vote_buttons()
+        self.trace_state("voting_started")
         contexts = tuple(self.build_character_context(char) for char in self.expected_voters
                          if char != self.player_name)
         runtime = self.ai_runtime
         self.start_ai_request(
-            lambda: parallel_requests(runtime.vote, contexts),
+            lambda scope=None: parallel_requests(runtime.vote, contexts, trace_scope=scope),
             self.handle_ai_votes,
-            "The group is deciding how to vote...",
+            "The group is deciding how to vote...", **self.trace_job_options("votes"),
         )
         # We will wait for the player's vote before tallying
 
@@ -1721,6 +1828,8 @@ class GameWindow(QMainWindow):
             self.transcript.append(f"Voting Phase {self.round_number} results: \n")
             self.transcript.append(f"You voted to skip.\n")           
         self.votes[self.player_name] = selected_character
+        self.trace.record("ballot_received", {"voter": self.player_name, "target": selected_character,
+                                             "round": self.round_number, "source": "player"})
         self.awaiting_player_vote = False
 
         # Hide the voting buttons after the player has voted
@@ -1737,6 +1846,9 @@ class GameWindow(QMainWindow):
         self.votes[character] = validate_vote(
             character, vote, self.characters, self.player_name
         )
+        self.trace.record("ballot_received", {"voter": character, "target": self.votes[character],
+                                             "round": self.round_number, "source": "character"},
+                          scope=self.trace_callback_scope)
         self.tally_votes()
 
     def tally_votes(self):
@@ -1792,6 +1904,7 @@ class GameWindow(QMainWindow):
                 self.add_continue_button()
         
         self.transcript.append("\n\n\n")
+        self.trace_action("vote_resolved", ballots=dict(self.votes))
 
     def add_continue_button(self):
 
@@ -1856,6 +1969,8 @@ class GameWindow(QMainWindow):
             return
         self.game_over = True
         self.phase = "game_over"
+        self.trace_action("game_ended", final_score=final_score)
+        self.trace.end("game_over")
         self.weapon_action_panel.hide()
         # Clear the output area and hide all buttons
         self.room_buttons_widget.hide()
@@ -1945,6 +2060,8 @@ class GameWindow(QMainWindow):
         """Hard restart: spawn a new main window with the same window state, then close this one."""
         if self.phase == "restarting":
             return
+        self.trace_action("restart_requested")
+        self.trace.end("restart")
         self.game_over = True
         self.phase = "restarting"
         # Close the ESC overlay if it’s open
@@ -2036,7 +2153,10 @@ class GameWindow(QMainWindow):
             self.add_public_event("The Detective informs everyone that no murder occurred last night.")
         if ((self.selected_weapon or {}).get("id") == "pen"
                 and self.pending_pen_note_text and self.victims_last_night):
-            signed_name = self.player_name if random.random() < self.weapon_pen_backfire else self.victims_last_night[-1]
+            roll = random.random()
+            signed_name = self.player_name if roll < self.weapon_pen_backfire else self.victims_last_night[-1]
+            self.trace.record("random_outcome", {"kind": "pen_signature", "roll": roll,
+                                                "threshold": self.weapon_pen_backfire, "signed_name": signed_name})
             note = self.pending_pen_note_text + " - Signed: " + signed_name
             self.add_public_event("The Detective reveals that a note was found by the body, it reads: " + note)
         bloodlust = (self.selected_weapon or {}).get("id") == "knife" and self.knife_used_bloodlust
@@ -2048,6 +2168,7 @@ class GameWindow(QMainWindow):
         else:
             speech = f"{first}, let's start with you. Where were you last night?"
         self.append_speech("Detective", speech, first)
+        self.trace_state("conversation_started")
         self.run_conversation_loop()
     
     def run_single_response(self, mentioned):
@@ -2056,9 +2177,9 @@ class GameWindow(QMainWindow):
             return
         context = self.build_character_context(mentioned)
         runtime = self.ai_runtime
-        self.start_ai_request(lambda: runtime.speech(context),
+        self.start_ai_request(lambda scope=None: call_with_trace(runtime.speech, context, trace_scope=scope),
                               lambda proposal: self.handle_single_response(mentioned, proposal),
-                              f"{mentioned} is responding...")
+                              f"{mentioned} is responding...", **self.trace_job_options("speech", mentioned))
 
     def handle_single_response(self, mentioned, response):
         if self.phase != "conversation" or self.game_over:
@@ -2075,18 +2196,19 @@ class GameWindow(QMainWindow):
             return
         selector_snapshot = (self.public_state(), tuple(self.public_events), tuple(self.public_dialogue))
         runtime = self.ai_runtime
-        self.start_ai_request(lambda: parallel_requests(runtime.speech, contexts),
+        self.start_ai_request(lambda scope=None: parallel_requests(runtime.speech, contexts, trace_scope=scope),
                               lambda proposals: self.handle_multiple_responses(proposals, selector_snapshot),
-                              "The group is responding...")
+                              "The group is responding...", **self.trace_job_options("proposals"))
 
     def handle_multiple_responses(self, responses, selector_snapshot):
         if self.phase != "conversation" or self.game_over:
             return
         runtime = self.ai_runtime
         proposals = dict(responses)
-        self.start_ai_request(lambda: runtime.select_reply(*selector_snapshot, proposals),
+        self.start_ai_request(lambda scope=None: call_with_trace(runtime.select_reply, *selector_snapshot, proposals, trace_scope=scope),
                               lambda speaker: self.handle_best_response(proposals[speaker], speaker),
-                              "The conversation is continuing...")
+                              "The conversation is continuing...",
+                              **self.trace_job_options("selector", parent_job_id=self.last_completed_trace_job_id))
 
     def cleanup_worker(self):
         self.active_workers = [worker for worker in self.active_workers if not worker.isFinished()]
@@ -2094,6 +2216,8 @@ class GameWindow(QMainWindow):
     def handle_best_response(self, best_response, speaker):
         if self.phase != "conversation" or self.game_over:
             return
+        self.trace.record("proposal_selected", {"speaker": speaker, "proposal": best_response},
+                          scope=self.trace_callback_scope)
         self.append_speech(speaker, best_response.speech, best_response.addressee)
         self.run_conversation_loop()
 
@@ -2177,6 +2301,7 @@ class GameWindow(QMainWindow):
         def do_save():
             txt = edit.toPlainText().strip()
             self.pending_pen_note_text = txt if txt else None
+            self.trace_action("weapon_configured", weapon_id="pen", note=self.pending_pen_note_text)
             self.apply_weapon_gating()
             w.close()
         save.clicked.connect(do_save)
@@ -2300,6 +2425,7 @@ class GameWindow(QMainWindow):
             c, t = ctrl.currentText(), tgt.currentText()
             if c and t and c != t:
                 self.black_magic_controller, self.black_magic_target = c, t
+                self.trace_action("weapon_configured", weapon_id="blackmagic", controller=c, target=t)
                 self.apply_weapon_gating()
                 w.close()
             else:
@@ -2390,6 +2516,7 @@ class GameWindow(QMainWindow):
             else:
                 self.knife_extra_target = choice
                 self.knife_used_bloodlust = True
+            self.trace_action("weapon_configured", weapon_id="knife", target=self.knife_extra_target)
             w.close()
             self.build_weapon_action_panel()
             QTimer.singleShot(0, self.position_weapon_panel)
@@ -2472,6 +2599,7 @@ class GameWindow(QMainWindow):
             sel = room_box.currentText().strip()
             if sel:
                 self.c4_target_room = sel
+                self.trace_action("weapon_configured", weapon_id="c4", room=sel)
                 self.apply_weapon_gating()  # allows rooms now
                 w.close()
             else:
