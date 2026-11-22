@@ -599,6 +599,80 @@ class RuntimeRegressionTests(unittest.TestCase):
                 worker.wait(3000)
             self.app.processEvents()
 
+    def test_camera_equipment_is_visible_at_start_without_revealing_rooms_in_hard_mode(self):
+        self.window.show_room_allocations = False
+        self.window.player_name_input.setText("Alex")
+        camera = game.NPCItemState({"Hank": "camera"})
+        with patch.object(game.NPCItemState, "allocate", return_value=camera):
+            self.window.start_game()
+        self.assertTrue(self.window.npc_equipment_label.isVisible())
+        self.assertIn("Hank is carrying a Camera", self.window.npc_equipment_label.text())
+        self.assertFalse(any(room in self.window.npc_equipment_label.text() for room in self.window.rooms))
+        bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.select_weapon_and_start(bare)
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+        text = self.window.output_area.toPlainText()
+        self.assertIn("Hank is carrying a Camera", text)
+        self.assertNotIn("Room Assignments", text)
+        self.assertNotIn("Visible room:", text)
+        context = self.window.build_character_context("Jerry")
+        self.assertTrue(any(event.source == "Visible equipment" for event in context.public_events))
+        self.assertFalse(any(event.source == "Photograph" for event in context.public_events))
+
+    def test_camera_captures_before_attack_and_presents_once_after_owner_dies(self):
+        self.window.npc_items = game.NPCItemState({"Hank": "camera"})
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        with patch.object(game.random, "choice", side_effect=lambda choices: choices[0]):
+            self.window.run_action_phase()
+        photos = self.window.npc_items.capture_night(1, {}, ())
+        self.assertEqual(len(photos), 1)
+        photo = photos[0]
+        self.assertEqual(photo.owner, "Hank")
+        self.assertNotIn("Alex", photo.occupants)
+        self.assertFalse(any(event.source == "Photograph" for event in self.window.public_events))
+        with patch.object(self.window, "run_conversation_loop"):
+            self.window.choose_room(photo.room)
+        self.assertFalse(self.window.characters["Hank"]["alive"])
+        published = [event for event in self.window.public_events if event.source == "Photograph"]
+        self.assertEqual(len(published), 1)
+        self.assertEqual(published[0].text, photo.public_description())
+        self.assertIn(published[0], self.window.build_character_context("Jerry").public_events)
+        self.assertEqual(self.window.output_area.toPlainText().count("genuine photograph"), 1)
+        with patch.object(self.window, "run_conversation_loop"):
+            self.window.run_conversation_phase()
+        self.assertEqual(sum(event.source == "Photograph" for event in self.window.public_events), 1)
+        self.assertEqual(self.window.output_area.toPlainText().count("genuine photograph"), 1)
+        self.window.run_action_phase()
+        self.assertEqual(self.window.npc_items.capture_night(2, {}, ()), ())
+
+    def test_possession_does_not_rewrite_photo_or_continue_the_npc_camera(self):
+        self.window.npc_items = game.NPCItemState({"Hank": "camera"})
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "voodoo")
+        with patch.object(game.random, "choice", side_effect=lambda choices: choices[0]):
+            self.window.run_action_phase()
+        photo, = self.window.npc_items.capture_night(1, {}, ())
+        original = photo.public_description()
+        with patch.object(self.window, "run_conversation_loop"):
+            self.window.choose_room(photo.room)
+        self.assertEqual(self.window.player_name, "Hank")
+        self.assertNotIn("Hank", self.window.characters)
+        self.assertEqual(photo.public_description(), original)
+        self.assertIn("Visible people: Hank", original)
+        self.assertNotIn("Alex", original)
+        self.window.run_action_phase()
+        self.assertEqual(self.window.npc_items.capture_night(2, {}, ()), ())
+
+    def test_final_morning_still_presents_a_dead_owners_photo(self):
+        self.window.round_number = 1
+        self.window.npc_items = game.NPCItemState({"Hank": "camera"})
+        photo, = self.window.npc_items.capture_night(1, {"Kitchen": ["Hank"]}, ("Hank",))
+        self.window.characters["Hank"]["alive"] = False
+        self.window.characters["Dave"]["alive"] = False
+        self.window.run_conversation_phase()
+        self.assertTrue(self.window.game_over)
+        self.assertEqual(sum(event.source == "Photograph" for event in self.window.public_events), 1)
+        self.assertIn(photo.public_description(), self.window.output_area.toPlainText())
+
     def test_close_retains_running_worker_until_safe_release_and_ignores_its_result(self):
         self.window.phase = "conversation"
         entered, release = Event(), Event()
