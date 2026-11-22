@@ -17,9 +17,10 @@ class ItemCataloguePanel(QWidget):
         self.setStyleSheet(f'''
             QWidget#itemCataloguePanel QLabel, QWidget#itemCataloguePanel QCheckBox {{
                 font-family: "{body_font.family()}"; font-size: 18px; color: #dedede;
+                background: transparent;
             }}
             QFrame#itemCatalogueCard {{ border: 1px solid #555; background: #252525; }}
-            QLabel#itemCatalogueError {{ color: #ffb3a9; }}
+            QWidget#itemCataloguePanel QLabel#itemCatalogueError {{ color: #ffb3a9; }}
         ''')
         self._definitions = dict(definitions)
         self._unlock_goals = dict(unlock_goals)

@@ -12,8 +12,8 @@ if sys.platform == "win32":
     os.environ.setdefault("QT_QPA_FONTDIR", str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PyQt5.QtCore import QCoreApplication, QEvent, Qt
-from PyQt5.QtGui import QFont, QFontDatabase, QFontInfo, QPixmap
+from PyQt5.QtCore import QCoreApplication, QEvent, QPoint, Qt
+from PyQt5.QtGui import QFont, QFontDatabase, QFontInfo, QPalette, QPixmap
 from PyQt5.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton, QWidget
 
 from content import UNLOCK_GOALS
@@ -36,7 +36,7 @@ class ItemCatalogueTests(unittest.TestCase):
         self.font.setPixelSize(18)
         self.callback = Mock()
         self.parent = QWidget()
-        self.parent.setStyleSheet('QWidget { font-family: "Courier New"; font-size: 10px; }')
+        self.parent.setStyleSheet('QWidget { font-family: "Courier New"; font-size: 10px; background-color: black; }')
         self.panels = []
 
     def tearDown(self):
@@ -154,6 +154,23 @@ class ItemCatalogueTests(unittest.TestCase):
                 use.assert_called_once_with("instance", "body")
                 draft.resolve()
                 skip.assert_not_called()
+
+    def test_card_text_and_checkbox_show_card_background_under_parent_black_style(self):
+        panel = self.panel(ProfileSnapshot(unlocked={"guardian_angel"}))
+        name = panel.findChild(QLabel, "itemName_banana")
+        checkbox = panel.checkboxes["guardian_angel"]
+        for widget in (name, checkbox):
+            with self.subTest(widget=widget.objectName()):
+                panel.scroll.ensureWidgetVisible(widget)
+                self.app.processEvents()
+                point = widget.mapTo(panel, QPoint(widget.width() - 2, widget.height() - 2))
+                image = panel.grab().toImage()
+                self.assertEqual(image.pixelColor(point).name(), "#252525")
+        self.callback.side_effect = ProfileError("Could not save preferences.")
+        checkbox.setChecked(False)
+        self.app.processEvents()
+        self.assertTrue(panel.error_label.isVisible())
+        self.assertEqual(panel.error_label.palette().color(QPalette.WindowText).name(), "#ffb3a9")
 
 
 if __name__ == "__main__":
