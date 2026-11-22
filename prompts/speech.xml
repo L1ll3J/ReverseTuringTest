@@ -1,0 +1,7 @@
+<task name="speech">
+  Continue the conversation as your character.
+  Return only the words your character says in the speech field,
+  without a speaker label or surrounding quotation marks.
+  Set addressee to the living character whose reply you are inviting,
+  or null when speaking to the group without a direct recipient.
+</task>

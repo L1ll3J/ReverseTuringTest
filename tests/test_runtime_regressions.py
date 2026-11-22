@@ -4,29 +4,31 @@ Run with: python -m unittest discover -s tests -v
 """
 
 import contextlib
-import io
 import itertools
 import os
 from pathlib import Path
 import socket
 import sys
 import tempfile
+from threading import Barrier, Event
+from time import monotonic
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PyQt5.QtCore import QCoreApplication, QEvent, Qt, QTimer
-from PyQt5.QtTest import QSignalSpy, QTest
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QScrollArea
 
 with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
     import main as game
+    import ai_runtime
 
 
 def character(alive=True):
-    return {"alive": alive, "profile": [], "memory": [], "key-takeaways": []}
+    return {"alive": alive, "profile": [], "experiences": [], "dispositions": []}
 
 
 class RuntimeRegressionTests(unittest.TestCase):
@@ -42,12 +44,16 @@ class RuntimeRegressionTests(unittest.TestCase):
             socket.socket, "connect", side_effect=AssertionError("Network access in offline test")
         ))
         self.openai_constructor = self.patches.enter_context(patch.object(
-            game, "OpenAI", side_effect=AssertionError("Unexpected API client creation")
+            ai_runtime, "OpenAI", side_effect=AssertionError("Unexpected API client creation")
         ))
         self.patches.enter_context(patch.object(game, "QMediaPlayer"))
-        self.patches.enter_context(patch.object(game, "summarise_conversation", return_value="Summary"))
-        self.patches.enter_context(patch.object(game, "generate_conversation_speech", return_value="A reply."))
-        self.patches.enter_context(patch.object(game, "generate_voting_prompt", return_value="NONE"))
+        self.speech = self.patches.enter_context(patch.object(
+            game.AIRuntime, "speech", return_value=game.SpeechProposal(None, "A reply.")
+        ))
+        self.vote = self.patches.enter_context(patch.object(game.AIRuntime, "vote", return_value="NONE"))
+        self.selector = self.patches.enter_context(patch.object(
+            game.AIRuntime, "select_reply", side_effect=lambda state, events, dialogue, proposals: next(iter(proposals))
+        ))
         self.window = game.GameWindow()
         self.app.processEvents()
         self.window.player_name = "Alex"
@@ -67,9 +73,15 @@ class RuntimeRegressionTests(unittest.TestCase):
 
     def begin_vote(self):
         self.window.phase = "conversation"
-        with patch.object(game.AIVoteWorker, "start"):
+        with patch.object(self.window, "start_ai_request"):
             self.window.run_voting_phase()
         self.assertEqual(self.window.expected_voters, {"Alex", "Jerry", "Dave", "Hank"})
+
+    def wait_for(self, condition, message="The queued operation did not complete"):
+        deadline = monotonic() + 3
+        while not condition() and monotonic() < deadline:
+            QTest.qWait(5)
+        self.assertTrue(condition(), message)
 
     def test_title_screen_opens_without_api_key_or_client(self):
         self.assertEqual(self.window.phase, "start")
@@ -143,10 +155,12 @@ class RuntimeRegressionTests(unittest.TestCase):
 
     def test_voting_buttons_stay_enabled_while_ai_votes_are_pending(self):
         self.window.phase = "conversation"
-        with patch.object(game.AIVoteWorker, "start"):
+        with patch.object(game.AIWorker, "start"):
             self.window.call_vote()
         self.assertTrue(self.window.isEnabled())
         self.assertTrue(self.window.vote_buttons_widget.isEnabled())
+        for worker in list(self.window.active_workers):
+            self.window.release_ai_worker(worker)
 
     def test_missing_ballots_produce_no_partial_results(self):
         self.begin_vote()
@@ -159,11 +173,9 @@ class RuntimeRegressionTests(unittest.TestCase):
         for vote in ("Debra", "Jerry", "Unknown", "", None):
             with self.subTest(vote=vote):
                 self.assertEqual(game.validate_vote("Jerry", vote, self.window.characters, "Alex"), "NONE")
-                worker = game.AIVoteWorker("Jerry", self.window.characters, "rules", "summary", "Alex")
-                emitted = QSignalSpy(worker.vote_ready)
-                with patch.object(game, "generate_voting_prompt", return_value=vote):
-                    worker.run()
-                self.assertEqual(list(emitted[0]), ["Jerry", "NONE"])
+                self.begin_vote()
+                self.window.collect_ai_vote("Jerry", vote)
+                self.assertEqual(self.window.votes["Jerry"], "NONE")
         self.assertEqual(game.validate_vote("Jerry", "Alex", self.window.characters, "Alex"), "Alex")
         self.assertEqual(game.validate_vote("Jerry", "Dave", self.window.characters, "Alex"), "Dave")
 
@@ -243,17 +255,17 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.window.pending_pen_note_text = "Trust nobody"
                 self.window.victims_last_night = ["Debra"]
                 self.window.new_crime_scenes = []
-                for data in self.window.characters.values():
-                    data["memory"] = []
+                self.window.public_events = []
                 with patch.object(game.random, "random", return_value=roll) as random_roll, patch.object(
                     self.window, "run_conversation_loop"
-                ), contextlib.redirect_stdout(io.StringIO()):
+                ):
                     self.window.run_conversation_phase()
                 random_roll.assert_called_once()
-                notes = [next(line for line in data["memory"] if "note was found" in line)
-                         for data in self.window.characters.values()]
+                notes = [next(event.text for event in self.window.build_character_context(name).public_events
+                              if "note was found" in event.text) for name in self.window.characters]
                 self.assertEqual(len(set(notes)), 1)
                 self.assertIn("Trust nobody - Signed: " + signature, notes[0])
+                self.assertEqual(sum("note was found" in event.text for event in self.window.public_events), 1)
 
     def test_pen_without_victim_does_not_reveal_a_note(self):
         self.window.selected_weapon = {"id": "pen"}
@@ -262,11 +274,10 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.window.new_crime_scenes = []
         with patch.object(game.random, "random") as random_roll, patch.object(
             self.window, "run_conversation_loop"
-        ), contextlib.redirect_stdout(io.StringIO()):
+        ):
             self.window.run_conversation_phase()
         random_roll.assert_not_called()
-        self.assertFalse(any("note was found" in line for data in self.window.characters.values()
-                             for line in data["memory"]))
+        self.assertFalse(any("note was found" in event.text for event in self.window.public_events))
 
     def test_weapon_panel_stays_hidden_outside_room_selection(self):
         self.window.selected_weapon = {"id": "bare"}
@@ -288,9 +299,11 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.window.game_over = game_over
                 self.window.run_single_response("Jerry")
                 self.window.run_multiple_responses()
-                self.window.handle_single_response("Jerry", "Late reply")
-                self.window.handle_multiple_responses({"Jerry": "Late reply"}, "Late summary")
-                self.window.handle_best_response("Late reply", "Jerry")
+                proposal = game.SpeechProposal(None, "Late reply")
+                snapshot = (self.window.public_state(), (), ())
+                self.window.handle_single_response("Jerry", proposal)
+                self.window.handle_multiple_responses({"Jerry": proposal}, snapshot)
+                self.window.handle_best_response(proposal, "Jerry")
                 resume.assert_not_called()
                 self.assertEqual(self.window.current_conversation, ["Alex: Original"])
                 self.assertEqual(self.window.most_recent_messageS, ["Alex: Original"])
@@ -315,12 +328,25 @@ class RuntimeRegressionTests(unittest.TestCase):
             delivered.append(callback.__name__)
             callback(*args)
 
+        proposal = game.SpeechProposal(None, "Late reply")
+        snapshot = (self.window.public_state(), (), ())
         callbacks = (
-            (self.window.handle_single_response, ("Jerry", "Late reply")),
-            (self.window.handle_multiple_responses, ({"Jerry": "Late reply"}, "Late summary")),
-            (self.window.handle_best_response, ("Late reply", "Jerry")),
+            (self.window.handle_single_response, ("Jerry", proposal)),
+            (self.window.handle_multiple_responses, ({"Jerry": proposal}, snapshot)),
+            (self.window.handle_best_response, (proposal, "Jerry")),
         )
+        entered, release = Event(), Event()
+        success = Mock()
+
+        def operation():
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("Old request was not released")
+            return "late result"
+
         try:
+            self.window.start_ai_request(operation, success, "Waiting for old request")
+            self.wait_for(entered.is_set)
             with patch.object(game.GameWindow, "__init__", new=record_init), patch.object(
                 game.QThread, "start"
             ) as start_worker, patch.object(self.window, "run_conversation_loop") as resume:
@@ -328,7 +354,9 @@ class RuntimeRegressionTests(unittest.TestCase):
                     QTimer.singleShot(delay, lambda callback=callback, args=args: deliver(callback, *args))
                 self.window.restart_game()
                 self.window.restart_game()
+                QTimer.singleShot(10, release.set)
                 QTest.qWait(80)
+                self.wait_for(lambda: not self.window.active_workers)
                 self.assertEqual(len(created), 1)
                 self.assertIs(self.app._main_window, created[0])
                 self.assertTrue(created[0].isVisible())
@@ -340,7 +368,12 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.assertEqual(self.window.most_recent_messageS, ["Alex: Original"])
                 start_worker.assert_not_called()
                 resume.assert_not_called()
+                success.assert_not_called()
         finally:
+            release.set()
+            for worker in list(self.window.active_workers):
+                worker.wait(3000)
+            self.app.processEvents()
             self.app.setQuitOnLastWindowClosed(False)
             for window in created:
                 window.close()
@@ -353,31 +386,254 @@ class RuntimeRegressionTests(unittest.TestCase):
                 del self.app._main_window
             self.app.setQuitOnLastWindowClosed(previous_quit_setting)
 
-    def test_parallel_responses_emit_once_with_real_queued_signals(self):
-        worker = game.MultipleResponseWorker(
-            self.window.characters, "rules", ["Alex: Hello"], ["Alex: Hello"], ["Jerry", "Dave", "Hank"]
-        )
-        emitted = QSignalSpy(worker.all_responses_ready)
-        worker.start()
-        self.assertTrue(worker.wait(2000), "Response coordinator did not finish")
-        children = list(worker.workers)
+    def test_parallel_private_drafts_commit_only_the_selected_reply(self):
+        self.window.phase = "conversation"
+        self.window.append_speech("Alex", "Where were you?")
+        self.window.add_public_event("The cellar is sealed.")
+        for name in ("Jerry", "Dave", "Hank"):
+            self.window.remember(name, "experience", name + " private observation")
+            self.window.remember(name, "disposition", name + " private feeling")
+        barrier = Barrier(3)
+        contexts = {}
+        selector_entered, release_selector = Event(), Event()
+
+        def speech(context):
+            contexts[context.character] = context
+            barrier.wait(timeout=2)
+            return game.SpeechProposal(None, context.character + " draft")
+
+        def select(state, events, dialogue, proposals):
+            selector_entered.set()
+            if not release_selector.wait(2):
+                raise AssertionError("Selector was not released")
+            return "Dave"
+
+        self.speech.side_effect = speech
+        self.selector.side_effect = select
+        before = tuple(self.window.public_dialogue)
         try:
-            for child in children:
-                self.assertTrue(child.wait(2000), "Character worker did not finish")
-            if not emitted:
-                self.assertTrue(emitted.wait(2000), "Combined reply was never emitted")
-            self.app.processEvents()
-            worker.check_all_workers_done()
-            worker.check_all_workers_done()
-            self.assertEqual(len(emitted), 1)
-            self.assertEqual(dict(emitted[0][0]), {
-                "Jerry": "A reply.", "Dave": "A reply.", "Hank": "A reply."
-            })
-            self.assertEqual(emitted[0][1], "Summary")
+            with patch.object(self.window, "run_conversation_loop"):
+                self.window.run_multiple_responses()
+                self.wait_for(selector_entered.is_set)
+                self.assertEqual(tuple(self.window.public_dialogue), before)
+                self.assertEqual(set(contexts), {"Jerry", "Dave", "Hank"})
+                for name, context in contexts.items():
+                    self.assertEqual([record.text for record in context.experiences], [name + " private observation"])
+                    self.assertEqual([record.text for record in context.dispositions], [name + " private feeling"])
+                    self.assertEqual(context.dialogue, before)
+                    self.assertEqual(context.public_events, tuple(self.window.public_events))
+                state, events, dialogue, proposals = self.selector.call_args.args
+                self.assertEqual(dialogue, before)
+                self.assertEqual(events, tuple(self.window.public_events))
+                self.assertEqual(set(proposals), set(contexts))
+                release_selector.set()
+                self.wait_for(lambda: not self.window.ai_busy and not self.window.active_workers)
+                self.assertEqual(self.window.public_dialogue[-1].speaker, "Dave")
+                self.assertEqual(self.window.public_dialogue[-1].text, "Dave draft")
+                self.assertEqual(len(self.window.public_dialogue), len(before) + 1)
+                self.assertFalse(any("Jerry draft" in line or "Hank draft" in line
+                                     for line in self.window.current_conversation))
+                self.selector.assert_called_once()
         finally:
-            worker.wait(2000)
-            for child in children:
-                child.wait(2000)
+            release_selector.set()
+            for worker in list(self.window.active_workers):
+                worker.wait(3000)
+            self.app.processEvents()
+
+    def test_speech_and_vote_snapshots_have_identical_private_and_public_evidence(self):
+        self.window.phase = "conversation"
+        self.window.round_number = 1
+        self.window.selected_weapon = {"id": "bare"}
+        self.window.rooms_visited = ["Attic"]
+        self.window.had_to_change_rooms = False
+        self.window.room_assignments = {
+            "Attic": ["Debra", "Jerry"], "Kitchen": ["Dave"], "Library": ["Hank"]
+        }
+        self.window.update_witness_memories("Debra")
+        self.window.remember("Jerry", "disposition", "I distrust Alex.")
+        self.window.append_speech("Alex", "I was alone, Jerry is lying.")
+        operations = []
+        with patch.object(self.window, "start_ai_request", side_effect=lambda operation, *args: operations.append(operation)):
+            self.window.run_single_response("Jerry")
+            self.window.run_voting_phase()
+        self.assertEqual(len(operations), 2)
+        operations[0]()
+        operations[1]()
+        speech_context = self.speech.call_args.args[0]
+        vote_contexts = {call.args[0].character: call.args[0] for call in self.vote.call_args_list}
+        self.assertEqual(speech_context, vote_contexts["Jerry"])
+        self.assertIn("You witnessed Alex kill Debra", speech_context.experiences[0].text)
+        self.assertEqual(speech_context.dispositions[0].text, "I distrust Alex.")
+        self.assertEqual(speech_context.dialogue[-1].text, "I was alone, Jerry is lying.")
+        self.assertTrue(all(record.kind == "experience" for record in speech_context.experiences))
+        self.assertEqual(vote_contexts["Dave"].experiences[0].text, "You (Dave) spent the night alone in the Kitchen.")
+        self.assertFalse(any("witnessed" in record.text for record in vote_contexts["Dave"].experiences))
+
+    def test_previous_round_dialogue_and_private_observations_survive_new_round(self):
+        self.window.phase = "conversation"
+        self.window.round_number = 1
+        self.window.remember("Jerry", "experience", "I saw the first murder.")
+        self.window.append_speech("Alex", "A claim from yesterday.")
+        self.window.add_public_event("Yesterday's public finding.")
+        self.window.round_number = 2
+        self.window.new_crime_scenes = []
+        self.window.victims_last_night = []
+        with patch.object(self.window, "run_conversation_loop"):
+            self.window.run_conversation_phase()
+        context = self.window.build_character_context("Jerry")
+        self.assertEqual(context.experiences[0].text, "I saw the first murder.")
+        self.assertEqual(context.dialogue[0], game.DialogueLine(1, "Alex", "A claim from yesterday."))
+        self.assertEqual(context.public_events[0].text, "Yesterday's public finding.")
+        self.assertEqual(context.dialogue[-1].round_number, 2)
+        self.assertFalse(any("A claim from yesterday." in line for line in self.window.current_conversation))
+
+    def test_vote_results_remain_public_facts_in_following_round(self):
+        self.window.round_number = 1
+        self.window.remember("Jerry", "experience", "A private observation")
+        original_private = tuple(self.window.characters["Jerry"]["experiences"])
+        self.begin_vote()
+        self.window.player_vote("NONE")
+        for name in ("Jerry", "Dave", "Hank"):
+            self.window.collect_ai_vote(name, "NONE")
+        results = tuple(self.window.public_events)
+        self.assertEqual(sum("voted to skip" in event.text for event in results), 4)
+        self.assertTrue(any("no one was voted out" in event.text for event in results))
+        self.assertTrue(all(event.kind == "public_event" and event.source == "Voting" for event in results))
+        self.window.round_number = 2
+        self.window.new_crime_scenes = []
+        self.window.victims_last_night = []
+        with patch.object(self.window, "run_conversation_loop"):
+            self.window.run_conversation_phase()
+        for name in ("Jerry", "Dave", "Hank"):
+            context = self.window.build_character_context(name)
+            self.assertEqual(context.public_events[:len(results)], results)
+        self.assertEqual(tuple(self.window.characters["Jerry"]["experiences"]), original_private)
+
+    def test_failed_speech_retry_uses_frozen_input_without_inventing_a_reply(self):
+        self.window.phase = "conversation"
+        self.window.append_speech("Detective", "A question.")
+        self.window.remember("Jerry", "experience", "Original observation")
+        seen = []
+
+        def speech(context):
+            seen.append(context)
+            if len(seen) == 1:
+                raise game.AIRequestError("Temporary failure. Please retry.")
+            return game.SpeechProposal(None, "Recovered reply")
+
+        self.speech.side_effect = speech
+        before = tuple(self.window.public_dialogue)
+        with patch.object(self.window, "run_conversation_loop"):
+            self.window.run_single_response("Jerry")
+            self.wait_for(lambda: self.window.retry_action is not None and not self.window.active_workers)
+            self.assertFalse(self.window.ai_busy)
+            self.assertFalse(self.window.retry_button.isHidden())
+            self.assertIn("Temporary failure", self.window.secondary_output_area.text())
+            self.assertEqual(tuple(self.window.public_dialogue), before)
+            self.window.remember("Jerry", "experience", "A later observation")
+            self.window.retry_button.click()
+            self.wait_for(lambda: not self.window.ai_busy and not self.window.active_workers)
+        self.assertIs(seen[0], seen[1])
+        self.assertEqual([record.text for record in seen[1].experiences], ["Original observation"])
+        self.assertEqual(self.window.public_dialogue[-1].text, "Recovered reply")
+        self.assertTrue(self.window.retry_button.isHidden())
+        self.assertIsNone(self.window.retry_action)
+
+    def test_failed_vote_batch_keeps_player_ballot_and_retries_atomically(self):
+        self.window.phase = "conversation"
+        failed_once = Event()
+
+        def vote(context):
+            if context.character == "Dave" and not failed_once.is_set():
+                failed_once.set()
+                raise game.AIRequestError("Voting service unavailable. Please retry.")
+            return "NONE"
+
+        self.vote.side_effect = vote
+        self.window.call_vote()
+        self.window.player_vote("NONE")
+        self.wait_for(lambda: self.window.retry_action is not None and not self.window.active_workers)
+        self.assertEqual(self.window.votes, {"Alex": "NONE"})
+        self.assertFalse(self.window.voting_resolved)
+        self.window.retry_button.click()
+        self.wait_for(lambda: self.window.voting_resolved and not self.window.active_workers)
+        self.assertEqual(self.window.votes, {"Alex": "NONE", "Jerry": "NONE", "Dave": "NONE", "Hank": "NONE"})
+        self.assertTrue(all(record.kind == "public_event" for record in self.window.public_events))
+        self.assertTrue(all(not data["experiences"] for data in self.window.characters.values()))
+
+    def test_same_phase_stale_result_does_not_clear_new_request_or_mutate_history(self):
+        self.window.phase = "conversation"
+        self.window.new_crime_scenes = []
+        self.window.victims_last_night = []
+        old_entered, release_old, new_entered, release_new = Event(), Event(), Event(), Event()
+        old_success, new_success = Mock(), Mock()
+
+        def operation(entered, release, result):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("Request was not released")
+            return result
+
+        try:
+            self.window.start_ai_request(lambda: operation(old_entered, release_old, "old"), old_success, "Old request")
+            old_worker = self.window.active_workers[0]
+            self.wait_for(old_entered.is_set)
+            with patch.object(self.window, "run_conversation_loop"):
+                self.window.run_conversation_phase()
+            self.window.start_ai_request(lambda: operation(new_entered, release_new, "new"), new_success, "New request")
+            self.wait_for(new_entered.is_set)
+            before = tuple(self.window.public_dialogue)
+            release_old.set()
+            self.wait_for(lambda: old_worker not in self.window.active_workers)
+            self.assertTrue(self.window.ai_busy)
+            self.assertEqual(tuple(self.window.public_dialogue), before)
+            old_success.assert_not_called()
+            new_success.assert_not_called()
+            release_new.set()
+            self.wait_for(lambda: not self.window.ai_busy and not self.window.active_workers)
+            new_success.assert_called_once_with("new")
+        finally:
+            release_old.set()
+            release_new.set()
+            for worker in list(self.window.active_workers):
+                worker.wait(3000)
+            self.app.processEvents()
+
+    def test_close_retains_running_worker_until_safe_release_and_ignores_its_result(self):
+        self.window.phase = "conversation"
+        entered, release = Event(), Event()
+        success = Mock()
+        previous_quit = self.app.quitOnLastWindowClosed()
+        previous_idle_flag = getattr(self.app, "_quit_when_idle", False)
+
+        def operation():
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("Request was not released")
+            return "late result"
+
+        try:
+            with patch.object(self.app, "quit") as quit_app:
+                self.window.start_ai_request(operation, success, "Waiting")
+                self.wait_for(entered.is_set)
+                worker = self.window.active_workers[0]
+                self.app.setQuitOnLastWindowClosed(True)
+                self.window.close()
+                self.assertEqual(self.window.phase, "closed")
+                self.assertIn(worker, self.app._ai_workers)
+                quit_app.assert_not_called()
+                release.set()
+                self.wait_for(lambda: not self.window.active_workers)
+                success.assert_not_called()
+                self.assertNotIn(worker, self.app._ai_workers)
+                quit_app.assert_called_once()
+        finally:
+            release.set()
+            for worker in list(self.window.active_workers):
+                worker.wait(3000)
+            self.app.processEvents()
+            self.app._quit_when_idle = previous_idle_flag
+            self.app.setQuitOnLastWindowClosed(previous_quit)
 
 
 if __name__ == "__main__":

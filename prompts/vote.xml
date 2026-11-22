@@ -1,0 +1,8 @@
+<task name="vote">
+  Decide how your character votes using the same knowledge and
+  relationships available during conversation.
+  Choose the eligible suspect you judge most likely responsible.
+  Abstain with NONE when you cannot justify a meaningful preference.
+  Confidence, repetition, popularity, and affection are not themselves
+  proof. Return your decision in the target field.
+</task>
