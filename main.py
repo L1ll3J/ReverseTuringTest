@@ -7,6 +7,7 @@ from dataclasses import asdict
 from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fingerprint
 from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal
 from ai_runtime import AIRuntime, AIRequestError
+from npc_items import NPCItemState
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
@@ -128,6 +129,7 @@ class GameWindow(QMainWindow):
         self.ai_busy = False
         self.request_serial = 0
         self.retry_action = None
+        self.npc_items = NPCItemState()
 
         # Set a consistent window size
         self.setFixedSize(800, 600)
@@ -216,6 +218,7 @@ class GameWindow(QMainWindow):
         state = {name: getattr(self, name, None) for name in fields}
         state["expected_voters"] = sorted(getattr(self, "expected_voters", ()))
         state["last_addressee"] = self.public_dialogue[-1].addressee if self.public_dialogue else None
+        state["npc_items"] = self.npc_items.trace_state()
         self.trace.snapshot(state, reason=reason)
 
     def trace_action(self, action, **details):
@@ -700,6 +703,11 @@ class GameWindow(QMainWindow):
         self.weapon_scroll.setFrameShape(QFrame.NoFrame)
         self.weapon_scroll.setWidget(self.weapon_picker_widget)
         self.weapon_scroll.hide()
+        self.npc_equipment_label = QLabel()
+        self.npc_equipment_label.setTextFormat(Qt.PlainText)
+        self.npc_equipment_label.setWordWrap(True)
+        self.npc_equipment_label.setAlignment(Qt.AlignCenter)
+        self.npc_equipment_label.hide()
 
         # Main Layout
         self.start_layout = QVBoxLayout()
@@ -711,6 +719,7 @@ class GameWindow(QMainWindow):
         #self.start_layout.setAlignment(Qt.AlignCenter)  # Align everything centrally
 
         self.layout = QVBoxLayout()
+        self.layout.addWidget(self.npc_equipment_label)
         self.layout.insertWidget(1, self.weapon_scroll, 1)
         #self.layout.addWidget(self.top_right_widget)
         self.layout.addLayout(self.start_layout)
@@ -930,6 +939,12 @@ class GameWindow(QMainWindow):
         self.old_crime_scenes = []
         self.round_number = 0
         self.game_over = False
+        self.npc_items = NPCItemState.allocate(
+            name for name, data in self.characters.items() if data["alive"]
+        )
+        equipment_description = self.npc_items.equipment_description()
+        self.npc_equipment_label.setText(equipment_description)
+        self.add_public_event(equipment_description, source="Visible equipment", display=False)
 
         # Start the first action phase
         self.start_development_trace()
@@ -939,6 +954,7 @@ class GameWindow(QMainWindow):
     def show_weapon_select_screen(self):
         """Populate and show a grid of square weapon buttons with image + name; tooltip on hover."""
         self.phase = "weapon_select"
+        self.npc_equipment_label.show()
         self.mute_button.hide()
         self.output_area.hide() 
         self.room_buttons_widget.hide()
@@ -1024,6 +1040,7 @@ class GameWindow(QMainWindow):
         self.trace_action("weapon_selected", weapon_id=weapon["id"])
         self.output_area.append(f"\nSelected weapon: {weapon['name']}\n")
         self.weapon_scroll.hide()
+        self.npc_equipment_label.hide()
 
         # weapon-specific one-time flags
         wid = weapon["id"]
@@ -1318,6 +1335,14 @@ class GameWindow(QMainWindow):
                 if len(self.room_assignments[room]) == 2 and self.round_number == 1:
                     room_with_two_people = room  # Mark that a room with two people exists
 
+        living_npcs = tuple(name for name, data in self.characters.items()
+                            if data["alive"] and name != self.player_name)
+        self.npc_items.capture_night(
+            self.round_number,
+            self.room_assignments,
+            living_npcs,
+        )
+        self.output_area.append(escape(self.npc_items.equipment_description(living_npcs)))
         self.trace_action("night_rooms_assigned", assignments=self.room_assignments)
 
         # Display room assignments if in normal mode
@@ -2131,6 +2156,13 @@ class GameWindow(QMainWindow):
         self.transcript_button.show()
         self.transcript_button.raise_()
         self.output_area.clear()
+        self.npc_items.present_morning(
+            self.round_number,
+            lambda description: self.add_public_event(description, source="Photograph", display=False),
+        )
+        for event in self.public_events:
+            if event.round_number == self.round_number:
+                self.output_area.append(escape(event.text))
         if self.check_victory():
             return
         self.output_area.append(f"Conversation Phase {self.round_number} begins!\n")
@@ -2146,9 +2178,6 @@ class GameWindow(QMainWindow):
         self.pass_button.setEnabled(False)
         self.interject_button.setEnabled(False)
         self.vote_button.setEnabled(False)
-        for event in self.public_events:
-            if event.round_number == self.round_number:
-                self.output_area.append(escape(event.text))
         if not self.victims_last_night:
             self.add_public_event("The Detective informs everyone that no murder occurred last night.")
         if ((self.selected_weapon or {}).get("id") == "pen"
