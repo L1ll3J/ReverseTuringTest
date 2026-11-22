@@ -7,6 +7,7 @@ from dataclasses import asdict
 from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fingerprint
 from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal
 from ai_runtime import AIRuntime, AIRequestError
+from dictation import DictationRecorder, DictationError
 from npc_items import NPCItemState
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, ItemUseContext, PlayerItemRules, ItemRuleError
@@ -128,6 +129,13 @@ class GameWindow(QMainWindow):
         self.trace_callback_scope = None
         self.last_completed_trace_job_id = None
         self.ai_runtime = AIRuntime(prompt_root=os.path.dirname(resource_path("System Prompt.txt")), trace=self.trace)
+        self.dictation_recorder = DictationRecorder(self)
+        self.dictation_session = 0
+        self.dictation_context = None
+        self.dictation_worker = None
+        self.dictation_recorder.started.connect(self.handle_dictation_started)
+        self.dictation_recorder.ready.connect(self.transcribe_recording)
+        self.dictation_recorder.failed.connect(self.handle_dictation_failure)
         self.public_events = []
         self.public_dialogue = []
         self.night_rooms = tuple(self.rooms)
@@ -677,6 +685,9 @@ class GameWindow(QMainWindow):
         worker = AIWorker(lambda: operation(scope) if trace_task is not None else operation())
         worker.result_ready.connect(ready)
         worker.failed.connect(failed)
+        self.start_worker(worker)
+
+    def start_worker(self, worker):
         worker.finished.connect(lambda: self.release_ai_worker(worker))
         self.active_workers.append(worker)
         app = QApplication.instance()
@@ -707,6 +718,8 @@ class GameWindow(QMainWindow):
     def closeEvent(self, event):
         restarting = self.phase == "restarting"
         self.game_over = True
+        self.cancel_dictation()
+        self.dictation_recorder.close()
         self.request_serial += 1
         if not restarting:
             self.phase = "closed"
@@ -1022,6 +1035,28 @@ class GameWindow(QMainWindow):
         self.say_button.clicked.connect(self.send_interjection)
         self.say_button.hide()  # Hidden until needed
 
+        self.dictation_controls = QWidget()
+        dictation_layout = QHBoxLayout(self.dictation_controls)
+        dictation_layout.setContentsMargins(0, 0, 0, 0)
+        self.dictation_button = QPushButton("Record voice")
+        self.dictation_button.setToolTip("Record a message, then stop to add it to your editable draft.")
+        self.dictation_button.clicked.connect(self.toggle_dictation)
+        self.dictation_cancel_button = QPushButton("Cancel")
+        self.dictation_cancel_button.clicked.connect(self.cancel_dictation)
+        for button in (self.dictation_button, self.dictation_cancel_button):
+            button.setFont(body_font)
+            button.setStyleSheet(f'QPushButton {{ font-family: "{body_family}"; font-size: 18px; padding: 6px; }} QPushButton:disabled {{ color: #777; }}')
+            dictation_layout.addWidget(button)
+        self.dictation_controls.hide()
+        self.dictation_cancel_button.hide()
+        self.dictation_status = QLabel()
+        self.dictation_status.setTextFormat(Qt.PlainText)
+        self.dictation_status.setWordWrap(True)
+        self.dictation_status.setFont(body_font)
+        self.dictation_status.setStyleSheet(f'font-family: "{body_family}"; font-size: 18px; color: #B8B8B8;')
+        self.dictation_status.hide()
+        self.interject_input.installEventFilter(self)
+
         # Weapon Picker
         self.weapon_grid = QGridLayout()
         self.weapon_grid.setSpacing(16)
@@ -1090,7 +1125,11 @@ class GameWindow(QMainWindow):
 
         # Layout for interjecting text box and button (below the output area)
         interject_layout = QVBoxLayout()
-        interject_layout.addWidget(self.interject_input)
+        input_row = QHBoxLayout()
+        input_row.addWidget(self.interject_input, 1)
+        input_row.addWidget(self.dictation_controls)
+        interject_layout.addLayout(input_row)
+        interject_layout.addWidget(self.dictation_status)
         interject_layout.addWidget(self.say_button)
         self.layout.addLayout(interject_layout)
 
@@ -1187,7 +1226,108 @@ class GameWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if obj is self.room_buttons_widget and event.type() in (QEvent.Show, QEvent.Resize, QEvent.Move):
             QTimer.singleShot(0, self.position_weapon_panel)  # schedule after layout settles
+        if obj is getattr(self, "interject_input", None) and event.type() in (QEvent.Show, QEvent.Hide, QEvent.EnabledChange):
+            if self.can_dictate():
+                self.update_dictation_controls()
+            else:
+                self.cancel_dictation()
         return super().eventFilter(obj, event)
+
+    def can_dictate(self):
+        return (self.phase == "conversation" and not self.game_over and not self.ai_busy
+                and not self.interject_input.isHidden() and self.interject_input.isEnabled())
+
+    def update_dictation_controls(self):
+        if not hasattr(self, "dictation_controls"):
+            return
+        self.dictation_controls.setVisible(self.can_dictate())
+        self.dictation_button.setText("Stop recording" if self.dictation_recorder.is_recording else "Record voice")
+        self.dictation_button.setEnabled(self.can_dictate() and self.dictation_worker is None)
+        self.dictation_cancel_button.setVisible(self.dictation_context is not None)
+
+    def toggle_dictation(self):
+        if not self.can_dictate() or self.dictation_worker is not None:
+            return
+        if self.dictation_recorder.is_recording:
+            self.dictation_recorder.stop()
+            return
+        self.dictation_session += 1
+        self.dictation_context = (self.dictation_session, self.round_number)
+        self.dictation_status.clear()
+        self.dictation_status.hide()
+        try:
+            self.dictation_recorder.start()
+        except DictationError:
+            self.handle_dictation_failure(self.dictation_recorder.generation,
+                                          "Could not start recording. Please try again.")
+
+    def dictation_is_current(self, generation, context):
+        return (context is not None and self.dictation_context == context
+                and context == (self.dictation_session, self.round_number)
+                and self.dictation_recorder.is_current(generation) and self.can_dictate())
+
+    def handle_dictation_started(self, generation):
+        if self.dictation_is_current(generation, self.dictation_context):
+            self.dictation_status.setText("Recording... Stop when ready (up to 60 seconds).")
+            self.dictation_status.show()
+            self.update_dictation_controls()
+
+    def transcribe_recording(self, generation, wav_audio):
+        context = self.dictation_context
+        if not self.dictation_is_current(generation, context) or self.dictation_worker is not None:
+            return
+        runtime = self.ai_runtime
+        worker = AIWorker(lambda: runtime.transcribe(wav_audio))
+        self.dictation_worker = worker
+        self.dictation_status.setText("Transcribing...")
+        self.dictation_status.show()
+        self.update_dictation_controls()
+
+        def ready(text):
+            if not self.dictation_is_current(generation, context):
+                return
+            if not isinstance(text, str) or not text.strip():
+                self.handle_dictation_failure(generation, "No speech was transcribed. Please try again.", context)
+                return
+            draft = self.interject_input.text()
+            addition = (" " if draft and not draft[-1].isspace() else "") + text.strip()
+            if len((draft + addition).encode("utf-16-le", "surrogatepass")) // 2 > self.interject_input.maxLength():
+                self.handle_dictation_failure(generation, "This recording will not fit in the draft. Shorten your draft and try again.", context)
+                return
+            self.interject_input.end(False)
+            self.interject_input.insert(addition)
+            self.dictation_context = None
+            self.dictation_status.setText("Added to your draft. Edit it, then choose Say.")
+            self.dictation_status.show()
+            self.update_dictation_controls()
+
+        def finished():
+            if self.dictation_worker is worker:
+                self.dictation_worker = None
+                self.update_dictation_controls()
+
+        # Unsubmitted speech and microphone bytes never enter gameplay traces.
+        worker.result_ready.connect(ready)
+        worker.failed.connect(lambda message: self.handle_dictation_failure(generation, message, context))
+        worker.finished.connect(finished)
+        self.start_worker(worker)
+
+    def handle_dictation_failure(self, generation, message, context=None):
+        context = self.dictation_context if context is None else context
+        if self.dictation_is_current(generation, context):
+            self.dictation_context = None
+            self.dictation_status.setText(message)
+            self.dictation_status.show()
+            self.update_dictation_controls()
+
+    def cancel_dictation(self):
+        self.dictation_session += 1
+        self.dictation_context = None
+        self.dictation_recorder.cancel()
+        if hasattr(self, "dictation_status"):
+            self.dictation_status.clear()
+            self.dictation_status.hide()
+        self.update_dictation_controls()
 
     def apply_opacity(self, button, opacity_level):
         # Helper function to set the opacity of buttons
@@ -1307,6 +1447,7 @@ class GameWindow(QMainWindow):
     def show_weapon_select_screen(self):
         """Populate and show a grid of square weapon buttons with image + name; tooltip on hover."""
         self.phase = "weapon_select"
+        self.cancel_dictation()
         self.show_item_pool()
         self.npc_equipment_label.show()
         self.mute_button.hide()
@@ -1672,6 +1813,7 @@ class GameWindow(QMainWindow):
         if self.game_over:
             return
         self.phase = "action"
+        self.cancel_dictation()
         self.request_serial += 1
         self.night_rooms = tuple(r for r in self.rooms if r not in self.old_crime_scenes)
         self.mandatory_weapon_reset()
@@ -2050,6 +2192,7 @@ class GameWindow(QMainWindow):
     def pass_conversation(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
+        self.cancel_dictation()
         self.trace_action("conversation_passed")
         self.interject_input.hide()
         self.say_button.hide()
@@ -2061,6 +2204,7 @@ class GameWindow(QMainWindow):
     def interject_conversation(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
+        self.cancel_dictation()
         self.retry_button.hide()
         self.retry_action = None
         self.secondary_output_area.clear()
@@ -2076,6 +2220,7 @@ class GameWindow(QMainWindow):
         speech = self.interject_input.text().strip()
         if not speech:
             return
+        self.cancel_dictation()
         self.interject_input.clear()
         self.interject_input.hide()
         self.say_button.hide()
@@ -2089,6 +2234,7 @@ class GameWindow(QMainWindow):
     def call_vote(self):
         if not self.can_call_vote():
             return
+        self.cancel_dictation()
         self.output_area.clear()
         self.output_area.append("Vote called!\n")
         self.trace_action("vote_called")
@@ -2105,6 +2251,7 @@ class GameWindow(QMainWindow):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
         self.phase = "voting"
+        self.cancel_dictation()
         self.update_inventory_button()
         self.ensure_body_ids()
         self.vote_id = uuid4().hex
@@ -2332,6 +2479,7 @@ class GameWindow(QMainWindow):
             return
         self.game_over = True
         self.phase = "game_over"
+        self.cancel_dictation()
         self.update_inventory_button()
         if self.player_alive and (self.selected_weapon or {}).get("id") == "bare" and self.items_used == 0:
             self.queue_progress("bare_hands_no_item_victory")
@@ -2430,6 +2578,7 @@ class GameWindow(QMainWindow):
         self.trace.end("restart")
         self.game_over = True
         self.phase = "restarting"
+        self.cancel_dictation()
         # Close the ESC overlay if it’s open
         if self._esc_overlay and self._esc_overlay.isVisible():
             self.close_escape_menu()
@@ -2488,6 +2637,7 @@ class GameWindow(QMainWindow):
         if self.game_over:
             return
         self.phase = "conversation"
+        self.cancel_dictation()
         self.update_inventory_button()
         self.request_serial += 1
         self.ai_busy = False
@@ -3351,6 +3501,8 @@ class HowToPlayWindow(QWidget):
             "The Knife's second attack enters its target's room; a distant C4 explosion does not.\n\n"
             "During discussion\n"
             "Listen, pass, or interject with your own alibi. Being asked a question is an invitation: you may still pass. "
+            "In the message box, Record voice starts the microphone; Stop recording transcribes into your draft. "
+            "You can keep typing, edit the result, or Cancel. Nothing is spoken until you choose Say. "
             "Use Inventory while the conversation is waiting for you. Items do not send or erase the words you are composing. "
             "A banana leaves a friendly impression. Muffle prevents a suspect from speaking clearly until the next night, but they can still vote. "
             "Spare Paper adds two extra copies of your next ballot; multiple copies stack. "
