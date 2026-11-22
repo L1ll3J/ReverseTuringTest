@@ -1,12 +1,14 @@
 """Offline transport checks over real request schemas and XML payloads."""
 
 import concurrent.futures
+import io
 from pathlib import Path
 import sys
 import tempfile
 import traceback
 from types import SimpleNamespace
 import unittest
+import wave
 from unittest.mock import Mock, patch
 from xml.etree import ElementTree as ET
 
@@ -24,6 +26,7 @@ class AIRuntimeTests(unittest.TestCase):
         environment = patch.dict("os.environ", {
             "ALIBAI_MODEL": "", "ALIBAI_SPEECH_MODEL": "",
             "ALIBAI_VOTE_MODEL": "", "ALIBAI_SELECTOR_MODEL": "",
+            "ALIBAI_TRANSCRIPTION_MODEL": "",
         })
         environment.start()
         self.addCleanup(environment.stop)
@@ -201,6 +204,77 @@ class AIRuntimeTests(unittest.TestCase):
         with self.assertRaises(AIRequestError):
             self.runtime.vote(self.context)
         self.client.responses.parse.assert_not_called()
+
+    @staticmethod
+    def audio_clip(*, rate=16000, channels=1, width=2, pcm=b"\x00\x00" * 160):
+        output = io.BytesIO()
+        with wave.open(output, "wb") as wav:
+            wav.setnchannels(channels)
+            wav.setsampwidth(width)
+            wav.setframerate(rate)
+            wav.writeframes(pcm)
+        return output.getvalue()
+
+    def test_transcription_sends_only_clip_and_model_without_game_context(self):
+        clip = self.audio_clip()
+        self.client.audio.transcriptions.create.return_value = SimpleNamespace(text="  Spoken draft.  ")
+        self.assertEqual(self.runtime.transcribe(clip), "Spoken draft.")
+        self.client.audio.transcriptions.create.assert_called_once_with(
+            model="gpt-transcribe", file=("dictation.wav", clip, "audio/wav"), timeout=45.0
+        )
+        self.client.responses.parse.assert_not_called()
+
+    def test_transcription_model_has_independent_override_and_shared_client_limits(self):
+        with patch.dict("os.environ", {"ALIBAI_MODEL": "text-only"}):
+            self.assertEqual(AIConfig().transcription_model, "gpt-transcribe")
+        with patch.dict("os.environ", {"ALIBAI_TRANSCRIPTION_MODEL": "custom-transcriber"}):
+            config = AIConfig(timeout_seconds=12, max_retries=2)
+        self.assertEqual(config.transcription_model, "custom-transcriber")
+        runtime = AIRuntime(config=config)
+        fake_client = Mock()
+        fake_client.audio.transcriptions.create.return_value = SimpleNamespace(text="Draft")
+        with patch("ai_runtime.OpenAI", return_value=fake_client) as constructor:
+            self.assertEqual(runtime.transcribe(self.audio_clip()), "Draft")
+            constructor.assert_called_once_with(timeout=12, max_retries=2)
+        self.assertEqual(fake_client.audio.transcriptions.create.call_args.kwargs["timeout"], 12)
+        with self.assertRaises(ValueError):
+            AIConfig(transcription_model=" ")
+
+    def test_invalid_audio_is_rejected_before_any_client_creation(self):
+        truncated = self.audio_clip()[:-2]
+        clips = (b"", b"not wave" * 10, bytearray(self.audio_clip()), b"x" * 24_000_001,
+                 self.audio_clip(width=1), self.audio_clip(channels=3),
+                 self.audio_clip(rate=96000), self.audio_clip(pcm=b""),
+                 self.audio_clip(rate=8000, pcm=b"\x00\x00" * 8000 * 121), truncated)
+        runtime = AIRuntime()
+        with patch("ai_runtime.OpenAI") as constructor:
+            for clip in clips:
+                with self.subTest(size=len(clip)), self.assertRaises(AIRequestError):
+                    runtime.transcribe(clip)
+            constructor.assert_not_called()
+
+    def test_blank_or_malformed_transcription_never_fabricates_text(self):
+        for response in (SimpleNamespace(text=""), SimpleNamespace(text="   "),
+                         SimpleNamespace(text=None), SimpleNamespace(text=123), SimpleNamespace()):
+            self.client.audio.transcriptions.create.return_value = response
+            with self.subTest(response=response), self.assertRaises(AIRequestError):
+                self.runtime.transcribe(self.audio_clip())
+
+    def test_transcription_errors_are_sanitized(self):
+        request = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+        cases = (
+            (AuthenticationError("private-audio-detail", response=httpx.Response(401, request=request), body={}), "key was rejected"),
+            (RateLimitError("private-audio-detail", response=httpx.Response(429, request=request), body={}), "usage limit"),
+            (APITimeoutError(request=request), "timed out"),
+            (APIConnectionError(message="private-audio-detail", request=request), "connect"),
+            (BadRequestError("private-audio-detail", response=httpx.Response(400, request=request), body={}), "could not transcribe"),
+        )
+        for error, expected in cases:
+            self.client.audio.transcriptions.create.side_effect = error
+            with self.subTest(error=type(error).__name__), self.assertRaises(AIRequestError) as raised:
+                self.runtime.transcribe(self.audio_clip())
+            self.assertIn(expected, str(raised.exception))
+            self.assertNotIn("private-audio-detail", "".join(traceback.format_exception(raised.exception)))
 
 
 if __name__ == "__main__":
