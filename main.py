@@ -14,6 +14,7 @@ from game_rules import BodyState, ItemUseContext, PlayerItemRules, ItemRuleError
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
 from item_ui import ItemDraftDialog, InventoryDialog
+from item_catalogue_ui import ItemCataloguePanel
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
@@ -208,9 +209,9 @@ class GameWindow(QMainWindow):
 
             {"id": "stopwatch", "name": "Stopwatch",
             "desc": "Witnesses to night kills will vouch for you instead of accuse.",
-            "image": "icons/weapons/stopwatch.png"},
-            {"id": "voodoo", "name": "Voodoo Blade", "desc": "Possess the body of whoever you stab; the body you previously inhabited is the one that is found dead.", "image": "icons/weapons/voodoo.png"},
-            {"id": "blackmagic", "name": "Dark Magic", "desc": "Mind-control someone to kill for you each night, but they'll know it was you.", "image": "icons/weapons/blackmagic.png"},
+            "image": "icons/weapons/polished-stopwatch.png"},
+            {"id": "voodoo", "name": "Voodoo Blade", "desc": "Possess the body of whoever you stab; the body you previously inhabited is the one that is found dead.", "image": "icons/weapons/polished-voodoo.png"},
+            {"id": "blackmagic", "name": "Dark Magic", "desc": "Mind-control someone to kill for you each night, but they'll know it was you.", "image": "icons/weapons/polished-blackmagic.png"},
             {"id": "love", "name": "Love",
             "desc": "\n Can't we all just get along?",
             "image": "icons/weapons/love.png"}
@@ -295,46 +296,31 @@ class GameWindow(QMainWindow):
             self.progress_retry_button.hide()
             if self.phase == "weapon_select":
                 self.show_weapon_select_screen()
+            elif self.phase == "start":
+                self.item_catalogue.refresh(self.profile)
 
-    def show_item_pool(self):
-        from PyQt5.QtWidgets import QCheckBox
-        while self.item_pool_layout.count():
-            widget = self.item_pool_layout.takeAt(0).widget()
-            if widget is not None:
-                widget.deleteLater()
-        label = QLabel("Room finds: Banana of Friendship, Muffle and Spare Paper are always included.")
-        label.setFont(readable_body_font())
-        label.setStyleSheet(f'font-family: "{readable_body_font().family()}"; font-size: 18px;')
-        label.setWordWrap(True)
-        self.item_pool_layout.addWidget(label)
-        for item_id, definition in ITEM_CATALOGUE.items():
-            if definition.default:
-                continue
-            if item_id in self.profile.unlocked:
-                checkbox = QCheckBox("Include " + definition.name)
-                checkbox.setFont(readable_body_font())
-                checkbox.setStyleSheet(f'font-family: "{readable_body_font().family()}"; font-size: 18px;')
-                checkbox.setChecked(item_id not in self.profile.disabled_items)
-                checkbox.toggled.connect(lambda enabled, key=item_id, box=checkbox: self.change_item_pool(key, enabled, box))
-                self.item_pool_layout.addWidget(checkbox)
-            else:
-                goal = QLabel(definition.name + " (Locked): " + UNLOCK_GOALS[item_id])
-                goal.setFont(readable_body_font())
-                goal.setStyleSheet(f'font-family: "{readable_body_font().family()}"; font-size: 18px;')
-                goal.setWordWrap(True)
-                self.item_pool_layout.addWidget(goal)
-        self.item_pool_widget.show()
-
-    def change_item_pool(self, item_id, enabled, checkbox):
-        if self.phase != "weapon_select":
+    def show_menu_tab(self, tab):
+        if self.phase != "start" or tab not in ("play", "items"):
             return
+        if tab == "items":
+            self.load_profile()
+            self.item_catalogue.refresh(self.profile)
+        self.menu_stack.setCurrentWidget(self.item_catalogue if tab == "items" else self.play_page)
+        self.play_tab_button.setChecked(tab == "play")
+        self.items_tab_button.setChecked(tab == "items")
+
+    def set_menu_item_enabled(self, item_id, enabled):
+        if self.phase != "start" or self.menu_stack.currentWidget() is not self.item_catalogue:
+            raise ProfileError("Change item-pool settings from the main menu's Items tab.")
         try:
             self.profile = self.profile_store.set_item_enabled(item_id, enabled)
         except ProfileError as error:
-            checkbox.blockSignals(True)
-            checkbox.setChecked(item_id not in self.profile.disabled_items)
-            checkbox.blockSignals(False)
             self.show_profile_error(str(error))
+            raise
+        if not self.pending_progress and not self.progress_retry_button.isHidden():
+            self.progress_retry_button.hide()
+            self.progress_notice.hide()
+        return self.profile
 
     def offer_room_item(self, room, continuation):
         # The continuation owns the accepted action. Closing an offer is an explicit skip.
@@ -1080,13 +1066,41 @@ class GameWindow(QMainWindow):
         self.start_layout.addWidget(self.difficulty_button)
         self.start_layout.addWidget(self.start_button)
         self.start_layout.setContentsMargins(50, 50, 50, 50)  # Adjust the spacing around the layout
-        #self.start_layout.setAlignment(Qt.AlignCenter)  # Align everything centrally
+        self.play_page = QWidget()
+        self.play_page.setLayout(self.start_layout)
+        self.menu_widget = QWidget()
+        menu_layout = QVBoxLayout(self.menu_widget)
+        menu_layout.setContentsMargins(0, 10, 0, 0)
+        tabs = QHBoxLayout()
+        tabs.addStretch()
+        self.play_tab_button = QPushButton("Play", self.menu_widget)
+        self.items_tab_button = QPushButton("Items", self.menu_widget)
+        tab_style = f'''QPushButton {{ font-family: "{body_family}"; font-size: 18px;
+            padding: 8px 22px; color: #bbb; border: 1px solid #333; }}
+            QPushButton:checked {{ color: white; background: #222; border-color: #777; }}'''
+        for button in (self.play_tab_button, self.items_tab_button):
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setStyleSheet(tab_style)
+            tabs.addWidget(button)
+        tabs.addStretch()
+        self.play_tab_button.setChecked(True)
+        self.play_tab_button.clicked.connect(lambda _checked=False: self.show_menu_tab("play"))
+        self.items_tab_button.clicked.connect(lambda _checked=False: self.show_menu_tab("items"))
+        menu_layout.addLayout(tabs)
+        self.menu_stack = QStackedLayout()
+        self.menu_stack.addWidget(self.play_page)
+        self.item_catalogue = ItemCataloguePanel(
+            ITEM_CATALOGUE, self.profile, UNLOCK_GOALS, self.set_menu_item_enabled,
+            body_font, self.menu_widget, icon_root=resource_path("icons/items"))
+        self.menu_stack.addWidget(self.item_catalogue)
+        menu_layout.addLayout(self.menu_stack, 1)
 
         self.layout = QVBoxLayout()
         self.layout.addWidget(self.npc_equipment_label)
         self.layout.insertWidget(1, self.weapon_scroll, 1)
         #self.layout.addWidget(self.top_right_widget)
-        self.layout.addLayout(self.start_layout)
+        self.layout.addWidget(self.menu_widget, 1)
         self.layout.addWidget(self.room_buttons_widget)
         self.layout.addWidget(self.output_area)
         self.layout.addWidget(self.secondary_output_area)
@@ -1108,10 +1122,6 @@ class GameWindow(QMainWindow):
         self.progress_retry_button.clicked.connect(self.retry_progress)
         self.progress_retry_button.hide()
         self.layout.addWidget(self.progress_retry_button)
-        self.item_pool_widget = QWidget()
-        self.item_pool_layout = QVBoxLayout(self.item_pool_widget)
-        self.item_pool_widget.hide()
-        self.layout.insertWidget(1, self.item_pool_widget)
         self.retry_button = QPushButton("Retry")
         self.retry_button.clicked.connect(self.retry_ai_request)
         self.retry_button.hide()
@@ -1222,6 +1232,17 @@ class GameWindow(QMainWindow):
         # Configure the output area
         self.output_area.setStyleSheet(f'background-color: #1E1E1E; color: #E0E0E0; border: none; font-family: "{body_family}"; font-size: 18px; padding-left: 16px; padding-right: 24px;')
         self.setStyleSheet(f"color: white; background-color: black; font-family: {font_family};")
+        self.position_corner_controls()
+
+    def position_corner_controls(self):
+        if not hasattr(self, "how_to_play_button") or not hasattr(self, "mute_button"):
+            return
+        width = min(max(int(self.width() * 0.15), self.how_to_play_button.sizeHint().width(),
+                        self.transcript_button.sizeHint().width()), max(1, self.width() - 20))
+        height = max(int(width * 0.35), self.how_to_play_button.sizeHint().height())
+        for button in (self.how_to_play_button, self.transcript_button):
+            button.setGeometry(self.width() - width - 10, 10, width, height)
+        self.mute_button.setGeometry(0, 10, width // 2, height)
 
     def eventFilter(self, obj, event):
         if obj is self.room_buttons_widget and event.type() in (QEvent.Show, QEvent.Resize, QEvent.Move):
@@ -1395,13 +1416,15 @@ class GameWindow(QMainWindow):
             self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: #8CFF9E")
 
     def start_game(self):
+        if self.phase != "start":
+            return
         self.player_name = self.player_name_input.text().strip().capitalize().split(" ")[0]
         if not self.player_name:
             self.player_name_label.setText("Please enter your name to start the game.")
             self.player_name_input.setFocus()
             return
         self.how_to_play_button.hide()
-        
+        self.menu_widget.hide()
 
         # Hide name input, start button, and difficulty button
         self.start_button.hide()
@@ -1448,7 +1471,7 @@ class GameWindow(QMainWindow):
         """Populate and show a grid of square weapon buttons with image + name; tooltip on hover."""
         self.phase = "weapon_select"
         self.cancel_dictation()
-        self.show_item_pool()
+        self.menu_widget.hide()
         self.npc_equipment_label.show()
         self.mute_button.hide()
         self.output_area.hide() 
@@ -1498,7 +1521,7 @@ class GameWindow(QMainWindow):
             pix = QPixmap(resource_path(wpn.get("image", "")))
             if pix.isNull():
                 ph = QPixmap(icon_sz, icon_sz); ph.fill(Qt.transparent); pix = ph
-            img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.FastTransformation))
             # Make child transparent to mouse so the FRAME gets hover/click even over the image
             img.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             v.addWidget(img, alignment=Qt.AlignHCenter)
@@ -1529,7 +1552,6 @@ class GameWindow(QMainWindow):
                     self.select_weapon_and_start(wpn)
             if not unlocked:
                 card.setCursor(Qt.ArrowCursor)
-                name.setText(wpn["name"] + " (Locked)")
             card.mousePressEvent = _click_handler
 
             self.weapon_grid.addWidget(card, row, col)
@@ -1547,7 +1569,6 @@ class GameWindow(QMainWindow):
         self.run_weapons = allowed
         self.run_item_pool = available_content(self.profile, "item")
         self.item_drafts = DraftState(self.player_owner_id, self.run_item_pool)
-        self.item_pool_widget.hide()
         self.inventory_button.show()
         self.selected_weapon = weapon
         self.trace_action("weapon_selected", weapon_id=weapon["id"])
@@ -1646,7 +1667,7 @@ class GameWindow(QMainWindow):
         pix = QPixmap(resource_path(wpn.get("image", "")))
         if pix.isNull():
             ph = QPixmap(icon_sz, icon_sz); ph.fill(Qt.transparent); pix = ph
-        img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.FastTransformation))
         img.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         v.addWidget(img, alignment=Qt.AlignHCenter)
 
@@ -1758,6 +1779,7 @@ class GameWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.position_corner_controls()
         self.position_weapon_panel()
 
     # Weapon-gating logic
@@ -3489,7 +3511,7 @@ class HowToPlayWindow(QWidget):
             "Before your run\n"
             "Choose a weapon. Locked weapons show exactly how to unlock them. New unlocks become available on your next run. "
             "Your room-item pool always includes Banana of Friendship, Muffle and Spare Paper. "
-            "Unlocked optional items can be switched off before choosing a weapon.\n\n"
+            "Open Items on the main menu to view the catalogue and switch unlocked optional items off before your next run.\n\n"
             "At night\n"
             "Choose a room. With ordinary weapons, one occupant means a kill; with two, choose your victim. "
             "An empty room means trying another room. Crime scenes close for later nights. "

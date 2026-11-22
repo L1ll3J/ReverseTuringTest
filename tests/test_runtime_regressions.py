@@ -29,6 +29,8 @@ with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
     import main as game
     import ai_runtime
 
+from progression import ProfileError, ProgressEvent
+
 
 def character(alive=True):
     return {"alive": alive, "profile": [], "experiences": [], "dispositions": []}
@@ -103,6 +105,117 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(self.window.phase, "start")
         self.assertTrue(self.window.start_button.isVisible())
         self.openai_constructor.assert_not_called()
+
+    def test_small_menu_tabs_preserve_play_name_and_difficulty(self):
+        self.window.player_name_input.setText("A name in progress")
+        self.window.difficulty_button.click()
+        mode = self.window.show_room_allocations
+        mode_text = self.window.difficulty_button.text()
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.play_page)
+        self.window.items_tab_button.click()
+        self.assertEqual(self.window.phase, "start")
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertTrue(self.window.item_catalogue.isVisible())
+        self.assertFalse(self.window.player_name_input.isVisible())
+        self.assertTrue(self.window.items_tab_button.isChecked())
+        self.assertTrue(self.window.play_tab_button.isVisible())
+        self.window.play_tab_button.click()
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.play_page)
+        self.assertTrue(self.window.start_button.isVisible())
+        self.assertEqual(self.window.player_name_input.text(), "A name in progress")
+        self.assertEqual(self.window.show_room_allocations, mode)
+        self.assertEqual(self.window.difficulty_button.text(), mode_text)
+        self.assertFalse(self.window.profile_store.path.exists())
+        self.openai_constructor.assert_not_called()
+
+    def test_menu_corner_controls_stay_at_current_window_edge_without_covering_tabs(self):
+        self.window.setMinimumSize(1, 1)
+        self.window.setMaximumSize(16777215, 16777215)
+        self.window.showNormal()
+        for width in (1280, 1000):
+            self.window.resize(width, 800)
+            self.app.processEvents()
+            self.assertEqual(self.window.how_to_play_button.geometry().right(), self.window.width() - 11)
+            self.assertGreaterEqual(self.window.how_to_play_button.width(), self.window.how_to_play_button.sizeHint().width())
+            for tab in (self.window.play_tab_button, self.window.items_tab_button):
+                rectangle = tab.rect().translated(tab.mapTo(self.window, tab.rect().topLeft()))
+                self.assertFalse(rectangle.intersects(self.window.how_to_play_button.geometry()))
+
+    def test_browsing_item_catalogue_preserves_existing_profile_data(self):
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        original = self.window.profile_store.path.read_bytes()
+        with patch.object(self.window.profile_store, "set_item_enabled") as toggle:
+            for _ in range(2):
+                self.window.items_tab_button.click()
+                self.assertIn("guardian_angel", self.window.item_catalogue.checkboxes)
+                self.window.play_tab_button.click()
+        toggle.assert_not_called()
+        self.assertEqual(self.window.profile_store.path.read_bytes(), original)
+
+    def test_item_menu_pool_toggle_persists_then_freezes_at_run_start(self):
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        self.window.items_tab_button.click()
+        self.window.item_catalogue.checkboxes["guardian_angel"].setChecked(False)
+        self.assertIn("guardian_angel", self.window.profile_store.read().disabled_items)
+        self.window.play_tab_button.click()
+        self.window.player_name_input.setText("Alex")
+        self.window.start_button.click()
+        self.assertEqual(self.window.phase, "weapon_select")
+        self.assertFalse(self.window.menu_widget.isVisible())
+        self.assertFalse(self.window.play_tab_button.isVisible())
+        self.assertFalse(self.window.item_catalogue.isVisible())
+        goals = [label.text() for label in self.window.weapon_picker_widget.findChildren(QLabel)
+                 if label.text().startswith("Locked:")]
+        self.assertIn("Locked: Kill your first victim.", goals)
+        bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.select_weapon_and_start(bare)
+        self.assertEqual(self.window.phase, "action")
+        self.assertNotIn("guardian_angel", self.window.run_item_pool)
+        self.window.profile_store.set_item_enabled("guardian_angel", True)
+        self.assertNotIn("guardian_angel", self.window.item_drafts.eligible_item_ids)
+        with self.assertRaises(ProfileError):
+            self.window.set_menu_item_enabled("guardian_angel", False)
+        self.assertNotIn("guardian_angel", self.window.profile_store.read().disabled_items)
+        self.window.items_tab_button.click()
+        self.assertFalse(self.window.menu_widget.isVisible())
+        self.assertEqual(self.window.phase, "action")
+
+    def test_item_menu_save_failure_preserves_checkbox_and_shows_error_on_items_page(self):
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        self.window.items_tab_button.click()
+        original = self.window.profile_store.path.read_bytes()
+        with patch.object(self.window.profile_store, "set_item_enabled", side_effect=ProfileError("Disk is unavailable.")):
+            self.window.item_catalogue.checkboxes["guardian_angel"].setChecked(False)
+        self.assertTrue(self.window.item_catalogue.checkboxes["guardian_angel"].isChecked())
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertTrue(self.window.progress_notice.isVisible())
+        self.assertIn("Disk is unavailable", self.window.progress_notice.text())
+        self.assertTrue(self.window.item_catalogue.error_label.isVisible())
+        self.assertEqual(self.window.profile_store.path.read_bytes(), original)
+        self.window.item_catalogue.checkboxes["guardian_angel"].setChecked(False)
+        self.assertFalse(self.window.item_catalogue.checkboxes["guardian_angel"].isChecked())
+        self.assertTrue(self.window.progress_retry_button.isHidden())
+        self.assertTrue(self.window.item_catalogue.error_label.isHidden())
+
+    def test_items_page_load_error_preserves_corrupt_file_and_retry_refreshes_same_page(self):
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        original = self.window.profile_store.path.read_bytes()
+        self.window.profile_store.path.write_bytes(b"broken profile")
+        self.window.items_tab_button.click()
+        self.assertTrue(self.window.progress_notice.isVisible())
+        self.assertIn("invalid", self.window.progress_notice.text())
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertFalse(self.window.item_catalogue.checkboxes)
+        self.assertEqual(self.window.profile_store.path.read_bytes(), b"broken profile")
+        self.window.progress_retry_button.click()
+        self.assertTrue(self.window.progress_retry_button.isVisible())
+        self.assertIn("invalid", self.window.progress_notice.text())
+        self.window.profile_store.path.write_bytes(original)
+        self.window.progress_retry_button.click()
+        self.assertTrue(self.window.progress_retry_button.isHidden())
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertIn("guardian_angel", self.window.item_catalogue.checkboxes)
+        self.assertEqual(self.window.profile_store.path.read_bytes(), original)
 
     def test_blank_name_error_remains_visible_on_start_screen(self):
         self.window.player_name_input.setText("   ")

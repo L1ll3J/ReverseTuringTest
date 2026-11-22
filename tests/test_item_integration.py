@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PyQt5.QtCore import QCoreApplication, QEvent
 from PyQt5.QtTest import QTest
 from PyQt5.QtGui import QFont, QFontInfo
-from PyQt5.QtWidgets import QApplication, QCheckBox, QLabel, QTextEdit
+from PyQt5.QtWidgets import QApplication, QLabel, QTextEdit
 
 import main as game
 from content import CONTENT_CATALOGUE
@@ -365,19 +365,6 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertNotIn("knife", self.window.run_weapons)
         self.assertEqual(self.window.run_item_pool, original_pool)
         self.assertEqual(self.window.profile_store.available_weapons(), ("bare", "knife"))
-
-    def test_optional_pool_checkbox_persists_and_is_frozen_at_selection(self):
-        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
-        self.window.load_profile()
-        self.window.show_weapon_select_screen()
-        boxes = self.window.item_pool_widget.findChildren(QCheckBox)
-        self.assertEqual(len(boxes), 1)
-        boxes[0].setChecked(False)
-        self.assertNotIn("guardian_angel", self.window.profile_store.item_pool())
-        self.window.select_weapon_and_start(self.weapon())
-        self.assertNotIn("guardian_angel", self.window.run_item_pool)
-        self.window.profile_store.set_item_enabled("guardian_angel", True)
-        self.assertNotIn("guardian_angel", self.window.item_drafts.eligible_item_ids)
 
     def test_save_failure_preserves_order_and_retries_same_sequences_without_double_progress(self):
         with patch.object(self.window.profile_store, "record", side_effect=ProfileError("Disk unavailable")):
