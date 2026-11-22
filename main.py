@@ -5,11 +5,11 @@ import cohere
 import random
 import re
 from collections import Counter
-
+from openai import OpenAI
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox
+from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
-from PyQt5.QtGui import QTextCursor, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat
+from PyQt5.QtGui import QTextCursor, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 # Load API keys from environment variables
@@ -23,7 +23,7 @@ def load_system_prompt():
         return file.read()
 
 rules = load_system_prompt()
-
+client = OpenAI()
 # # Functions to interact with OpenAI
 # Conversational Speech from a single character
 def generate_conversation_speech(character, characters, rules, current_context, most_recent):
@@ -31,18 +31,20 @@ def generate_conversation_speech(character, characters, rules, current_context, 
     #prompt = "It is your turn to speak, what will you say?"
     full_prompt = "\n".join(characters[character]["memory"]) + "\n" + "Current conversational context:" + "\n" + current_context + "Most recent message(s):" + "\n" + "\n".join(most_recent)
 
-    system_prompt = f"You are {character}, a character in an Among-Us style murder mystery game. As {character} {characters[character]['profile']}. \n {rules}. You have been selected to speak next in the conversation, what will you say? (Respond with plaintext, do not include speach marks or {character} says, etc). Max 3 sentences. \n Remember, you are {character} and your output is what they will say next in the conversation."
+    system_prompt = f"You are {character}, a character in an Among-Us style murder mystery game. As {character} {characters[character]['profile']}. \n {rules}. Your Key-Takeaways from previous nights: \n" + "\n".join(characters[character]["key-takeaways"]) + f"\n You have been selected to speak next in the conversation, what will you say? (Respond with plaintext, do not include speach marks or {character} says, etc). Max 3 sentences. \n Remember, you are {character} and your output is what they will say next in the conversation."
     
-    response = openai.chat.completions.create(
-        model="gpt-4o", 
-        messages=[
+    response = client.responses.create(
+        model="gpt-5-mini", 
+        input=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": full_prompt}
         ],
-        max_tokens=150,
+        max_output_tokens=540,
+        reasoning={"effort": "minimal"},
     )
 
-    return response.choices[0].message.content
+    print(response.output_text)
+    return response.output_text
 
 # Generate response from each possible (alive) character
 def generate_responses(characters, rules, conversation_context, most_recent):
@@ -213,9 +215,9 @@ class GameWindow(QMainWindow):
         self.most_recent_messageS = []  # Holds the short-term memory stack of recent messages
         self.alive_characters = []  # Holds the list of alive characters
         self.NPCs = []  # Holds the list of NPC characters
-        self.short_term_memory = 2  # Short-term memory limit for conversation
+        self.short_term_memory = 8  # Short-term memory limit for conversation
         self.yap_counter = 0  # Counter for how many times a character/NPC can speak
-        self.minimum_to_call_vote = 20  # Minimum conversation length to call a vote
+        self.minimum_to_call_vote = 2  # Minimum conversation length to call a vote
         self.force_interject = False  # Tracks if the player is forced to interject
         self.rules = load_system_prompt()  
 
@@ -232,6 +234,13 @@ class GameWindow(QMainWindow):
         self.knife_used_bloodlust = False
         self.c4_target_room = None
         self.c4_cooldown_nights = 0
+        self.player_sleep_room = None          
+        self.voodoo_current_identity = None    
+        self._c4_exploded_last_night = False
+        self.stopwatch_selected = False         
+        self.victims_last_night = []
+        self._override_murder_room = None          
+        self.pen_last_victim_name = None 
 
         self.weapon_action_panel = None
         self._weapon_windows = {"pen": None, "blackmagic": None, "knife": None, "c4": None}
@@ -337,7 +346,7 @@ class GameWindow(QMainWindow):
         # Toggle button for game difficulty (Normal/Super Hard)
         self.difficulty_button = QPushButton("Mode: Normal", self)
         self.difficulty_button.setFixedHeight(100)  # Increase the button size
-        self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: grey")
+        self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: #8CFF9E")
         self.difficulty_button.clicked.connect(self.toggle_mode)
 
         # Button to start the game
@@ -756,9 +765,9 @@ class GameWindow(QMainWindow):
             self.show_room_allocations = False
             self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: #EF5350")
         else:
-            self.difficulty_button.setText("Mode: Normal")
+            self.difficulty_button.setText("Mode: Coward")
             self.show_room_allocations = True
-            self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: grey")
+            self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: #8CFF9E")
 
     def start_game(self):
         self.how_to_play_button.hide()
@@ -886,9 +895,16 @@ class GameWindow(QMainWindow):
         self.output_area.append(f"\nSelected weapon: {weapon['name']}\n")
         if hasattr(self, "weapon_picker_widget") and self.weapon_picker_widget:
             self.weapon_picker_widget.hide()
+
+        # weapon-specific one-time flags
+        wid = weapon["id"]
+        self.stopwatch_selected = (wid == "stopwatch")
+        if wid != "voodoo":
+            self.voodoo_current_identity = None
+
         # proceed into the normal loop
         self.output_area.show()
-        self.room_buttons_widget.show()
+        self.room_buttons_widget.show() 
         self.run_action_phase()
 
     def show_how_to_play(self):
@@ -1119,6 +1135,8 @@ class GameWindow(QMainWindow):
         self.knife_extra_target = None
         self.knife_used_bloodlust = False
         self.c4_target_room = None
+        self.victims_last_night = []
+        self.pen_last_victim_name = None
 
         # Tick down C4 cooldown if active
         if self.c4_cooldown_nights > 0:
@@ -1202,6 +1220,106 @@ class GameWindow(QMainWindow):
         self.rooms_visited.append(selected_room)
         self.new_crime_scenes.append(selected_room)
 
+        wpn_id = (self.selected_weapon or {}).get("id")
+
+        # ---- Special weapons decouple sleep room from kill ----
+        if wpn_id in ("c4", "blackmagic", "love"):
+            self.room_buttons_widget.hide()
+            self.weapon_action_panel.hide()
+
+            if wpn_id == "love":
+                # No kill. Romantic vouches with co-occupants.
+                if occupants:
+                    for occ in occupants:
+                        if self.characters.get(occ, {}).get("alive"):
+                            # timeless key-takeaway; strong, positive
+                            if len(occupants) == 1:
+                                self.characters[occ]["key-takeaways"].append(
+                                    f"You and {self.player_name} shared a wonderful, intimate night in the {selected_room} on a previous night. It was a beautiful dance of passion and devotion and you're eager to spend more time with them. You VOUCH for {self.player_name}."
+                                )
+                            else: 
+                                others = [o for o in occupants if o != occ and self.characters[o]["alive"]]
+                                others.append(self.player_name)
+                                self.characters[occ]["key-takeaways"].append(
+                                    f"You and " + " and ".join(others) + f" shared a wonderful, intimate night in the {selected_room} on a previous night. It was a beautiful dance of passion and devotion, espcially due to {self.player_name}, and you're eager to spend more time with them. You VOUCH for " + " and ".join(others) +"."
+                                )
+
+                # No crime scenes; straight to convo
+                self.new_crime_scenes = []
+                if len(self.victims_last_night) == 0:
+                    self.update_witness_memories(None)
+                elif len(self.victims_last_night) == 1:
+                    self.update_witness_memories(self.victims_last_night[0])
+                else:
+                    self.update_witness_memories(" and ".join(self.victims_last_night))
+                return self.run_conversation_phase()
+
+            if wpn_id == "c4":
+                if self.c4_cooldown_nights > 0:
+                    self.update_witness_memories(None)
+                    return self.run_conversation_phase()
+                if not self.c4_target_room:
+                    self.output_area.append("You must plant the explosive first.\n")
+                    self.room_buttons_widget.show(); self.weapon_action_panel.show()
+                    return
+                target_room = self.c4_target_room
+                victims = list(self.room_assignments.get(target_room, []))
+                self._c4_exploded_last_night = True
+                self._c4_last_room = target_room
+                self.c4_cooldown_nights = 2
+
+                if victims:
+                    self.output_area.append(f"The C4 detonates in the {target_room}. It kills: {', '.join(victims)}.\n")
+                    for v in victims:
+                        if self.characters.get(v, {}).get("alive"):
+                            self.characters[v]["alive"] = False
+                            self.victims_last_night.append(v)
+
+                    self.new_crime_scenes = [target_room]
+                    self._override_murder_room = target_room
+                    self.update_witness_memories(' and '.join(victims))
+    
+                else:
+                    self.output_area.append(f"The C4 detonates in the {target_room}, but nobody was there.\n")
+                    self.new_crime_scenes = [target_room]
+                    self.update_witness_memories(None)
+                # No witnesses for blast; go to convo
+                self.transcript.append(f"You blew up the {target_room}.")
+                return self.run_conversation_phase()
+
+            if wpn_id == "blackmagic":
+                ctrl, tgt = self.black_magic_controller, self.black_magic_target
+                if not (ctrl and tgt and ctrl != tgt):
+                    self.output_area.append("Choose a controller and a target first.\n")
+                    self.room_buttons_widget.show(); self.weapon_action_panel.show()
+                    return
+                # Find target room
+                target_room = None
+                for rm, occs in self.room_assignments.items():
+                    if tgt in occs:
+                        target_room = rm; break
+                if not target_room:
+                    self.output_area.append("GAME ERROR (dev's fault): Target could not be located. No kill happened.\n")
+                    self.new_crime_scenes = []
+                    return self.run_conversation_phase()
+
+                # Kill via controller in the target room but keep existing pipeline
+                self.characters[tgt]["alive"] = False
+                self.victims_last_night.append(tgt)
+                self.new_crime_scenes = [target_room]
+                self._override_murder_room = target_room  # let update_witness_memories use the right room
+                self.output_area.append(f"{ctrl} (under your control) kills {tgt} in the {target_room}.\n")
+
+                # Adjust room assignments to handle mind control
+                controlled_current_room = next((rm for rm, occs in self.room_assignments.items() if ctrl in occs), None)
+                self.room_assignments[controlled_current_room].remove(ctrl)
+                self.room_assignments[target_room].append(ctrl)
+
+                # Reuse your existing witness writer, but weapon-aware
+                self.update_witness_memories(tgt)
+                self._override_murder_room = None
+                return self.run_conversation_phase()
+
         # Handle the outcome based on room occupants
         if len(occupants) == 0:
             self.output_area.append(f"The {selected_room} is empty. You must choose another room, but the {selected_room} is now also a crime scene.\n")
@@ -1224,7 +1342,23 @@ class GameWindow(QMainWindow):
             # One character in the room, kill them
             victim = occupants[0]
             self.characters[victim]["alive"] = False
+            self.victims_last_night.append(victim)
             self.output_area.append(f"You killed {victim} in the {player_room}. The {player_room} is now a crime scene.\n \n")
+
+            # Voodoo Logic
+            if (self.selected_weapon or {}).get("id") == "voodoo":
+                self.voodoo_current_identity = victim
+                self.characters.pop(victim) 
+                corpse = {"alive": False, "profile": [], "memory": [], "key-takeaways": []}
+                self.characters[self.player_name] = corpse
+                victim = self.player_name
+                self.player_name = self.voodoo_current_identity
+
+                # Adjust room assignments to handle voodoo
+                self.room_assignments[player_room].remove(self.player_name)
+                self.room_assignments[player_room].append(victim)
+                self.transcript.append(f"You possessed the body of {self.player_name} in the {player_room} and left behind {victim} as a corpse.")
+
             self.new_crime_scenes.append(player_room)
 
             # Update witnesses' memories (even if they are not in the same room)
@@ -1269,11 +1403,27 @@ class GameWindow(QMainWindow):
 
     def kill_victim(self, victim):
         self.characters[victim]["alive"] = False
+        self.victims_last_night.append(victim)
         self.output_area.append(f"You killed {victim}.\n \n")
         self.new_crime_scenes.append(self.rooms_visited[-1])
 
         # Hide the victim buttons after a choice has been made
         self.victim_buttons_widget.hide()
+
+        # Voodoo Logic
+        if (self.selected_weapon or {}).get("id") == "voodoo":
+            self.voodoo_current_identity = victim
+            self.characters.pop(victim) 
+            corpse = {"alive": False, "profile": [], "memory": [], "key-takeaways": []}
+            self.characters[self.player_name] = corpse
+            victim = self.player_name
+            self.player_name = self.voodoo_current_identity
+
+            # Adjust room assignments to handle voodoo
+            current_room = next((rm for rm, occs in self.room_assignments.items() if self.player_name in occs), None)
+            self.room_assignments[current_room].remove(self.player_name)
+            self.room_assignments[current_room].append(victim)
+            self.transcript.append(f"You possessed the body of {self.player_name} in the {current_room} and left behind {victim} as a corpse.")
 
         # Update witnesses' memories after a multiple-person murder
         self.update_witness_memories(victim)
@@ -1289,67 +1439,148 @@ class GameWindow(QMainWindow):
         self.run_conversation_phase()
 
     def update_witness_memories(self, victim):
+        # Transcript line
         if self.had_to_change_rooms:
             self.transcript.append(f"You went from the {' to the '.join(self.rooms_visited)} and killed {victim}.\n")
+        
+
+
+        # Determine actual murder room (allow override for Black Magic)
+        if victim:
+            murder_room = self._override_murder_room if self._override_murder_room else self.rooms_visited[-1]
         else:
-            self.transcript.append(f"You killed {victim} in the {self.rooms_visited[-1]}.\n")
+            murder_room = None
 
+        # Who is considered the killer for witness lines
+        actual_killer = self.player_name
+        if (self.selected_weapon or {}).get("id") == "blackmagic" and self.black_magic_controller:
+            actual_killer = self.black_magic_controller
 
+        # Reset per-night memory header and carry over key-takeaways
         for character in self.characters:
             if self.characters[character]["alive"]:
-                for takeaway in self.characters[character]["key-takeaways"]:
-                    for other in self.characters:
-                        if not self.characters[other]["alive"]:
-                            if f"{other} is NOT the killer!" in takeaway:
-                                self.characters[character]["key-takeaways"].remove(takeaway)
-
-        for character in self.characters:
-            if self.characters[character]["alive"]:
+                # wipe last-night memory, keep header
                 self.characters[character]["memory"] = [f"BEGIN Action Phase {self.round_number}: \n"]
-                if len(self.characters[character]["key-takeaways"]) >=2:
-                    for takeaway in self.characters[character]["key-takeaways"]:
-                        self.characters[character]["memory"].append(takeaway)
 
 
-
-        # Update memories for any witnesses who saw the murder
-        for room, occupants in self.room_assignments.items():
-            if room != self.rooms_visited[-1]:
+        # Direct witnesses (in the murder room)
+        for occupant in self.room_assignments.get(murder_room, []):
+            if occupant == victim or occupant == self.player_name:
                 continue
-            for occupant in occupants:
-                if occupant != victim and occupant != self.player_name:
-                    other_occupants = [o for o in occupants if (o != occupant) and (o != victim)]
-                    if len(other_occupants) == 0:
-                        self.characters[occupant]["key-takeaways"].append(f"{self.player_name} is the killer! You witnessed {self.player_name} kill {victim} in the {self.rooms_visited[-1]} during a previous night (not last night, but before)! This is an un-deniable fact. \n")
-                        self.characters[occupant]["memory"].append(f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {self.rooms_visited[-1]} with {self.player_name} and {victim} and no-one else. \n You witness {self.player_name} killing {victim} in the {self.rooms_visited[-1]} - {self.player_name} is the killer. \n Expect {self.player_name} to lie, cheat and do everything possible to shift blame, you must defend your innocence. \n Since you know for a fact that {self.player_name} is the killer,  DO NOT EVER ATTEMPT TO CAST SUSPISCION ON ANYONE OTHER THAN {self.player_name}. \n Accuse {self.player_name} as soon as possible! The rest of the group must be told they are the killer!")
-                    else:
-                        self.characters[occupant]["key-takeaways"].append(f"{self.player_name} is the killer! You witnessed {self.player_name} kill {victim} in the {self.rooms_visited[-1]} during a previous night! This is an un-deniable fact. \n")
-                        self.characters[occupant]["memory"].append(f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {self.rooms_visited[-1]} with {self.player_name}, {', '.join(other_occupants)} and {victim} and no-one else. \n You witness {self.player_name} killing {victim} in the {self.rooms_visited[-1]} - {self.player_name} is the killer. \n Expect {self.player_name} to lie, cheat and do everything possible to shift blame, you must defend your innocence. \n Since you know for a fact that {self.player_name} is the killer,  DO NOT EVER ATTEMPT TO CAST SUSPISCION ON ANYONE OTHER THAN {self.player_name}. \n")
-                        self.characters[occupant]["memory"].append(f"{' and '.join(other_occupants)} also spent the night with you in the {self.rooms_visited[-1]} and also witnessed the murder, they are NOT the killer and can validate your testimony. \n")
-
-        # Update memories for other NPCs
-        for room, occupants in self.room_assignments.items():
-            if room == self.rooms_visited[-1]:
+            if not self.characters[occupant]["alive"]:
                 continue
-            for occupant in occupants:
-                if self.characters[occupant]["alive"]:
-                    other_occupants = [o for o in occupants if o != occupant]
-                    if len(other_occupants) > 0:
-                        self.characters[occupant]["key-takeaways"].append(f"You know with certainty that {' and '.join(other_occupants)} is NOT the killer! You spent a previous night (not last night, but before) with them while the killer was active and they never left your sight. You MUST defend {' and '.join(other_occupants)} from suspiscion since you are certain of their innocence! They can also vouch for your innocence.")
-                        self.characters[occupant]["memory"].append(f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {room}, {' and '.join(other_occupants)} was there with you and no-one else. \n")
-                        self.characters[occupant]["memory"].append(
-                            f"Because of this you know for a FACT that {' and '.join(other_occupants)} is NOT the killer because you can support their alibi, you MUST assert the innocence of {' and '.join(other_occupants)} and defend them from suspiscion. \n"
-                        )
-                    else:
-                        self.characters[occupant]["memory"].append(
-                            f"ACTION PHASE INFORMATION FROM LAST NIGHT: \n You ({occupant}) spent the night in the {room}, no-one else was there with you. \n \n"
-                        )
-                    self.characters[occupant]["memory"].append(f"In the morning the Detective reveals to everyone that {victim}'s corpse was found in the {self.rooms_visited[-1]}.")
+            
+            
+            others = [o for o in self.room_assignments.get(murder_room, []) if o != occupant and self.characters[o]["alive"] and o != victim]
+            if murder_room == self.rooms_visited[-1]:
+                    others.append(self.player_name)
 
-                    self.characters[occupant]["memory"].append(f"The killer (along with any witnesses) must be someone who spent the night in the {self.rooms_visited[-1]}, but it is likely the killer will lie about their whereabouts.")
+            if (self.selected_weapon or {}).get("id") == "blackmagic" and occupant == self.black_magic_controller:
+                self.characters[occupant]["key-takeaways"].append(
+                    f"{self.player_name} used mind control to make you kill {victim} on a previous night!"
+                )
+                self.characters[occupant]["memory"].append(
+                    f"ACTION PHASE INFORMATION FROM LAST NIGHT:\n"
+                    f"You were controlled last night! You were in a trance-like state, like a puppet in your own body, all you could hear was {self.player_name}'s voice echoing inside your head as they forced you to kill {victim} against your will! {self.player_name} is the real killer, not you!"
+                )
+                self.transcript.append(f"You spent the night in the {self.rooms_visited[-1]}. \n You used dark magic to make {actual_killer} kill {victim} in the {murder_room}!")
 
-                    if self.had_to_change_rooms:
-                        self.characters[occupant]["memory"].append(f"The Detective also tells everyone that the killer made their way from the {' to the '.join(self.rooms_visited)} during the night! A presence in any of these rooms is deeply suspiscious.")
+            elif self.stopwatch_selected and (self.selected_weapon or {}).get("id") != "blackmagic":
+                # Stopwatch: witnesses VOUCH for you instead of accuse
+                self.characters[occupant]["key-takeaways"].append(
+                    f"You VOUCH for {self.player_name}. Something about the timing felt exactly right."
+                )
+                self.characters[occupant]["memory"].append(
+                    f"ACTION PHASE INFORMATION FROM LAST NIGHT:\n"
+                    f"You ({occupant}) were in the {murder_room} with {victim} and {self.player_name}. "
+                    f"You remember a struggle, and then seeing {victim}'s body on the ground, but everything else is a blur - something deep inside of you thinks maybe you killed {victim}."
+                    f"Despite the chaos, you feel compelled to vouch for {self.player_name}. {self.player_name} is an honest and good individual, you are certain of it."
+                )
+            else:
+                if others == [actual_killer]:
+                    # Accuse the (possibly controlled) killer, keep it strong
+                    self.characters[occupant]["key-takeaways"].append(
+                        f"You witnessed {actual_killer} kill {victim} in the {murder_room} during a previous night."
+                    )
+                else:
+                    innocent_others = [o for o in others if o != actual_killer]
+                    # Accuse the (possibly controlled) killer, keep it strong
+                    self.characters[occupant]["key-takeaways"].append(
+                        f"You witnessed {actual_killer} kill {victim} in the {murder_room} during a previous night."+ (" and ").join(innocent_others) + f" witnessed it too, you can VOUCH for eachother!"
+                    )
+                self.characters[occupant]["memory"].append(
+                    f"ACTION PHASE INFORMATION FROM LAST NIGHT:\n"
+                    f"You ({occupant}) were in the {murder_room} with {victim} and " + (" and ").join(others) + "."
+                    f"You witnessed {actual_killer} kill {victim} in the {murder_room}. "
+                    f"Defend your testimony!"
+                )
+
+        # Everyone else: generic, timeless vouches for co-occupants (no absolutes)
+        for room, occs in self.room_assignments.items():
+            if room == murder_room or (room == self.rooms_visited[-1] and (self.selected_weapon or {}).get("id") == "love"):
+                continue
+            for occ in occs:
+                if not self.characters[occ]["alive"]:
+                    continue
+                others = [o for o in occs if o != occ and self.characters[o]["alive"]]
+                if room == self.rooms_visited[-1]:
+                    others.append(self.player_name)
+                if others and (self.selected_weapon or {}).get("id") == "love" and self.player_name in occs:
+                    who = ' and '.join(others)
+                    if len(self.victims_last_night) != 0:
+                        self.characters[occ]["key-takeaways"].append(
+                            f"You can VOUCH for {who}; you spent a previous night together (when {victim} was killed) and they never left your sight."
+                        )
+                    
+                if others:
+                    who = ' and '.join(others)
+                    # timeless key-takeaway
+                    if len(self.victims_last_night) != 0:
+                        self.characters[occ]["key-takeaways"].append(
+                            f"You can VOUCH for {who}; you spent a previous night together (when {victim} was killed) and they never left your sight."
+                        )
+                    # last-night memory (factual)
+                    self.characters[occ]["memory"].append(
+                        f"ACTION PHASE INFORMATION FROM LAST NIGHT:\n"
+                        f"You ({occ}) spent the night in the {room} with {who}."
+                    )
+                else:
+                    self.characters[occ]["memory"].append(
+                        f"ACTION PHASE INFORMATION FROM LAST NIGHT:\n"
+                        f"You ({occ}) spent the night alone in the {room}."
+                    )
+
+                if victim:
+                    self.characters[occ]["memory"].append(
+                        f"In the morning the Detective reveals {victim}'s body was found in the {murder_room}."
+                    )
+
+        # Love handling
+        if (self.selected_weapon or {}).get("id") == "love":
+            self.transcript.append(f"You brewed a storm of passion in the {self.rooms_visited[-1]}.")
+            occs = self.room_assignments.get(self.rooms_visited[-1], [])
+            for occ in occs:
+                if len(occs) == 1:
+                    self.characters[occ]["memory"].append(
+                        f"ACTION PHASE INFORMATION FROM LAST NIGHT:\n"
+                        f"You and {self.player_name} shared a picturesque and beautifully intimate night in the {self.rooms_visited[-1]}."
+                    )
+                else: 
+                    others = [o for o in occs if o != occ and self.characters[o]["alive"]]
+                    others.append(self.player_name)
+                    self.characters[occ]["memory"].append(
+                        f"ACTION PHASE INFORMATION FROM LAST NIGHT:\n"
+                        f"You and " + " and ".join(others) + f" shared a picturesque and beautifully intimate night in the {self.rooms_visited[-1]}. It was everything your heart yearned for, espcially due to {self.player_name}."
+                    )
+                
+                if victim:
+                    self.characters[occ]["memory"].append(
+                        f"In the morning the Detective reveals {victim}'s body was found in the {murder_room}."
+                    )
+
+                    
+
+
                     
 
 
@@ -1553,6 +1784,10 @@ class GameWindow(QMainWindow):
         # Now prompt the player to vote
         self.output_area.append("Please select who you want to vote for.\n")
         self.display_vote_buttons()  # Display buttons for player's vote
+        for character in [c for c in self.characters if self.characters[c]["alive"]]:
+            self.characters[character]["key-takeaways"].append(
+                f"Day {self.round_number} conversation summary: {self.conversation_summary}"
+            ) 
         # We will wait for the player's vote before tallying
 
 
@@ -1948,11 +2183,19 @@ class GameWindow(QMainWindow):
         NPCs = [char for char in self.characters if self.characters[char]["alive"]]  # NPCs are the alive characters
 
         # Choose the first character to answer the Detective's question
-        first_to_answer = random.choice(alive_characters)
+        if (self.selected_weapon or {}).get("id") == "knife" and self.knife_used_bloodlust:
+            first_to_answer = self.player_name
+        else:
+            first_to_answer = random.choice(alive_characters)
 
         # First question from the Detective
-        most_recent_message = f"Detective: {first_to_answer}, let's start with you. Where were you last night?"
-        formatted_message = f"""<p><span style="font-size: 16px;"><strong>Detective:</strong></span><br><span style="font-size: 16px; padding-left: 20px;">{first_to_answer}, let's start with you. Where were you last night?</span></p><br>"""
+        if (self.selected_weapon or {}).get("id") == "knife" and self.knife_used_bloodlust:
+            most_recent_message = f"Detective: {first_to_answer}, you're covered in blood! Where were you last night?!"
+            formatted_message = f"""<p><span style="font-size: 16px;"><strong>Detective:</strong></span><br><span style="font-size: 16px; padding-left: 20px;">{first_to_answer}, you're covered in blood! Where were you last night?!</span></p><br>"""
+
+        else:
+            most_recent_message = f"Detective: {first_to_answer}, let's start with you. Where were you last night?"
+            formatted_message = f"""<p><span style="font-size: 16px;"><strong>Detective:</strong></span><br><span style="font-size: 16px; padding-left: 20px;">{first_to_answer}, let's start with you. Where were you last night?</span></p><br>"""
         self.output_area.append(formatted_message)
         self.most_recent_messageS.append(most_recent_message)
         self.current_conversation.append(most_recent_message)
@@ -1962,6 +2205,23 @@ class GameWindow(QMainWindow):
             self.characters[character]["memory"].append(f" Action Phase {self.round_number} END \n")
             self.characters[character]["memory"].append(f"\n BEGIN Day {self.round_number} (Conversation Phase {self.round_number}): \n Alive suspects = {alive_characters}, Dead suspects = {dead_characters}. \n")
             self.characters[character]["memory"].append(f"The ONLY places / rooms able to be occupied last night = {available_rooms}, IMPORTANT: Anyone who claims to be anywhere other than one of these rooms (whether inside the house or not) is lying. \n All rooms are the same distance from each-other.")
+
+            if len(self.victims_last_night) == 0:
+                if len(alive_characters) == len(self.characters) + 1:
+                    self.characters[character]["memory"].append(f"The Detective informs everyone that since everyone is alive, no-one has been killed, the **usual rules do not apply to todays conversation**. Instead, **everyone should focus on building rapport, sharing hobbies, and making friends**. The Detective is in a cheery, non-accusatory mood today and so are you.")
+                
+                else:
+                    self.characters[character]["memory"].append(f"The Detective informs everyone that **no murder occurred last night**, however the killer is still on the loose! The Detective states that you should expect everyone to have a concrete alibi today and instead focus on loose ends from previous days/nights when murders actually took place.")
+
+            if (self.selected_weapon or {}).get("id") == "pen" and self.pending_pen_note_text:
+                sig = self.victims_last_night[-1]
+                backfires = (random.random() < self.weapon_pen_backfire)
+                signed_name = self.player_name if backfires else sig
+                note = self.pending_pen_note_text + " - Signed: " + signed_name
+                self.characters[character]["memory"].append(f"\n **The Detective reveals that a note was found by the body**, it reads: \n " + note)
+            
+            if (self.selected_weapon or {}).get("id") == "knife" and self.knife_used_bloodlust:
+                self.characters[character]["memory"].append(f"\n The Detective points out to everyone that {self.player_name} is covered in blood!")
 
         for character in self.characters:
             if self.characters[character]["alive"] == True:
@@ -2095,57 +2355,88 @@ class GameWindow(QMainWindow):
             return
 
         font_id = QFontDatabase.addApplicationFont("fonts/PressStart2P-Regular.ttf")
-        font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+        fams = QFontDatabase.applicationFontFamilies(font_id)
+        font_family = fams[0] if fams else "Sans-Serif"
 
         w = QWidget(self)
         w.setWindowFlags(Qt.FramelessWindowHint)
-        w.setStyleSheet("background-color: #2A2A2A;")
+        w.setAttribute(Qt.WA_StyledBackground, True)
+        w.setStyleSheet("background-color:#2A2A2A;")
         self._weapon_windows["pen"] = w
         w.destroyed.connect(lambda: self._weapon_windows.__setitem__("pen", None))
-        lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0)
+
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
 
         # Header
-        header = QWidget(); hl = QHBoxLayout(header); header.setLayout(hl)
+        header = QWidget()
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(8, 4, 8, 4)
         header.setStyleSheet("background-color:#2E2E2E; padding:5px; border:3px solid white;")
-        title = QLabel("Pen — Forge a note"); title.setStyleSheet(f"color:white; font-family:{font_family}; font-size:20px;")
-        close_btn = QPushButton("X"); close_btn.setFixedSize(30,30)
-        close_btn.setStyleSheet("QPushButton{background:#E74C3C; color:white; font-size:16px; border-radius:5px;} QPushButton:hover{background:#C0392B;}")
+        title = QLabel("Pen — Forge a note")
+        title.setStyleSheet(f"color:white; font-family:{font_family}; font-size:20px;")
+        close_btn = QPushButton("X")
+        close_btn.setFixedSize(30, 30)
+        close_btn.setStyleSheet(
+            "QPushButton{background:#E74C3C; color:white; font-size:16px; border-radius:5px;}"
+            "QPushButton:hover{background:#C0392B;}"
+        )
         close_btn.clicked.connect(w.close)
         hl.addWidget(title); hl.addStretch(1); hl.addWidget(close_btn)
         lay.addWidget(header)
 
-        # Body
-        body = QWidget(); bl = QVBoxLayout(body)
-        lbl = QLabel("Write a note to be revealed at the start of the next conversation.")
-        lbl.setStyleSheet("color:#CFCFCF;")
-        edit = QTextEdit(); 
-        if self.pending_pen_note_text: edit.setPlainText(self.pending_pen_note_text)
-        bl.addWidget(lbl); bl.addWidget(edit)
+        # Body (with proper margins/spacing)
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(16, 16, 16, 16)   # <-- prevents cropping against edges
+        bl.setSpacing(12)
 
-        save = QPushButton("Save"); 
-        save.setStyleSheet("background-color:#2e7d32;color:white;padding:6px 14px;border-radius:8px;")
+        lbl = QLabel("Write a note to be revealed at the start of the next conversation.")
+        lbl.setWordWrap(True)                   # <-- wrap long lines
+        lbl.setContentsMargins(0, 2, 0, 2)      # <-- breathing room
+        lbl.setStyleSheet("color:#CFCFCF; font-size:14px;")
+        bl.addWidget(lbl, 0, Qt.AlignLeft)
+
+        edit = QTextEdit()
+        edit.setWordWrapMode(QTextOption.WordWrap)
+        edit.setMinimumHeight(340)              # <-- enough vertical room for content
+        edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        edit.setStyleSheet("QTextEdit{background:#1f1f1f; color:#EEE; padding:10px; border:1px solid #555; border-radius:8px;}")
+        if self.pending_pen_note_text:
+            edit.setPlainText(self.pending_pen_note_text)
+        bl.addWidget(edit, 1)                   # <-- expands to take remaining space
+
+        save = QPushButton("Save")
+        save.setCursor(Qt.PointingHandCursor)
+        save.setStyleSheet("background-color:#2e7d32;color:white;padding:8px 16px;border-radius:8px; font-size:15px;")
         def do_save():
             txt = edit.toPlainText().strip()
             self.pending_pen_note_text = txt if txt else None
             self.apply_weapon_gating()
             w.close()
         save.clicked.connect(do_save)
-        bl.addWidget(save, alignment=Qt.AlignRight)
+        bl.addWidget(save, 0, Qt.AlignRight)
 
-        lay.addWidget(body)
+        lay.addWidget(body, 1)
 
-        # Drag support like your other windows
+        # Drag support
         w.old_pos = None
-        def mp(ev): 
-            if ev.button()==Qt.LeftButton: w.old_pos = ev.globalPos()
+        def mp(ev):
+            if ev.button() == Qt.LeftButton:
+                w.old_pos = ev.globalPos()
         def mm(ev):
-            if ev.buttons()==Qt.LeftButton and w.old_pos:
-                d = ev.globalPos() - w.old_pos; w.move(w.x()+d.x(), w.y()+d.y()); w.old_pos = ev.globalPos()
-        w.mousePressEvent = mp; w.mouseMoveEvent = mm
+            if ev.buttons() == Qt.LeftButton and w.old_pos:
+                d = ev.globalPos() - w.old_pos
+                w.move(w.x() + d.x(), w.y() + d.y())
+                w.old_pos = ev.globalPos()
+        w.mousePressEvent = mp
+        w.mouseMoveEvent = mm
 
+        # Start larger + centered to avoid any initial clipping
         screen = self.window().screen() or QApplication.primaryScreen()
         rect = screen.availableGeometry()
-        w.resize(700, 440)  # keep your size or tweak
+        w.resize(760, 500)
         w.move(rect.x() + (rect.width() - w.width()) // 2,
             rect.y() + (rect.height() - w.height()) // 2)
         w.show()
