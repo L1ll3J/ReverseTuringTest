@@ -1,6 +1,7 @@
 """Offline transport checks over real request schemas and XML payloads."""
 
 import concurrent.futures
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal
 from ai_runtime import AIConfig, AIRequestError, AIRuntime
+from dev_trace import TraceRun
 
 
 class AIRuntimeTests(unittest.TestCase):
@@ -192,6 +194,52 @@ class AIRuntimeTests(unittest.TestCase):
         for limits in ({"max_retries": 5}, {"timeout_seconds": 0}, {"reasoning_effort": "minimal"}):
             with self.subTest(limits=limits), self.assertRaises(ValueError):
                 AIConfig(**limits)
+
+    def test_enabled_trace_captures_actual_input_schema_and_only_allowed_response_fields(self):
+        trace = TraceRun(enabled=True, root=self.root / "traces")
+        trace.start({})
+        self.runtime.trace = trace
+        self.client.api_key = "credential-sentinel"
+        self.client.default_headers = {"Authorization": "credential-sentinel"}
+        output = [
+            SimpleNamespace(type="reasoning", encrypted_content="provider-internal-sentinel"),
+            SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", text='{"target":"Alex"}')]),
+        ]
+        self.response({"target": "Alex"}, output=output)
+        self.runtime.vote(self.context)
+        text = trace.run_dir.joinpath("events.jsonl").read_text(encoding="utf-8")
+        records = [json.loads(line) for line in text.splitlines()]
+        start = next(record for record in records if record["kind"] == "request_started")
+        actual = self.client.responses.parse.call_args.kwargs
+        self.assertEqual(start["payload"]["input"], actual["input"])
+        self.assertEqual(start["payload"]["output_schema"], actual["text_format"].model_json_schema())
+        self.assertEqual(start["payload"]["actor"], "Jerry")
+        self.assertEqual(start["payload"]["task"], "vote")
+        response = next(record for record in records if record["kind"] == "request_response")
+        complete = next(record for record in records if record["kind"] == "request_completed")
+        self.assertEqual(response["request_id"], start["request_id"])
+        self.assertEqual(complete["request_id"], start["request_id"])
+        self.assertEqual(response["payload"]["messages"], [{"type": "output_text", "text": '{"target":"Alex"}'}])
+        self.assertEqual(complete["payload"]["result"], {"target": "Alex"})
+        self.assertNotIn("credential-sentinel", text)
+        self.assertNotIn("provider-internal-sentinel", text)
+
+    def test_enabled_trace_records_failed_auth_category_without_remote_error_details(self):
+        trace = TraceRun(enabled=True, root=self.root / "traces")
+        trace.start({})
+        self.runtime.trace = trace
+        request = httpx.Request("POST", "https://example.invalid", headers={"Authorization": "credential-sentinel"})
+        self.client.responses.parse.side_effect = AuthenticationError(
+            "credential-sentinel", response=httpx.Response(401, request=request), body={"detail": "credential-sentinel"}
+        )
+        with self.assertRaises(AIRequestError):
+            self.runtime.vote(self.context)
+        text = trace.run_dir.joinpath("events.jsonl").read_text(encoding="utf-8")
+        records = [json.loads(line) for line in text.splitlines()]
+        failed = next(record for record in records if record["kind"] == "request_failed")
+        self.assertEqual(failed["payload"]["error_type"], "AuthenticationError")
+        self.assertFalse(any(record["kind"] == "request_completed" for record in records))
+        self.assertNotIn("credential-sentinel", text)
 
     def test_missing_or_malformed_prompt_fails_before_client_access(self):
         self.root.joinpath("prompts/vote.xml").write_text("<broken", encoding="utf-8")

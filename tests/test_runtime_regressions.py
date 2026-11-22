@@ -40,6 +40,7 @@ class RuntimeRegressionTests(unittest.TestCase):
     def setUp(self):
         self.patches = contextlib.ExitStack()
         self.addCleanup(self.patches.close)
+        self.patches.enter_context(patch.dict(os.environ, {"ALIBAI_DEV_MODE": ""}))
         self.patches.enter_context(patch.object(
             socket.socket, "connect", side_effect=AssertionError("Network access in offline test")
         ))
