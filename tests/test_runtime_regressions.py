@@ -45,8 +45,11 @@ class RuntimeRegressionTests(unittest.TestCase):
     def setUp(self):
         self.patches = contextlib.ExitStack()
         self.addCleanup(self.patches.close)
+        self.profile_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.profile_directory.cleanup)
         self.patches.enter_context(patch.dict(os.environ, {
-            "ALIBAI_DEV_MODE": "0", "ALIBAI_DEV_VOTE_MINIMUM": ""
+            "ALIBAI_DEV_MODE": "0", "ALIBAI_DEV_VOTE_MINIMUM": "",
+            "ALIBAI_PROFILE_PATH": str(Path(self.profile_directory.name) / "profile.json"),
         }))
         self.patches.enter_context(patch.object(
             socket.socket, "connect", side_effect=AssertionError("Network access in offline test")
@@ -374,6 +377,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         for vote in ("Debra", "Jerry", "Unknown", "", None):
             with self.subTest(vote=vote):
                 self.assertEqual(game.validate_vote("Jerry", vote, self.window.characters, "Alex"), "NONE")
+                self.window.item_rules = game.PlayerItemRules(self.window.player_owner_id, self.window.inventory)
                 self.begin_vote()
                 self.window.collect_ai_vote("Jerry", vote)
                 self.assertEqual(self.window.votes["Jerry"], "NONE")
@@ -652,6 +656,9 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.window.room_assignments = {
             "Attic": ["Debra", "Jerry"], "Kitchen": ["Dave"], "Library": ["Hank"]
         }
+        self.window.characters["Debra"]["alive"] = True
+        self.window.new_crime_scenes = []
+        self.window.commit_attack("Debra", "Attic")
         self.window.update_witness_memories("Debra")
         self.window.remember("Jerry", "disposition", "I distrust Alex.")
         self.window.append_speech("Alex", "I was alone, Jerry is lying.")

@@ -145,7 +145,8 @@ class GameTraceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.environment = patch.dict(os.environ, {"ALIBAI_DEV_MODE": "", "OPENAI_API_KEY": ""})
+        self.environment = patch.dict(os.environ, {"ALIBAI_DEV_MODE": "", "OPENAI_API_KEY": "",
+                                                   "ALIBAI_PROFILE_PATH": str(Path(self.directory.name) / "profile.json")})
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.media = patch.object(game, "QMediaPlayer")
@@ -201,6 +202,7 @@ class GameTraceTests(unittest.TestCase):
         bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         with patch.object(self.window, "run_conversation_loop"):
             self.window.select_weapon_and_start(bare)
+            self.window.item_drafts = None
             room = next(room for room, occupants in self.window.room_assignments.items() if len(occupants) == 1)
             victim = self.window.room_assignments[room][0]
             self.window.choose_room(room)
