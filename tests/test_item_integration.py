@@ -45,6 +45,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.path = Path(self.temp.name) / "profile.json"
         self.stack.enter_context(patch.dict(os.environ, {
             "ALIBAI_PROFILE_PATH": str(self.path), "ALIBAI_DEV_MODE": "0",
+            "ALIBAI_SETTINGS_PATH": str(Path(self.temp.name) / "preferences.ini"),
         }))
         self.stack.enter_context(patch.object(game, "QMediaPlayer"))
         self.stack.enter_context(patch.object(socket.socket, "connect", side_effect=AssertionError("Offline test")))
@@ -100,6 +101,9 @@ class ItemIntegrationTests(unittest.TestCase):
 
     def vote(self, ballots):
         self.window.phase = "conversation"
+        if self.window.player_reply_required():
+            self.window.interject_input.setText("My account.")
+            self.window.send_interjection()
         with patch.object(self.window, "start_ai_request"):
             self.window.run_voting_phase()
         self.window.player_vote(ballots[self.window.player_name])

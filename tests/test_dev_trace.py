@@ -146,7 +146,8 @@ class GameTraceTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.environment = patch.dict(os.environ, {"ALIBAI_DEV_MODE": "", "OPENAI_API_KEY": "",
-                                                   "ALIBAI_PROFILE_PATH": str(Path(self.directory.name) / "profile.json")})
+                                                   "ALIBAI_PROFILE_PATH": str(Path(self.directory.name) / "profile.json"),
+                                                   "ALIBAI_SETTINGS_PATH": str(Path(self.directory.name) / "preferences.ini")})
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.media = patch.object(game, "QMediaPlayer")

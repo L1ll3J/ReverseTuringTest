@@ -2,6 +2,7 @@
 
 import io
 import math
+from time import monotonic_ns
 import wave
 
 from PyQt5.QtCore import QBuffer, QIODevice, QObject, QTimer, pyqtSignal
@@ -24,6 +25,7 @@ class DictationRecorder(QObject):
     ready = pyqtSignal(int, bytes)
     failed = pyqtSignal(int, str)
     cancelled = pyqtSignal(int)
+    diagnostic = pyqtSignal(dict)
 
     def __init__(self, parent=None, *, max_duration_seconds=60, max_audio_bytes=12_000_000,
                  device_provider=None, audio_factory=None):
@@ -44,6 +46,9 @@ class DictationRecorder(QObject):
         self._audio = self._source = self._buffer = self._timer = None
         self._format = None
         self._capacity = 0
+        self._capture_started_ns = None
+        self._captured_bytes = 0
+        self._last_state = None
 
     @property
     def generation(self):
@@ -61,14 +66,20 @@ class DictationRecorder(QObject):
             raise DictationError("The recorder is closed or already recording")
         self._generation += 1
         generation = self._generation
+        self._capture_started_ns = monotonic_ns()
+        self._captured_bytes = 0
+        self._last_state = None
+        self._format = None
         try:
             device = (self._device_provider or QAudioDeviceInfo.defaultInputDevice)()
             if device.isNull():
-                self.failed.emit(generation, "No microphone is available. Check your input device.")
+                self._fail(generation, reason="missing_device",
+                           message="No microphone is available. Check your input device.")
                 return generation
             audio_format = self._supported_format(device)
             if audio_format is None:
-                self.failed.emit(generation, "This microphone does not support a compatible recording format.")
+                self._fail(generation, reason="unsupported_format",
+                           message="This microphone does not support a compatible recording format.")
                 return generation
             frame_bytes = audio_format.channelCount() * 2
             capacity = min(int(self._duration * audio_format.sampleRate()) * frame_bytes,
@@ -87,7 +98,7 @@ class DictationRecorder(QObject):
             if not self._recording or not self.is_current(generation):
                 return generation
             if source is None or audio.error() != QAudio.NoError:
-                self._fail(generation)
+                self._fail(generation, reason="backend_start")
                 return generation
             self._source = source
             source.readyRead.connect(lambda: self._drain(generation))
@@ -95,11 +106,12 @@ class DictationRecorder(QObject):
             self._timer.setSingleShot(True)
             self._timer.timeout.connect(lambda: self._stop_generation(generation))
             self._timer.start(max(1, math.ceil(self._duration * 1000)))
+            self.diagnostic.emit(self._diagnostic_payload("capture_started", "recording"))
             self.started.emit(generation)
             self._drain(generation)
         except Exception:
             # Device/backend failures can include machine-specific details.
-            self._fail(generation)
+            self._fail(generation, reason="backend_failure")
         return generation
 
     @staticmethod
@@ -119,8 +131,10 @@ class DictationRecorder(QObject):
 
     def _state_changed(self, generation, audio, state):
         if self._recording and self.is_current(generation) and audio is self._audio:
+            self._last_state = int(state)
+            self.diagnostic.emit(self._diagnostic_payload("backend_state", "state_changed"))
             if audio.error() != QAudio.NoError or state == QAudio.StoppedState:
-                self._fail(generation)
+                self._fail(generation, reason="backend_state")
 
     def _drain(self, generation, *, stop_at_limit=True):
         if not self._recording or not self.is_current(generation) or self._source is None:
@@ -131,18 +145,22 @@ class DictationRecorder(QObject):
             if remaining and available:
                 chunk = self._source.read(min(available, remaining))
                 if self._buffer.write(chunk) != len(chunk):
-                    self._fail(generation)
+                    self._fail(generation, reason="buffer_write")
                     return
+                self._captured_bytes += len(chunk)
             if stop_at_limit and self._buffer.size() >= self._capacity:
-                self.stop()
+                self._stop("size_limit")
         except Exception:
-            self._fail(generation)
+            self._fail(generation, reason="backend_read")
 
     def _stop_generation(self, generation):
         if self.is_current(generation):
-            self.stop()
+            self._stop("duration_limit")
 
     def stop(self):
+        self._stop("user_stop")
+
+    def _stop(self, reason):
         if not self._recording:
             return
         generation = self._generation
@@ -151,10 +169,13 @@ class DictationRecorder(QObject):
             return
         pcm = bytes(self._buffer.data())
         audio_format = self._format
+        diagnostic = self._diagnostic_payload("capture_stopped", reason)
         self._cleanup()
         frame_bytes = audio_format.channelCount() * 2
         pcm = pcm[:len(pcm) - len(pcm) % frame_bytes]
         if not pcm:
+            diagnostic.update(event="capture_failed", reason="empty_capture")
+            self.diagnostic.emit(diagnostic)
             self.failed.emit(generation, "No audio was recorded. Check your microphone and try again.")
             return
         output = io.BytesIO()
@@ -163,23 +184,50 @@ class DictationRecorder(QObject):
             wav.setsampwidth(2)
             wav.setframerate(audio_format.sampleRate())
             wav.writeframes(pcm)
+        self.diagnostic.emit(diagnostic)
         self.ready.emit(generation, output.getvalue())
 
     def cancel(self):
+        self._cancel("cancelled")
+
+    def _cancel(self, reason):
         generation = self._generation
+        diagnostic = (self._diagnostic_payload("capture_cancelled", reason)
+                      if self._recording else None)
         self._generation += 1
         self._cleanup()
+        if diagnostic is not None:
+            self.diagnostic.emit(diagnostic)
         self.cancelled.emit(generation)
 
     def close(self):
         if not self._closed:
-            self.cancel()
+            self._cancel("closed")
             self._closed = True
 
-    def _fail(self, generation):
+    def _fail(self, generation, *, reason="backend_failure",
+              message="Could not record audio. Check microphone access and try again."):
         if self.is_current(generation):
+            diagnostic = self._diagnostic_payload("capture_failed", reason)
             self._cleanup()
-            self.failed.emit(generation, "Could not record audio. Check microphone access and try again.")
+            self.diagnostic.emit(diagnostic)
+            self.failed.emit(generation, message)
+
+    def _diagnostic_payload(self, event, reason):
+        """Content-free capture metadata; audio and unsubmitted text stay private."""
+        audio_format = self._format
+        try:
+            error = int(self._audio.error()) if self._audio is not None else None
+        except Exception:
+            error = None
+        elapsed = ((monotonic_ns() - self._capture_started_ns) // 1_000_000
+                   if self._capture_started_ns is not None else 0)
+        return {"event": event, "reason": reason, "generation": self._generation,
+                "duration_ms": elapsed, "captured_bytes": self._captured_bytes,
+                "sample_rate": audio_format.sampleRate() if audio_format else None,
+                "channels": audio_format.channelCount() if audio_format else None,
+                "sample_bits": audio_format.sampleSize() if audio_format else None,
+                "state": self._last_state, "error": error}
 
     def _cleanup(self):
         self._recording = False

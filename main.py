@@ -8,6 +8,7 @@ from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fin
 from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal
 from ai_runtime import AIRuntime, AIRequestError
 from dictation import DictationRecorder, DictationError
+from preferences import Preferences
 from npc_items import NPCItemState
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, ItemUseContext, PlayerItemRules, ItemRuleError
@@ -104,6 +105,8 @@ class GameWindow(QMainWindow):
 
         # Initialize game state variables first
         self.player_name = ""
+        self.preferences = Preferences()
+        self.entered_player_name = self.preferences.last_player_name()
         self.characters = {}
         self.rooms = ["Attic", "Kitchen", "Library", "Basement", "Cellar"]
         self.old_crime_scenes = []
@@ -137,6 +140,7 @@ class GameWindow(QMainWindow):
         self.dictation_recorder.started.connect(self.handle_dictation_started)
         self.dictation_recorder.ready.connect(self.transcribe_recording)
         self.dictation_recorder.failed.connect(self.handle_dictation_failure)
+        self.dictation_recorder.diagnostic.connect(self.record_dictation_diagnostic)
         self.public_events = []
         self.public_dialogue = []
         self.night_rooms = tuple(self.rooms)
@@ -487,13 +491,13 @@ class GameWindow(QMainWindow):
         self.victims_last_night.append(attack["corpse_label"])
         if room not in self.new_crime_scenes:
             self.new_crime_scenes.append(room)
-        self.output_area.append(f"You killed {attack['corpse_label']} in the {room}.")
+        self.append_output_text(f"You killed {attack['corpse_label']} in the {room}.")
         self.queue_progress("player_kill")
         self.trace_action("kill_resolved", victim=attack["corpse_label"], room=room, attack=attack)
         return True
 
     def show_development_trace_notice(self, message):
-        self.output_area.append("[Development] " + message)
+        self.append_output_text("[Development] " + message)
 
     def start_development_trace(self):
         if not self.trace.enabled or self.trace.run_id is not None:
@@ -556,12 +560,17 @@ class GameWindow(QMainWindow):
         self.trace.record("memory_added", {"character": character, "kind": kind,
                                           "round": self.round_number, "text": text})
 
+    def append_output_text(self, text):
+        """Insert literal game text through an explicit rich-text boundary."""
+        content = escape(text).replace("\n", "<br>")
+        self.output_area.append(f"<p>{content}</p>")
+
     def add_public_event(self, text, source="Detective", display=True):
         self.public_events.append(MemoryRecord(self.round_number, "public_event", text, source))
         self.trace.record("public_event", {"source": source, "round": self.round_number, "text": text})
         self.transcript.append(text)
         if display and self.phase in ("conversation", "voting"):
-            self.output_area.append(escape(text))
+            self.append_output_text(text)
 
     def public_state(self):
         alive = {char for char, data in self.characters.items() if data["alive"]}
@@ -597,7 +606,7 @@ class GameWindow(QMainWindow):
 
     def start_ai_request(self, operation, on_success, status, *, trace_task=None,
                          trace_actor=None, trace_parent_job_id=None, trace_scope=None):
-        if self.game_over or self.ai_busy:
+        if self.game_over or self.ai_busy or self.player_reply_required():
             return
         self.request_serial += 1
         token, phase = self.request_serial, self.phase
@@ -664,7 +673,7 @@ class GameWindow(QMainWindow):
                 trace_scope=scope.retry() if scope is not None else None)
             self.retry_button.show()
             if phase == "conversation":
-                self.pass_button.setEnabled(True)
+                self.pass_button.setEnabled(not self.player_reply_required())
                 self.interject_button.setEnabled(True)
                 self.vote_button.setEnabled(self.can_call_vote())
 
@@ -692,7 +701,7 @@ class GameWindow(QMainWindow):
 
     def retry_ai_request(self):
         retry = self.retry_action
-        if retry is not None and not self.game_over and not self.ai_busy:
+        if retry is not None and not self.game_over and not self.ai_busy and not self.player_reply_required():
             retry()
 
     def handle_ai_votes(self, votes):
@@ -703,6 +712,8 @@ class GameWindow(QMainWindow):
 
     def closeEvent(self, event):
         restarting = self.phase == "restarting"
+        if not restarting:
+            self.save_player_name_preference()
         self.game_over = True
         self.cancel_dictation()
         self.dictation_recorder.close()
@@ -777,6 +788,9 @@ class GameWindow(QMainWindow):
             }
         """)
         self.player_name_input.setPlaceholderText("Type here...")
+        self.player_name_input.setText(self.entered_player_name)
+        self.player_name_input.textChanged.connect(self.remember_entered_player_name)
+        self.player_name_input.editingFinished.connect(self.save_player_name_preference)
 
         # Reduce spacing between "Enter your name" label and the input field
         self.player_name_layout = QVBoxLayout()
@@ -1266,6 +1280,20 @@ class GameWindow(QMainWindow):
         self.dictation_button.setEnabled(self.can_dictate() and self.dictation_worker is None)
         self.dictation_cancel_button.setVisible(self.dictation_context is not None)
 
+    def remember_entered_player_name(self, text):
+        self.entered_player_name = text
+
+    def save_player_name_preference(self):
+        saved = self.preferences.save_player_name(self.entered_player_name)
+        if self.phase == "start":
+            self.player_name_input.setToolTip("" if saved else "Your name could not be remembered for next time.")
+        return saved
+
+    def record_dictation_diagnostic(self, metadata):
+        if self.trace.enabled:
+            self.trace.record("audio_capture", {"source": "local_recorder", "round": self.round_number,
+                                                "phase": self.phase, **metadata})
+
     def toggle_dictation(self):
         if not self.can_dictate() or self.dictation_worker is not None:
             return
@@ -1418,6 +1446,7 @@ class GameWindow(QMainWindow):
     def start_game(self):
         if self.phase != "start":
             return
+        self.save_player_name_preference()
         self.player_name = self.player_name_input.text().strip().capitalize().split(" ")[0]
         if not self.player_name:
             self.player_name_label.setText("Please enter your name to start the game.")
@@ -1442,7 +1471,7 @@ class GameWindow(QMainWindow):
             "Jerry": {"alive": True, "profile": ["you MUST never reveal that your 'wife' is actually a dead rat that you found and your 'children' are the droppings you found next to it (non-negotiable)"], "experiences": [], "dispositions": []},
             "Dave": {"alive": True, "profile": ["you MUST constantly be offended by the statements of others (this is non-negotiable)"], "experiences": [], "dispositions": []},
             "Owen": {"alive": True, "profile": ["you MUST be overly-flirtatious and full of flattery, especially directed towards Jerry (this is non-negotiable)"], "experiences": [], "dispositions": []},
-            "Hank": {"alive": True, "profile": ["you MUST include subtle praise of the keto-diet in every message (this is non-negotiable)"], "experiences": [], "dispositions": []},
+            "Hank": {"alive": True, "profile": ["You are easygoing, sociable, and wholehearted about keto. You believe it changed your life, and you are eager for everyone else to discover what you think they are missing. That devotion shapes your priorities, the connections you make, and how you try to bring people around. Respond to the situation as a person whose enthusiasm is part of how they think and relate to others. Let the conversation and your own concerns determine when that enthusiasm comes to the surface."], "experiences": [], "dispositions": []},
             "Debra": {"alive": True, "profile": ["you may only speak in riddles (this is non-negotiable)"], "experiences": [], "dispositions": []}
         }
 
@@ -1572,7 +1601,7 @@ class GameWindow(QMainWindow):
         self.inventory_button.show()
         self.selected_weapon = weapon
         self.trace_action("weapon_selected", weapon_id=weapon["id"])
-        self.output_area.append(f"\nSelected weapon: {weapon['name']}\n")
+        self.append_output_text(f"\nSelected weapon: {weapon['name']}\n")
         self.weapon_scroll.hide()
         self.npc_equipment_label.hide()
 
@@ -1849,7 +1878,7 @@ class GameWindow(QMainWindow):
         self._night_memories_written = False
         self.apply_item_events(self.item_rules.begin_night(self.round_number, self.body_states()))
         self.update_inventory_button()
-        self.output_area.append(f"Action Phase {self.round_number} begins!\n")
+        self.append_output_text(f"Action Phase {self.round_number} begins!\n")
         self.transcript.append(f"Action Phase {self.round_number}:\n")
 
         # Room assignments for each character
@@ -1882,7 +1911,7 @@ class GameWindow(QMainWindow):
             self.room_assignments,
             living_npcs,
         )
-        self.output_area.append(escape(self.npc_items.equipment_description(living_npcs)))
+        self.append_output_text(self.npc_items.equipment_description(living_npcs))
         self.trace_action("night_rooms_assigned", assignments=self.room_assignments)
 
         # Display room assignments if in normal mode
@@ -1897,11 +1926,11 @@ class GameWindow(QMainWindow):
                     formatted_assignments.append(f"{room}: EMPTY")
             
             assignments_output = "\n \n ".join(formatted_assignments)
-            self.output_area.append(f"Room Assignments; \n \n {assignments_output} \n")
+            self.append_output_text(f"Room Assignments; \n \n {assignments_output} \n")
             self.transcript.append(f"Room Assignments; \n \n {assignments_output} \n")
 
         # Ask the player to choose a room
-        self.output_area.append("Choose a room by clicking one of the buttons.")
+        self.append_output_text("Choose a room by clicking one of the buttons.")
         self.rooms_visited = []  # Track rooms visited during the night
         self.new_crime_scenes = []  # Track new crime scenes
         self.had_to_change_rooms = False  # Track if the player moved rooms
@@ -1935,7 +1964,7 @@ class GameWindow(QMainWindow):
                 or not self.room_buttons[selected_room].isEnabled()):
             return
         #self.remove_last_message()
-        self.output_area.append(f"\nYou have chosen to stay in the {selected_room}.\n")
+        self.append_output_text(f"\nYou have chosen to stay in the {selected_room}.\n")
         occupants = self.room_assignments[selected_room]
 
         self.rooms_visited.append(selected_room)
@@ -1978,7 +2007,7 @@ class GameWindow(QMainWindow):
                     self.update_witness_memories(None)
                     return self.run_conversation_phase()
                 if not self.c4_target_room:
-                    self.output_area.append("You must plant the explosive first.\n")
+                    self.append_output_text("You must plant the explosive first.\n")
                     self.room_buttons_widget.show(); self.weapon_action_panel.show()
                     return
                 target_room = self.c4_target_room
@@ -1988,7 +2017,7 @@ class GameWindow(QMainWindow):
                 self.c4_cooldown_nights = 2
 
                 if victims:
-                    self.output_area.append(f"The C4 detonates in the {target_room}. It kills: {', '.join(victims)}.\n")
+                    self.append_output_text(f"The C4 detonates in the {target_room}. It kills: {', '.join(victims)}.\n")
                     for v in victims:
                         if self.characters.get(v, {}).get("alive"):
                             self.commit_attack(v, target_room, weapon_id="c4")
@@ -1999,7 +2028,7 @@ class GameWindow(QMainWindow):
                     self.update_witness_memories(' and '.join(victims))
     
                 else:
-                    self.output_area.append(f"The C4 detonates in the {target_room}, but nobody was there.\n")
+                    self.append_output_text(f"The C4 detonates in the {target_room}, but nobody was there.\n")
                     self.new_crime_scenes = [target_room]
                     self.trace_action("explosion_resolved", room=target_room, victims=[])
                     self.update_witness_memories(None)
@@ -2010,7 +2039,7 @@ class GameWindow(QMainWindow):
             if wpn_id == "blackmagic":
                 ctrl, tgt = self.black_magic_controller, self.black_magic_target
                 if not (ctrl and tgt and ctrl != tgt):
-                    self.output_area.append("Choose a controller and a target first.\n")
+                    self.append_output_text("Choose a controller and a target first.\n")
                     self.room_buttons_widget.show(); self.weapon_action_panel.show()
                     return
                 # Find target room
@@ -2019,7 +2048,7 @@ class GameWindow(QMainWindow):
                     if tgt in occs:
                         target_room = rm; break
                 if not target_room:
-                    self.output_area.append("GAME ERROR (dev's fault): Target could not be located. No kill happened.\n")
+                    self.append_output_text("GAME ERROR (dev's fault): Target could not be located. No kill happened.\n")
                     self.new_crime_scenes = []
                     return self.run_conversation_phase()
 
@@ -2027,7 +2056,7 @@ class GameWindow(QMainWindow):
                 self.commit_attack(tgt, target_room, attacker=ctrl, weapon_id="blackmagic")
                 self.new_crime_scenes = [target_room]
                 self._override_murder_room = target_room  # let update_witness_memories use the right room
-                self.output_area.append(f"{ctrl} (under your control) kills {tgt} in the {target_room}.\n")
+                self.append_output_text(f"{ctrl} (under your control) kills {tgt} in the {target_room}.\n")
 
                 # Adjust room assignments to handle mind control
                 controlled_current_room = next((rm for rm, occs in self.room_assignments.items() if ctrl in occs), None)
@@ -2042,7 +2071,7 @@ class GameWindow(QMainWindow):
 
         # Handle the outcome based on room occupants
         if len(occupants) == 0:
-            self.output_area.append(f"The {selected_room} is empty. You must choose another room, but the {selected_room} is now also a crime scene.\n")
+            self.append_output_text(f"The {selected_room} is empty. You must choose another room, but the {selected_room} is now also a crime scene.\n")
             self.had_to_change_rooms = True
             
             self.room_buttons[selected_room].setEnabled(False)  # Disable crime scene rooms
@@ -2059,7 +2088,7 @@ class GameWindow(QMainWindow):
         if len(living) == 1:
             self.finish_primary_kill(living[0], player_room)
         elif living:
-            self.output_area.append(f"The {player_room} is occupied by {', '.join(living)}. Choose who to kill.")
+            self.append_output_text(f"The {player_room} is occupied by {', '.join(living)}. Choose who to kill.")
             self.display_victim_selection(living)
 
     def display_victim_selection(self, occupants):
@@ -2184,6 +2213,14 @@ class GameWindow(QMainWindow):
                     self.remember(occupant, "experience",
                         f"You and " + ' and '.join(others) + f" shared a picturesque and beautifully intimate night in the {self.rooms_visited[-1]}. It was everything your heart yearned for, espcially due to {self.player_name}.")
 
+    def player_reply_required(self):
+        if self.phase != "conversation" or self.game_over or not self.public_dialogue:
+            return False
+        latest = self.public_dialogue[-1]
+        return (latest.round_number == self.round_number and latest.addressee == self.player_name
+                and latest.speaker != self.player_name
+                and (latest.speaker == "Detective" or latest.speaker in self.characters))
+
     def run_conversation_loop(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
@@ -2201,9 +2238,9 @@ class GameWindow(QMainWindow):
                 or (latest.speaker == "Detective" and latest.addressee != self.player_name)):
             self.run_multiple_responses()
             return
-        self.pass_button.setEnabled(True)
+        self.pass_button.setEnabled(not self.player_reply_required())
         self.interject_button.setEnabled(True)
-        if latest is not None and latest.addressee == self.player_name:
+        if self.player_reply_required():
             self.interject_input.show()
             self.say_button.show()
         else:
@@ -2212,7 +2249,7 @@ class GameWindow(QMainWindow):
 
 
     def pass_conversation(self):
-        if self.phase != "conversation" or self.game_over or self.ai_busy:
+        if self.phase != "conversation" or self.game_over or self.ai_busy or self.player_reply_required():
             return
         self.cancel_dictation()
         self.trace_action("conversation_passed")
@@ -2225,6 +2262,9 @@ class GameWindow(QMainWindow):
 
     def interject_conversation(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
+            return
+        if self.player_reply_required():
+            self.interject_input.setFocus()
             return
         self.cancel_dictation()
         self.retry_button.hide()
@@ -2251,6 +2291,7 @@ class GameWindow(QMainWindow):
 
     def can_call_vote(self):
         return (self.phase == "conversation" and not self.game_over and not self.ai_busy
+                and not self.player_reply_required()
                 and len(self.current_conversation) >= self.minimum_to_call_vote)
 
     def call_vote(self):
@@ -2258,7 +2299,7 @@ class GameWindow(QMainWindow):
             return
         self.cancel_dictation()
         self.output_area.clear()
-        self.output_area.append("Vote called!\n")
+        self.append_output_text("Vote called!\n")
         self.trace_action("vote_called")
         # self.pass_button.hide()
         self.interject_input.hide()
@@ -2270,7 +2311,7 @@ class GameWindow(QMainWindow):
         self.run_voting_phase()
 
     def run_voting_phase(self):
-        if self.phase != "conversation" or self.game_over or self.ai_busy:
+        if self.phase != "conversation" or self.game_over or self.ai_busy or self.player_reply_required():
             return
         self.phase = "voting"
         self.cancel_dictation()
@@ -2285,7 +2326,7 @@ class GameWindow(QMainWindow):
         }
         self.votes = {}
         self.awaiting_player_vote = True
-        self.output_area.append("Voting phase has begun. Choose your vote below.")
+        self.append_output_text("Voting phase has begun. Choose your vote below.")
         self.display_vote_buttons()
         self.trace_state("voting_started")
         contexts = tuple(self.build_character_context(char) for char in self.expected_voters
@@ -2354,11 +2395,11 @@ class GameWindow(QMainWindow):
             self.player_name, selected_character, self.characters, self.player_name
         )
         if selected_character != "NONE":
-            self.output_area.append(f"You voted for {selected_character}.\n")
+            self.append_output_text(f"You voted for {selected_character}.\n")
             self.transcript.append(f"Voting Phase {self.round_number} results: \n")
             self.transcript.append(f"You voted for {selected_character}.\n")
         else:
-            self.output_area.append(f"You voted to skip.\n")
+            self.append_output_text(f"You voted to skip.\n")
             self.transcript.append(f"Voting Phase {self.round_number} results: \n")
             self.transcript.append(f"You voted to skip.\n")           
         self.votes[self.player_name] = selected_character
@@ -2398,7 +2439,7 @@ class GameWindow(QMainWindow):
                 message = f"{character} voted to skip.\n"
             else:
                 message = f"{character} voted for {self.votes[character]}.\n"
-            self.output_area.append(message)
+            self.append_output_text(message)
             self.transcript.append(message)
             self.public_events.append(MemoryRecord(self.round_number, "public_event", message, "Voting"))
 
@@ -2524,7 +2565,7 @@ class GameWindow(QMainWindow):
 
         # Append the final score and display the "Play Again" button
         message += f"Final Score: {final_score}/5\n"
-        self.output_area.append(message)
+        self.append_output_text(message)
         # Create a layout for the game over screen
         #game_over_layout = QVBoxLayout()
 
@@ -2596,6 +2637,7 @@ class GameWindow(QMainWindow):
         """Hard restart: spawn a new main window with the same window state, then close this one."""
         if self.phase == "restarting":
             return
+        self.save_player_name_preference()
         self.trace_action("restart_requested")
         self.trace.end("restart")
         self.game_over = True
@@ -2653,7 +2695,7 @@ class GameWindow(QMainWindow):
         QTimer.singleShot(0, _spawn)
         
     def end_game(self):
-        self.output_area.append("Game Over. Thanks for playing!\n")
+        self.append_output_text("Game Over. Thanks for playing!\n")
 
     def run_conversation_phase(self):
         if self.game_over:
@@ -2680,10 +2722,10 @@ class GameWindow(QMainWindow):
         )
         for event in self.public_events:
             if event.round_number == self.round_number:
-                self.output_area.append(escape(event.text))
+                self.append_output_text(event.text)
         if self.check_victory():
             return
-        self.output_area.append(f"Conversation Phase {self.round_number} begins!\n")
+        self.append_output_text(f"Conversation Phase {self.round_number} begins!\n")
         self.current_conversation = []
         self.most_recent_messageS = []
         self.alive_characters = list(self.public_state().alive)
@@ -2720,6 +2762,7 @@ class GameWindow(QMainWindow):
     
     def run_single_response(self, mentioned):
         if (self.phase != "conversation" or self.game_over or self.ai_busy
+                or self.player_reply_required()
                 or mentioned not in self.characters or not self.characters[mentioned]["alive"]):
             return
         override = self.item_rules.speech_override(self.body_id(mentioned))
@@ -2741,7 +2784,7 @@ class GameWindow(QMainWindow):
         self.run_conversation_loop()
     
     def run_multiple_responses(self):
-        if self.phase != "conversation" or self.game_over or self.ai_busy:
+        if self.phase != "conversation" or self.game_over or self.ai_busy or self.player_reply_required():
             return
         contexts = tuple(self.build_character_context(char) for char, data in self.characters.items()
                          if data["alive"] and char != self.player_name)
@@ -3522,7 +3565,7 @@ class HowToPlayWindow(QWidget):
             "Keep your items for as long as you like, including the final discussion. "
             "The Knife's second attack enters its target's room; a distant C4 explosion does not.\n\n"
             "During discussion\n"
-            "Listen, pass, or interject with your own alibi. Being asked a question is an invitation: you may still pass. "
+            "Listen, pass, or interject with your own alibi. When someone directly addresses you, reply before passing or calling a vote. "
             "In the message box, Record voice starts the microphone; Stop recording transcribes into your draft. "
             "You can keep typing, edit the result, or Cancel. Nothing is spoken until you choose Say. "
             "Use Inventory while the conversation is waiting for you. Items do not send or erase the words you are composing. "

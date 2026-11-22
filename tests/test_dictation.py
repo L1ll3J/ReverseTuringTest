@@ -268,6 +268,65 @@ class DictationTests(unittest.TestCase):
             with self.subTest(limits=limits), self.assertRaises(ValueError):
                 self.recorder(**limits)
 
+    def test_diagnostics_report_capture_counts_and_format_without_content(self):
+        recorder = self.recorder()
+        diagnostics = []
+        recorder.diagnostic.connect(diagnostics.append)
+        generation = recorder.start()
+        pcm = b"private audio sentinel!"
+        self.audio[-1].source.feed(pcm)
+        recorder.stop()
+        self.assertEqual([event["event"] for event in diagnostics], ["capture_started", "capture_stopped"])
+        stopped = diagnostics[-1]
+        self.assertEqual(stopped["generation"], generation)
+        self.assertEqual(stopped["reason"], "user_stop")
+        self.assertEqual(stopped["captured_bytes"], len(pcm))
+        self.assertEqual((stopped["sample_rate"], stopped["channels"], stopped["sample_bits"]), (16000, 1, 16))
+        self.assertGreaterEqual(stopped["duration_ms"], 0)
+        self.assertNotIn("private", repr(diagnostics))
+        self.assertTrue(all(value is None or isinstance(value, (str, int))
+                            for event in diagnostics for value in event.values()))
+
+    def test_empty_capture_and_backend_failures_have_content_free_reasons(self):
+        recorder = self.recorder()
+        diagnostics = []
+        recorder.diagnostic.connect(diagnostics.append)
+        recorder.start()
+        recorder.stop()
+        self.assertEqual(diagnostics[-1]["reason"], "empty_capture")
+        self.assertEqual(diagnostics[-1]["captured_bytes"], 0)
+        recorder.start()
+        self.audio[-1].audio_error = QAudio.IOError
+        self.audio[-1].stateChanged.emit(QAudio.StoppedState)
+        self.assertEqual(diagnostics[-1]["reason"], "backend_state")
+        self.assertEqual(diagnostics[-1]["state"], int(QAudio.StoppedState))
+        self.assertEqual(diagnostics[-1]["error"], int(QAudio.IOError))
+        self.assertEqual(len(self.ready), 0)
+
+    def test_diagnostics_distinguish_limits_cancellation_and_device_failures(self):
+        for reason, kwargs in (("size_limit", {"max_audio_bytes": 52}),
+                               ("duration_limit", {"max_duration_seconds": 0.015}),
+                               ("cancelled", {}), ("closed", {}), ("missing_device", {})):
+            with self.subTest(reason=reason):
+                recorder = self.recorder(**kwargs)
+                diagnostics = []
+                recorder.diagnostic.connect(diagnostics.append)
+                self.device.isNull.return_value = reason == "missing_device"
+                recorder.start()
+                if reason == "size_limit":
+                    self.audio[-1].source.feed(b"\x00" * 20)
+                elif reason == "duration_limit":
+                    self.audio[-1].source.feed(b"\x00\x00")
+                    QTest.qWait(50)
+                elif reason == "cancelled":
+                    recorder.cancel()
+                elif reason == "closed":
+                    recorder.close()
+                self.assertEqual(diagnostics[-1]["reason"], reason)
+                count = len(diagnostics)
+                recorder.cancel()
+                self.assertEqual(len(diagnostics), count)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,6 +52,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.patches.enter_context(patch.dict(os.environ, {
             "ALIBAI_DEV_MODE": "0", "ALIBAI_DEV_VOTE_MINIMUM": "",
             "ALIBAI_PROFILE_PATH": str(Path(self.profile_directory.name) / "profile.json"),
+            "ALIBAI_SETTINGS_PATH": str(Path(self.profile_directory.name) / "preferences.ini"),
         }))
         self.patches.enter_context(patch.object(
             socket.socket, "connect", side_effect=AssertionError("Network access in offline test")
@@ -297,7 +298,7 @@ class RuntimeRegressionTests(unittest.TestCase):
                         worker.wait(3000)
                     self.app.processEvents()
 
-    def test_addressed_statements_and_questions_invite_without_forcing_player_speech(self):
+    def test_structured_npc_address_requires_player_reply_without_fabricating_speech(self):
         self.window.phase = "conversation"
         for speech in ("I spent the night alone in the attic.", "Where were you?"):
             with self.subTest(speech=speech), patch.object(
@@ -306,7 +307,7 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.window.append_speech("Dave", speech, "Alex")
                 before = tuple(self.window.public_dialogue)
                 self.window.run_conversation_loop()
-                self.assertTrue(self.window.pass_button.isEnabled())
+                self.assertFalse(self.window.pass_button.isEnabled())
                 self.assertTrue(self.window.interject_button.isEnabled())
                 self.assertTrue(self.window.interject_input.isVisible())
                 self.assertTrue(self.window.say_button.isVisible())
@@ -314,10 +315,105 @@ class RuntimeRegressionTests(unittest.TestCase):
                 group.assert_not_called()
                 single.assert_not_called()
                 self.window.pass_button.click()
-                group.assert_called_once()
+                group.assert_not_called()
                 single.assert_not_called()
                 self.assertEqual(tuple(self.window.public_dialogue), before)
                 self.assertFalse(any(line.speaker == "Alex" for line in self.window.public_dialogue))
+
+    def test_pending_reply_blocks_all_conversation_advance_paths_until_actual_reply(self):
+        self.prepare_vote_call()
+        self.window.append_speech("Hank", "Where were you last night?", "Alex")
+        self.window.run_conversation_loop()
+        before = tuple(self.window.public_dialogue)
+        self.assertTrue(self.window.player_reply_required())
+        self.assertFalse(self.window.can_call_vote())
+        self.assertFalse(self.window.vote_button.isEnabled())
+        self.window.pass_button.setEnabled(True)
+        retry = Mock()
+        self.window.retry_action = retry
+        with patch.object(self.window, "start_ai_request") as request:
+            self.window.pass_button.click()
+            self.window.call_vote()
+            self.window.run_voting_phase()
+            self.window.run_multiple_responses()
+            self.window.run_single_response("Dave")
+            self.window.retry_ai_request()
+        request.assert_not_called()
+        retry.assert_not_called()
+        self.assertEqual(self.window.phase, "conversation")
+        self.assertEqual(tuple(self.window.public_dialogue), before)
+        self.window.interject_input.setText("   ")
+        self.window.send_interjection()
+        self.assertTrue(self.window.player_reply_required())
+        self.window.interject_input.setText("I was upstairs.")
+        self.window.interject_conversation()
+        self.assertEqual(self.window.interject_input.text(), "I was upstairs.")
+        with patch.object(self.window, "run_multiple_responses") as group:
+            self.window.send_interjection()
+        group.assert_called_once()
+        self.assertFalse(self.window.player_reply_required())
+        self.assertTrue(self.window.can_call_vote())
+        self.assertEqual(self.window.public_dialogue[-1].text, "I was upstairs.")
+
+    def test_reply_requirement_uses_current_round_metadata_not_name_mentions(self):
+        self.window.phase = "conversation"
+        self.window.append_speech("Dave", "Alex, where were you?", None)
+        self.assertFalse(self.window.player_reply_required())
+        self.window.append_speech("Dave", "What happened?", "Alex")
+        self.assertTrue(self.window.player_reply_required())
+        self.window.round_number += 1
+        self.window.run_conversation_loop()
+        self.assertFalse(self.window.player_reply_required())
+        self.assertTrue(self.window.pass_button.isEnabled())
+        self.assertFalse(self.window.interject_input.isVisible())
+
+    def test_pending_reply_does_not_start_a_retry_or_new_ai_job(self):
+        self.window.phase = "conversation"
+        entered = Mock(side_effect=game.AIRequestError("Temporary failure"))
+        self.window.start_ai_request(entered, Mock(), "Waiting")
+        self.wait_for(lambda: not self.window.active_workers)
+        self.assertIsNotNone(self.window.retry_action)
+        self.window.append_speech("Dave", "And your account?", "Alex")
+        self.window.run_conversation_loop()
+        self.assertIsNone(self.window.retry_action)
+        self.assertFalse(self.window.retry_button.isVisible())
+        self.assertFalse(self.window.pass_button.isEnabled())
+        new_operation = Mock()
+        self.window.start_ai_request(new_operation, Mock(), "Waiting")
+        self.window.retry_ai_request()
+        new_operation.assert_not_called()
+        self.assertEqual(entered.call_count, 1)
+        self.assertEqual(self.window.active_workers, [])
+
+    def test_public_output_preserves_literal_punctuation_markup_and_newlines(self):
+        self.window.phase = "conversation"
+        literal = "Jerry's <b>note</b> & a literal &#x27;\nA second line."
+        self.window.add_public_event(literal)
+        self.assertEqual(self.window.output_area.toPlainText(), literal)
+        self.assertEqual(self.window.public_events[-1].text, literal)
+        self.assertEqual(self.window.transcript[-1], literal)
+
+    def test_name_preference_uses_literal_field_not_current_body(self):
+        literal = "  JoSH O'Connor \u03a9  "
+        self.window.player_name_input.setText(literal)
+        self.window.player_name_input.editingFinished.emit()
+        self.window.player_name = "Dave"
+        self.window.close()
+        replacement = game.GameWindow()
+        try:
+            self.assertEqual(replacement.player_name_input.text(), literal)
+            self.assertEqual(replacement.phase, "start")
+        finally:
+            replacement.close()
+            replacement.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_name_save_failure_does_not_block_start_or_reset_preferences(self):
+        self.window.player_name_input.setText("Josh")
+        with patch.object(self.window.preferences, "save_player_name", return_value=False):
+            self.window.start_game()
+        self.assertEqual(self.window.phase, "weapon_select")
+        self.assertIn("could not be remembered", self.window.player_name_input.toolTip())
 
     def test_npc_addressee_never_automatically_hands_the_floor_to_that_npc(self):
         self.window.phase = "conversation"
@@ -346,7 +442,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(tuple(self.window.public_dialogue),
                          (game.DialogueLine(0, "Alex", "Those are my words."),))
 
-    def test_opening_detective_invitation_keeps_player_choice_and_uses_group_for_npcs(self):
+    def test_opening_detective_invitation_requires_reply_and_uses_group_for_npcs(self):
         self.window.phase = "conversation"
         with patch.object(self.window, "run_multiple_responses") as group, patch.object(
             self.window, "run_single_response"
@@ -355,7 +451,7 @@ class RuntimeRegressionTests(unittest.TestCase):
             self.window.run_conversation_loop()
             group.assert_not_called()
             single.assert_not_called()
-            self.assertTrue(self.window.pass_button.isEnabled())
+            self.assertFalse(self.window.pass_button.isEnabled())
             self.assertTrue(self.window.interject_input.isVisible())
             self.window.append_speech("Detective", "Where were you last night?", "Jerry")
             self.window.run_conversation_loop()
@@ -627,6 +723,7 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.assertEqual(self.window.most_recent_messageS, ["Alex: Original"])
 
     def test_restart_rejects_queued_old_results_and_creates_one_new_window(self):
+        self.window.player_name_input.setText("Literal input before possession")
         self.window.phase = "conversation"
         self.window.current_conversation = ["Alex: Original"]
         self.window.most_recent_messageS = ["Alex: Original"]
@@ -679,6 +776,7 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.assertIs(self.app._main_window, created[0])
                 self.assertTrue(created[0].isVisible())
                 self.assertEqual(created[0].phase, "start")
+                self.assertEqual(created[0].player_name_input.text(), "Literal input before possession")
                 self.assertEqual(len(delivered), 3)
                 self.assertEqual(self.window.phase, "restarting")
                 self.assertTrue(self.window.game_over)
@@ -901,7 +999,9 @@ class RuntimeRegressionTests(unittest.TestCase):
             self.window.start_ai_request(lambda: operation(old_entered, release_old, "old"), old_success, "Old request")
             old_worker = self.window.active_workers[0]
             self.wait_for(old_entered.is_set)
-            with patch.object(self.window, "run_conversation_loop"):
+            with patch.object(self.window, "run_conversation_loop"), patch.object(
+                game.random, "choice", return_value="Jerry"
+            ):
                 self.window.run_conversation_phase()
             self.window.start_ai_request(lambda: operation(new_entered, release_new, "new"), new_success, "New request")
             self.wait_for(new_entered.is_set)

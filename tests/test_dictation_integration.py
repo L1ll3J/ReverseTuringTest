@@ -1,6 +1,7 @@
 """Offline dictation controls and retained QThreads with fake microphone input."""
 
 import contextlib
+import json
 import os
 from pathlib import Path
 import socket
@@ -31,6 +32,7 @@ class FakeRecorder(QObject):
     ready = pyqtSignal(int, bytes)
     failed = pyqtSignal(int, str)
     cancelled = pyqtSignal(int)
+    diagnostic = pyqtSignal(dict)
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -80,6 +82,7 @@ class DictationIntegrationTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.patches.enter_context(patch.dict(os.environ, {
             "ALIBAI_DEV_MODE": "0", "ALIBAI_PROFILE_PATH": str(Path(self.directory.name) / "profile.json"),
+            "ALIBAI_SETTINGS_PATH": str(Path(self.directory.name) / "preferences.ini"),
         }))
         self.patches.enter_context(patch.object(socket.socket, "connect", side_effect=AssertionError("Offline test")))
         self.patches.enter_context(patch("dictation.QAudioInput", side_effect=AssertionError("Real microphone access")))
@@ -119,18 +122,41 @@ class DictationIntegrationTests(unittest.TestCase):
         window.run_multiple_responses = Mock()
         return window
 
+    def test_recorder_metadata_is_local_opt_in_and_excludes_draft_content(self):
+        metadata = {"event": "capture_failed", "reason": "empty_capture", "generation": 1,
+                    "duration_ms": 20, "captured_bytes": 0, "sample_rate": 16000,
+                    "channels": 1, "sample_bits": 16, "state": 0, "error": 0}
+        self.window.interject_input.setText("Unsubmitted transcript sentinel")
+        with patch.object(self.window.trace, "record") as record:
+            self.window.dictation_recorder.diagnostic.emit(metadata)
+        record.assert_not_called()
+        trace = TraceRun(enabled=True, root=Path(self.directory.name) / "diagnostics")
+        trace.start({})
+        self.window.trace = trace
+        self.window.dictation_recorder.diagnostic.emit(metadata)
+        stored = trace.run_dir.joinpath("events.jsonl").read_text(encoding="utf-8")
+        diagnostic = next(json.loads(line) for line in stored.splitlines()
+                          if json.loads(line)["kind"] == "audio_capture")
+        self.assertEqual(diagnostic["payload"]["reason"], "empty_capture")
+        self.assertEqual(diagnostic["payload"]["captured_bytes"], 0)
+        self.assertEqual(diagnostic["payload"]["source"], "local_recorder")
+        self.assertNotIn("Unsubmitted transcript sentinel", stored)
+        self.assertNotIn("private audio sentinel", stored)
+
     def wait_for(self, condition):
         deadline = monotonic() + 3
         while not condition() and monotonic() < deadline:
             QTest.qWait(5)
         self.assertTrue(condition(), "Queued dictation operation did not finish")
 
-    def open_input(self, window=None):
+    def open_input(self, window=None, *, addressed=True):
         window = window or self.window
         window.phase = "conversation"
         window.round_number = 1
-        window.append_speech("Dave", "Where were you?", "Alex")
+        window.append_speech("Dave", "Where were you?", "Alex" if addressed else None)
         window.run_conversation_loop()
+        if not addressed:
+            window.interject_conversation()
         self.app.processEvents()
         self.assertTrue(window.dictation_controls.isVisible())
 
@@ -173,7 +199,7 @@ class DictationIntegrationTests(unittest.TestCase):
         self.window.say_button.click()
         self.assertEqual(self.window.public_dialogue[-1].text, "Edited before sending.")
 
-    def test_pending_transcription_keeps_current_edits_and_gameplay_available(self):
+    def test_pending_transcription_keeps_current_edits_without_releasing_required_reply(self):
         self.open_input()
         self.window.interject_input.setText("Original draft.")
         release = self.pending_transcription()
@@ -181,7 +207,7 @@ class DictationIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.dictation_button.isEnabled())
         self.assertTrue(self.window.interject_input.isEnabled())
         self.assertTrue(self.window.say_button.isEnabled())
-        self.assertTrue(self.window.pass_button.isEnabled())
+        self.assertFalse(self.window.pass_button.isEnabled())
         self.window.interject_input.setText("Rewritten while waiting. ")
         self.window.interject_input.selectAll()
         release.set()
@@ -216,11 +242,29 @@ class DictationIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.dictation_button.isEnabled())
         self.assertNotIn(worker, self.app._ai_workers)
 
+    def test_blocked_pass_and_vote_preserve_required_reply_recording(self):
+        self.open_input()
+        self.window.dictation_button.click()
+        context = self.window.dictation_context
+        self.window.current_conversation = ["Discussion"] * 20
+        self.window.pass_conversation()
+        self.window.call_vote()
+        self.window.run_voting_phase()
+        self.assertEqual(self.window.dictation_context, context)
+        self.assertTrue(self.window.dictation_recorder.is_recording)
+        self.assertEqual(self.window.phase, "conversation")
+        self.window.interject_input.setText("My account.")
+        self.window.send_interjection()
+        self.assertFalse(self.window.player_reply_required())
+        self.assertIsNone(self.window.dictation_context)
+        self.assertFalse(self.window.dictation_recorder.is_recording)
+        self.transcribe.assert_not_called()
+
     def test_state_transitions_invalidate_pending_results(self):
         for action in ("pass", "send", "vote", "voting", "night", "conversation", "game_over", "hide", "disable"):
             with self.subTest(action=action):
                 window = self.make_window()
-                self.open_input(window)
+                self.open_input(window, addressed=action not in ("pass", "vote", "voting"))
                 release = self.pending_transcription(window)
                 window.interject_input.setText("Typed words only.")
                 with patch.object(window, "start_ai_request"):
@@ -252,7 +296,7 @@ class DictationIntegrationTests(unittest.TestCase):
                     self.assertEqual(window.public_dialogue[-1].text, "Typed words only.")
 
     def test_input_session_change_ignores_old_failure_after_reopening(self):
-        self.open_input()
+        self.open_input(addressed=False)
         release = self.pending_transcription(error=game.AIRequestError("Old failure"))
         self.window.pass_conversation()
         self.window.interject_conversation()
