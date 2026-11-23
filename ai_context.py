@@ -52,6 +52,18 @@ class PublicState:
 
 
 @dataclass(frozen=True)
+class SelfIdentity:
+    name: str
+    body: str
+    reference: str
+
+    def __post_init__(self):
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (self.name, self.body, self.reference)):
+            raise ValueError("Self identity requires original name, body name and current reference")
+
+
+@dataclass(frozen=True)
 class CharacterContext:
     character: str
     persona: tuple[str, ...]
@@ -61,10 +73,13 @@ class CharacterContext:
     public_events: tuple[MemoryRecord, ...]
     dialogue: tuple[DialogueLine, ...]
     current_feelings: tuple[CurrentFeeling, ...] = ()
+    self_identity: SelfIdentity | None = None
 
     def __post_init__(self):
         for name in ("persona", "experiences", "dispositions", "public_events", "dialogue", "current_feelings"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        if self.self_identity is not None and not isinstance(self.self_identity, SelfIdentity):
+            raise ValueError("Self identity must be a typed snapshot")
         if any(not isinstance(feeling, CurrentFeeling) for feeling in self.current_feelings):
             raise ValueError("Current feelings must be typed snapshots")
 
@@ -122,6 +137,10 @@ def render_character_context(context: CharacterContext) -> str:
         "character_context",
         {"character": context.character, "round": str(context.state.round_number)},
     )
+    if context.self_identity is not None:
+        identity = context.self_identity
+        ET.SubElement(root, "self", {"name": identity.name, "body": identity.body,
+                                    "reference": identity.reference})
     persona = ET.SubElement(root, "persona")
     for trait in context.persona:
         ET.SubElement(persona, "trait").text = trait

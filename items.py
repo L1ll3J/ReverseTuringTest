@@ -151,6 +151,10 @@ ITEM_CATALOGUE = MappingProxyType({
         "revolver", "Revolver", "Shoot one living body immediately in public.", "living_body", False,
         flavour="A rather loud way to end a discussion.", rarity="purple",
     ),
+    "soul": ItemDefinition(
+        "soul", "Soul", "Permanently exchange bodies with a living suspect. Memories and inventory follow the mind.",
+        "living_npc", True, rarity="gold",
+    ),
 })
 
 

@@ -11,7 +11,7 @@ class InventoryTests(unittest.TestCase):
     def test_default_pool_cannot_be_disabled_and_unlocks_require_permission(self):
         defaults = ("banana", "muffle", "spare_paper", "throw_voice", "dark_whisper", "love_potion", "forged_note",
                     "divine_revelation", "mail_in_ballot", "watch_this_drive", "room_reservation", "lucky_match", "deep_pockets",
-                    "pocket_gavel", "listening_glass", "stay_of_execution", "lucky_coin")
+                    "pocket_gavel", "listening_glass", "stay_of_execution", "lucky_coin", "soul")
         with_guardian = (*defaults[:3], "guardian_angel", *defaults[3:])
         self.assertEqual(eligible_item_pool(), defaults)
         self.assertEqual(eligible_item_pool((), ("guardian_angel",)), defaults)
@@ -375,7 +375,7 @@ class RarityDraftTests(unittest.TestCase):
             "blue": {"throw_voice", "dark_whisper", "love_potion", "divine_revelation", "mail_in_ballot",
                      "watch_this_drive", "listening_glass", "stay_of_execution", "lucky_coin"},
             "purple": {"booby_trap", "spin_the_dagger", "presidential_decree", "occult_ritual", "revolver"},
-            "gold": {"guardian_angel", "mass_discombobulator"},
+            "gold": {"guardian_angel", "mass_discombobulator", "soul"},
         }
         actual = {tier: {item_id for item_id, item in ITEM_CATALOGUE.items() if item.rarity == tier}
                   for tier in RARITY_WEIGHTS}

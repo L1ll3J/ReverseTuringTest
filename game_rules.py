@@ -13,6 +13,14 @@ from ai_context import MemoryRecord, SpeechProposal
 from items import ITEM_CATALOGUE, DraftState, Inventory, InventoryError
 
 
+SOUL_PRIVATE = (
+    "A white flash swallows your sight. For an instant, you cannot feel your body at all. "
+    "Then your weight returns, but it sits wrong: unfamiliar hands, a different shape beneath your clothes, "
+    "breath moving through a chest that is not yours. This is {new_body}'s body. "
+    "You are still {original_name}. Your memories are your own."
+)
+
+
 BANANA_PUBLIC = "{giver} gave {recipient} a banana."
 BANANA_DISPOSITION = (
     "{giver} gave you a delicious banana on day {day}. "
@@ -524,6 +532,9 @@ class PlayerItemRules:
             self._muffles[target.body_id] = MuffleEffect(target.body_id, context.day, context.day + 1)
             effect = self._event("muffle_applied", context.day, **values, private_text=MUFFLE_PRIVATE,
                                  recipient_mind_id=target.mind_identity)
+        elif entry.item_id == "soul":
+            effect = self._event("soul_exchange_requested", context.day, **values,
+                                 recipient_mind_id=target.mind_identity, due_day=context.day + 1)
         elif entry.item_id == "mass_discombobulator":
             effect = self._event("npc_recollections_cleared", context.day, **values)
         elif entry.item_id == "love_potion":
