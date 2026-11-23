@@ -156,7 +156,7 @@ class AIRuntime:
         tone_type = Annotated[Literal[-2, -1, 0, 1, 2], BeforeValidator(_strict_tone)]
         output_schema = _schema("MuffledTone", tone=(tone_type, ...))
         root = ElementTree.fromstring(render_character_context(context))
-        bank = ElementTree.SubElement(root, "muffled_responses", {"recipient": context.character})
+        bank = ElementTree.SubElement(root, "muffled_responses", {"recipient": context.reference})
         for tone, label, sound in zip(TONES, TONE_LABELS, response_bank(style)):
             ElementTree.SubElement(bank, "response", {"tone": str(tone), "feeling": label}).text = sound
         result = self._request(
@@ -203,9 +203,9 @@ class AIRuntime:
 
     @staticmethod
     def _eligible_targets(context):
-        if context.character not in context.state.alive:
+        if context.reference not in context.state.alive:
             raise AIRequestError("This character is no longer available to respond.")
-        return tuple(dict.fromkeys(name for name in context.state.alive if name != context.character))
+        return tuple(dict.fromkeys(name for name in context.state.alive if name != context.reference))
 
     def _load_prompt(self, relative_path):
         try:

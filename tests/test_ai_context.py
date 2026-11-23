@@ -67,8 +67,8 @@ class ContextTests(unittest.TestCase):
         root = ET.fromstring(render_character_context(supplied))
         self.assertEqual(root.find("self").attrib,
                          {"name": own.name, "body": "Jerry", "reference": "Jerry #2"})
-        self.assertEqual(root.get("character"), "Jerry")
-        self.assertEqual(root.find("private_experiences").get("recipient"), "Jerry")
+        self.assertEqual(root.get("character"), "Jerry #2")
+        self.assertEqual(root.find("private_experiences").get("recipient"), "Jerry #2")
         self.assertEqual(root.find("public_dialogue/utterance").get("speaker"), "Alex")
         self.assertIsNone(ET.fromstring(render_character_context(original)).find("self"))
         self.assertNotIn(own.name, render_selector_context(self.state, (), (), {}))
