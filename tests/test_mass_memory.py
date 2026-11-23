@@ -184,6 +184,27 @@ class MassMemoryTests(unittest.TestCase):
         self.assertEqual([record.text for record in context.experiences], ["AFTER_EXCHANGE_SENTINEL"])
         self.assertIn("BEFORE_EXCHANGE_SENTINEL", window.characters["Alex"]["experiences"][0].text)
 
+    def test_memory_wipe_preserves_original_mind_names_after_exchange_and_copy(self):
+        self.conversation()
+        window = self.window
+        original = window.identity_state
+        player_mind = window.player_owner_id
+        jerry_mind = window.mind_id("Jerry")
+        self.assertEqual(original.mind_name(player_mind), "Alex")
+        self.assertEqual(original.mind_name(jerry_mind), "Jerry")
+        window.exchange_player_mind(window.body_id("Jerry"))
+        window.identity_state = window.identity_state.clone_appearance(window.body_id("Alex"), window.body_id("Dave"))
+        registry = window.identity_state
+        window.remember("Alex", "experience", "A run recollection that can be forgotten.")
+        self.activate("mass_discombobulator")
+        self.assertIs(window.identity_state, registry)
+        self.assertEqual(window.identity_state.mind_names, original.mind_names)
+        self.assertEqual(window.identity_state.mind_name(player_mind), "Alex")
+        self.assertEqual(window.identity_state.mind_name(jerry_mind), "Jerry")
+        self.assertEqual(window.identity_state.body_for_mind(jerry_mind), window.body_id("Alex"))
+        self.assertEqual(window.identity_state.appearance_name(window.body_id("Alex")), "Dave")
+        self.assertFalse(window.build_character_context("Alex").experiences)
+
 
 if __name__ == "__main__":
     unittest.main()

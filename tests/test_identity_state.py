@@ -1,9 +1,10 @@
 """Stable identity and independently selectable protection ownership."""
 import unittest
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from game_rules import BodyState, ItemUseContext, PlayerItemRules
 from identity_state import IdentityState
 from items import Inventory
+from presentation_aliases import PresentationAliases
 
 
 class IdentityTests(unittest.TestCase):
@@ -53,3 +54,37 @@ class IdentityTests(unittest.TestCase):
         self.assertTrue(rules.protection_armed)
         self.assertTrue(rules.attempt_death("old-death", replace(old, is_npc=True), 1, None).prevented)
         self.assertFalse(rules.protection_armed)
+
+    def test_original_names_follow_minds_through_copy_exchange_and_cycles(self):
+        names = {"original": "Alex", "dave": "Dave", "hank": "Hank"}
+        initial = IdentityState.from_bodies("player", "original", ("dave", "hank"), appearance_names=names)
+        names["original"] = "Changed outside the registry"
+        self.assertEqual(dict(initial.mind_names), {"player": "Alex", "dave": "Dave", "hank": "Hank"})
+        changed = initial.clone_appearance("original", "dave").exchange("hank").exchange("original")
+        self.assertEqual(changed.mind_names, initial.mind_names)
+        self.assertEqual(changed.mind_name("player"), "Alex")
+        self.assertEqual(changed.appearance_name("original"), "Dave")
+        self.assertEqual(changed.mind_name("dave"), "Dave")
+        self.assertEqual(changed.mind_name("hank"), "Hank")
+        self.assertIsNone(changed.mind_name("unknown"))
+        with self.assertRaises(FrozenInstanceError):
+            changed.mind_names = ()
+
+    def test_unprovided_original_names_never_fall_back_to_opaque_identifiers(self):
+        initial = IdentityState.from_bodies("player", "opaque-body", ("opaque-npc",))
+        self.assertIsNone(initial.mind_name("player"))
+        self.assertIsNone(initial.mind_name("opaque-npc"))
+        self.assertEqual(initial.mind_names, ())
+        for invalid in ((("missing-mind", "Name"),), (("player", "Alex"), ("player", "Another")),
+                        (("player", " "),)):
+            with self.subTest(names=invalid), self.assertRaises(ValueError):
+                replace(initial, mind_names=invalid)
+
+    def test_private_original_names_are_not_used_as_current_appearance_labels(self):
+        initial = IdentityState.from_bodies("player", "original", ("dave",),
+                                           appearance_names={"original": "Alex", "dave": "Dave"})
+        copied = initial.clone_appearance("original", "dave")
+        snapshot = PresentationAliases().for_presence("discussion", copied, ("original", "dave"))
+        self.assertEqual(copied.mind_name("player"), "Alex")
+        self.assertTrue(all(label.startswith("Dave #") for _, label in snapshot.entries))
+        self.assertTrue(all("Alex" not in label for _, label in snapshot.entries))
