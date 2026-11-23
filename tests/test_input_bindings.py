@@ -39,6 +39,8 @@ class BindingDataTests(unittest.TestCase):
                      (Qt.Key_Space, Qt.NoModifier), (Qt.Key_Return, Qt.NoModifier),
                      (Qt.Key_Escape, Qt.NoModifier), (Qt.Key_Tab, Qt.NoModifier),
                      (Qt.Key_Backspace, Qt.ControlModifier), (Qt.Key_C, Qt.ControlModifier),
+                     (Qt.Key_Insert, Qt.NoModifier), (Qt.Key_Insert, Qt.ControlModifier),
+                     (Qt.Key_Insert, Qt.ShiftModifier),
                      (Qt.Key_Q, Qt.ControlModifier), (Qt.Key_F4, Qt.AltModifier),
                      (Qt.Key_Q, Qt.ControlModifier | Qt.AltModifier))
         for key, modifiers in forbidden:
@@ -121,6 +123,28 @@ class BindingDispatchTests(unittest.TestCase):
             QTest.mouseClick(self.input, qt_button)
         self.assertEqual(self.action.call_count, 3)
         self.assertEqual(self.input.text(), "not consumed")
+
+    def test_alternate_copy_paste_remain_available_and_cannot_be_bound(self):
+        self.controller.set_binding(InputBinding.for_key(Qt.Key_PageUp))
+        original = self.controller.binding
+        for modifiers in (Qt.ControlModifier, Qt.ShiftModifier):
+            with self.assertRaises(BindingError):
+                self.controller.set_binding(InputBinding.for_key(Qt.Key_Insert, modifiers))
+            self.assertEqual(self.controller.binding, original)
+        clipboard = self.app.clipboard()
+        previous = clipboard.text()
+        try:
+            clipboard.setText("before copy")
+            self.input.setText("draft")
+            self.input.selectAll()
+            QTest.keyClick(self.input, Qt.Key_Insert, Qt.ControlModifier)
+            self.assertEqual(clipboard.text(), "draft")
+            clipboard.setText("pasted alibi")
+            QTest.keyClick(self.input, Qt.Key_Insert, Qt.ShiftModifier)
+            self.assertEqual(self.input.text(), "pasted alibi")
+            self.action.assert_not_called()
+        finally:
+            clipboard.setText(previous)
 
     def test_assigned_badge_stays_visible_and_clear_removes_it(self):
         badge = BindingBadge(self.controller, parent=self.owner)

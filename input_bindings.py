@@ -16,9 +16,11 @@ class BindingError(ValueError):
 _MODIFIERS = int(Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier | Qt.MetaModifier)
 _QUALIFIERS = int(Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)
 _MODIFIER_KEYS = {int(key) for key in (Qt.Key_Shift, Qt.Key_Control, Qt.Key_Meta, Qt.Key_Alt, Qt.Key_AltGr)}
-_COMMAND_KEYS = {int(key) for key in (Qt.Key_PageUp, Qt.Key_PageDown, Qt.Key_Insert,
+_COMMAND_KEYS = {int(key) for key in (Qt.Key_PageUp, Qt.Key_PageDown,
                                     Qt.Key_Pause, Qt.Key_Print, Qt.Key_ScrollLock)}
 _MOUSE_BUTTONS = {"mouse4": int(Qt.ExtraButton1), "mouse5": int(Qt.ExtraButton2)}
+_EDIT_ACTIONS = (QKeySequence.Copy, QKeySequence.Cut, QKeySequence.Paste,
+                 QKeySequence.Undo, QKeySequence.Redo, QKeySequence.SelectAll)
 
 
 def _key_problem(key, modifiers):
@@ -32,7 +34,7 @@ def _key_problem(key, modifiers):
         return "Enter is reserved for sending or confirming."
     if key in (int(Qt.Key_Tab), int(Qt.Key_Backtab)):
         return "Tab is reserved for moving keyboard focus."
-    if key in (int(Qt.Key_Backspace), int(Qt.Key_Delete)):
+    if key in (int(Qt.Key_Backspace), int(Qt.Key_Delete), int(Qt.Key_Insert)):
         return "Text editing keys stay available for editing."
     if modifiers & int(Qt.ControlModifier | Qt.MetaModifier) and key in {
             int(value) for value in (Qt.Key_A, Qt.Key_C, Qt.Key_V, Qt.Key_X, Qt.Key_Y, Qt.Key_Z)}:
@@ -176,6 +178,11 @@ class DictationBindings(QObject):
     def conflict_reason(self, binding):
         if not isinstance(binding, InputBinding):
             raise TypeError("A dictation binding must be an InputBinding")
+        if binding.kind == "key":
+            sequence = QKeySequence(binding.key | binding.modifiers)
+            if any(sequence == shortcut for action in _EDIT_ACTIONS
+                   for shortcut in QKeySequence.keyBindings(action)):
+                return "This shortcut is reserved for text editing."
         if binding.kind != "unbound" and self.extra_conflict_reason is not None:
             reason = self.extra_conflict_reason(binding)
             if reason is not None and not isinstance(reason, str):
