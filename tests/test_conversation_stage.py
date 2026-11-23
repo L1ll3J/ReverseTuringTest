@@ -67,6 +67,19 @@ class ConversationStageTests(unittest.TestCase):
         self.assertIsNone(character_art_path("Unknown"))
         self.assertTrue(Path(character_art_path("Dave")).is_file())
 
+    def test_revised_cast_art_is_loadable_with_transparent_corners(self):
+        for name in ("Dave", "Debra", "Hank"):
+            with self.subTest(name=name):
+                path = character_art_path(name)
+                self.assertTrue(path.endswith("-candidate-v2.png"))
+                image = QPixmap(path).toImage()
+                self.assertTrue(image.hasAlphaChannel())
+                for x, y in ((0, 0), (image.width()-1, 0),
+                             (0, image.height()-1), (image.width()-1, image.height()-1)):
+                    self.assertEqual(image.pixelColor(x, y).alpha(), 0)
+        self.assertTrue(character_art_path("Jerry").endswith("-candidate-v1.png"))
+        self.assertTrue(character_art_path("Owen").endswith("-candidate-v1.png"))
+
     def test_required_reply_notice_is_explicit_and_clears_without_replacing_cast(self):
         self.stage.set_participants([StageParticipant("old-player-body", "John")])
         self.stage.set_required_reply("Dave")
@@ -77,6 +90,24 @@ class ConversationStageTests(unittest.TestCase):
         self.assertTrue(self.stage.reply_notice.isHidden())
         with self.assertRaises(ValueError):
             self.stage.set_required_reply("")
+
+    def test_other_participants_remain_painted_across_speaker_changes(self):
+        photo = QPixmap(20, 40)
+        photo.fill(QColor("#cccccc"))
+        self.stage.set_participants([StageParticipant(name, name, photo) for name in ("one", "two", "three")])
+        self.stage.set_active_speaker("two")
+        self.app.processEvents()
+        other = self.stage._buttons["one"]
+        area = other.geometry().adjusted(0, other.height()-30, 0, 0)
+        before = self.stage.grab().toImage().copy(area)
+        self.stage.set_active_speaker("three")
+        self.app.processEvents()
+        after = self.stage.grab().toImage().copy(area)
+        def readable_pixels(image):
+            return sum(image.pixelColor(x, y).lightness() > 100
+                       for x in range(image.width()) for y in range(image.height()))
+        self.assertGreater(readable_pixels(before), 0)
+        self.assertEqual(readable_pixels(before), readable_pixels(after))
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,8 +49,12 @@ def character_art_path(name):
     """Return provisional cast artwork for a known original character, if present."""
     if name not in {"Dave", "Hank", "Jerry", "Owen", "Debra"}:
         return None
-    path = Path(__file__).resolve().parent / "icons" / "characters" / f"{name.lower()}-candidate-v1.png"
-    return str(path) if path.is_file() else None
+    directory = Path(__file__).resolve().parent / "icons" / "characters"
+    for version in ("v2", "v1"):
+        path = directory / f"{name.lower()}-candidate-{version}.png"
+        if path.is_file():
+            return str(path)
+    return None
 
 
 def _unknown_body_art():
@@ -93,7 +97,6 @@ class _StageBody(QAbstractButton):
         self.setToolTip(f"Address {participant.name}")
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setAttribute(Qt.WA_TranslucentBackground)
         self.photo = QPixmap(participant.photo) if participant.photo is not None else QPixmap()
         self.uses_fallback_art = self.photo.isNull()
         if self.uses_fallback_art:
