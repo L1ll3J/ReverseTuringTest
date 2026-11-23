@@ -349,10 +349,12 @@ class GameWindow(QMainWindow):
 
     def body_states(self):
         self.ensure_body_ids()
-        states = [BodyState(self.body_ids[name], name, bool(data["alive"]), True)
+        states = [BodyState(self.body_ids[name], name, bool(data["alive"]), True,
+                            mind_id=self.mind_id(name) if hasattr(self, "identity_state") else self.body_ids[name])
                   for name, data in self.characters.items() if name != self.player_name]
         if self.player_name:
-            states.append(BodyState(self.body_ids[self.player_name], self.player_name, self.player_alive, False))
+            states.append(BodyState(self.body_ids[self.player_name], self.player_name, self.player_alive, False,
+                                    mind_id=self.player_owner_id))
         return tuple(states)
 
     def label_for_body(self, body_id):
@@ -598,7 +600,7 @@ class GameWindow(QMainWindow):
         options = {
             "living_body": [(body.body_id, body.label) for body in bodies if body.alive],
             "dead_body": [(body.body_id, body.label) for body in bodies if not body.alive],
-            "room": [(room, room) for room in self.night_rooms],
+            "room": [(room, room) for room in self.night_rooms if room not in self.old_crime_scenes],
         }
         unavailable = {item_id: "Not available in this development build yet."
                        for item_id, definition in ITEM_CATALOGUE.items()
@@ -620,7 +622,7 @@ class GameWindow(QMainWindow):
     def item_use_context(self):
         return ItemUseContext(max(1, self.round_number), self.phase, self.ai_busy,
                               self.player_owner_id, self.body_id(self.player_name), self.body_states(),
-                              available_rooms=self.night_rooms, required_player_reply=self.player_reply_required(),
+                              available_rooms=tuple(room for room in self.night_rooms if room not in self.old_crime_scenes), required_player_reply=self.player_reply_required(),
                               memory_views=self.night_memory_views)
 
     def use_inventory_item(self, instance_id, target_body_id=None, *, message=None, room_id=None, activation_id=None):
@@ -709,6 +711,8 @@ class GameWindow(QMainWindow):
                 self.record_history(f"Listening Glass: {recipient}, night {event.observed_day}\n{event.message}", display=True)
             elif event.event_type == "prepared_note_bound":
                 self.morning_item_notes.append((event.event_id, recipient, event.message))
+            elif event.event_type == "reserved_room_kill":
+                self.queue_progress("reserved_room_kill")
             elif event.event_type == "extra_action_earned":
                 self.queue_progress("marked_kill_completed")
             elif event.event_type == "execution_stayed":
@@ -749,7 +753,8 @@ class GameWindow(QMainWindow):
         decision = self.item_rules.attempt_death(
             attempt_id, target, max(1, self.round_number), owner, cause=cause, source_id=source_id,
             caused_by_owner_id=self.player_owner_id if caused_by_player else None,
-            phase=self.phase if caused_by_player else None)
+            phase=self.phase if caused_by_player else None,
+            room_id=next((room for room, occupants in self.room_assignments.items() if label in occupants), None))
         self.apply_resolved_death(decision)
         self.trace_action("death_resolved", attempt_id=attempt_id, target=target, outcome=decision.outcome,
                           is_new=decision.is_new)
@@ -2321,26 +2326,23 @@ class GameWindow(QMainWindow):
 
         # Room assignments for each character
         self.room_assignments = {room: [] for room in self.rooms}
-        room_with_two_people = None  # Track if a room already has two people
-
-        for character in self.characters:
-            if self.characters[character]["alive"]:
-                available_rooms = [r for r in self.rooms if r not in self.old_crime_scenes]
-
-                if room_with_two_people is None:
-                    # No room has two people yet, so all rooms can be considered
-                    available_rooms_for_assignment = [room for room in available_rooms if len(self.room_assignments[room]) < 2]
-                else:
-                    # If a room already has two people, remaining characters must be placed alone in rooms
-                    available_rooms_for_assignment = [room for room in available_rooms if len(self.room_assignments[room]) == 0]
-
-                # Randomly assign the character to a valid room
-                room = random.choice(available_rooms_for_assignment)
-                self.room_assignments[room].append(character)
-
-                # Check if the room now has two people
-                if len(self.room_assignments[room]) == 2 and self.round_number == 1:
-                    room_with_two_people = room  # Mark that a room with two people exists
+        available_rooms = [room for room in self.rooms if room not in self.old_crime_scenes]
+        reserved = self.item_rules.reserved_room_assignments(
+            self.round_number, self.body_states(), available_rooms)
+        for body_id, room in reserved.items():
+            self.room_assignments[room].append(self.label_for_body(body_id))
+        room_with_two_people = next((room for room, occupants in self.room_assignments.items()
+                                     if len(occupants) == 2), None)
+        for character, data in self.characters.items():
+            if not data["alive"] or self.body_id(character) in reserved:
+                continue
+            candidates = [room for room in available_rooms if len(self.room_assignments[room]) < 2]
+            if self.round_number == 1 and room_with_two_people is not None:
+                candidates = [room for room in candidates if not self.room_assignments[room]]
+            room = random.choice(candidates)
+            self.room_assignments[room].append(character)
+            if len(self.room_assignments[room]) == 2:
+                room_with_two_people = room
 
         living_npcs = tuple(name for name, data in self.characters.items()
                             if data["alive"] and name != self.player_name)

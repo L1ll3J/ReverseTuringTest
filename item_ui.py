@@ -150,6 +150,7 @@ class InventoryPage(QWidget):
         ''')
         self.target_boxes = {}
         self.message_boxes = {}
+        self.room_boxes = {}
         self.use_buttons = {}
         target_snapshot = tuple(targets)
         options = {"living_npc": target_snapshot, **(target_options or {})}
@@ -207,19 +208,30 @@ class InventoryPage(QWidget):
                 target.setAccessibleName(f"Recipient for {definition.name}")
                 target.setFocusPolicy(Qt.StrongFocus)
                 self._font(target, self._body_font)
-                for body_id, name in options.get(definition.target_kind, ()):
+                for body_id, name in options.get("living_npc" if definition.target_kind == "living_npc_room" else definition.target_kind, ()):
                     target.addItem(name, body_id)
                 self.target_boxes[entry.instance_id] = target
                 controls.addWidget(target, 1)
             else:
                 controls.addStretch()
+            room_target = None
+            if definition.target_kind == "living_npc_room":
+                room_target = _TargetComboBox()
+                room_target.setObjectName(f"inventoryRoom_{entry.instance_id}")
+                room_target.setAccessibleName(f"Room for {definition.name}")
+                self._font(room_target, self._body_font)
+                for room_id, name in options.get("room", ()):
+                    room_target.addItem(name, room_id)
+                self.room_boxes[entry.instance_id] = room_target
+                controls.addWidget(room_target, 1)
             button = QPushButton("Use")
             button.setObjectName(f"inventoryUse_{entry.instance_id}")
             button.setAccessibleName(f"Use {definition.name}")
             button.setFocusPolicy(Qt.StrongFocus)
             button.setAutoDefault(False)
             self._font(button, self._title_font)
-            button.setEnabled(can_use and (target is None or target.count() > 0))
+            button.setEnabled(can_use and (target is None or target.count() > 0)
+                              and (room_target is None or room_target.count() > 0))
             self.use_buttons[entry.instance_id] = button
             controls.addWidget(button)
             row.addLayout(controls)
@@ -240,7 +252,7 @@ class InventoryPage(QWidget):
                 button.setToolTip(reason)
                 row.addWidget(self._label(reason, self._body_font))
             def activate(_checked=False, instance=entry.instance_id, box=target,
-                         editor=message, kind=definition.target_kind):
+                         editor=message, kind=definition.target_kind, room_box=room_target):
                 kwargs = {}
                 if editor is not None:
                     text = editor.toPlainText()
@@ -249,6 +261,8 @@ class InventoryPage(QWidget):
                         return
                     kwargs["message"] = text
                 target_id = box.currentData() if box is not None else None
+                if room_box is not None:
+                    kwargs["room_id"] = room_box.currentData()
                 if kind == "room":
                     kwargs["room_id"] = target_id
                     target_id = None

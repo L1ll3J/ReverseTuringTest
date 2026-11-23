@@ -154,6 +154,33 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertTrue(all(QFontInfo(label.font()).family() != self.window.pixel_font_family
                             for label in descriptions))
 
+    def test_reservation_inventory_room_selection_actual_assignment_and_causal_unlock(self):
+        self.conversation()
+        self.window.old_crime_scenes = ["Attic"]
+        entry = self.window.inventory.grant("room_reservation")
+        self.window.open_inventory()
+        page = self.window.inventory_page
+        target = page.target_boxes[entry.instance_id]
+        room = page.room_boxes[entry.instance_id]
+        self.assertEqual(room.findData("Attic"), -1)
+        target.setCurrentIndex(target.findData(self.window.body_id("Jerry")))
+        room.setCurrentIndex(room.findData("Kitchen"))
+        page.use_buttons[entry.instance_id].click()
+        self.assertNotIn(entry, self.window.inventory.entries)
+        self.assertEqual(self.window.item_rules.reservations[0].room_id, "Kitchen")
+        self.window.selected_weapon = self.weapon()
+        self.window.show_room_allocations = False
+        self.window.run_action_phase()
+        self.assertIn("Jerry", self.window.room_assignments["Kitchen"])
+        self.assertTrue(all(len(occupants) <= 2 for occupants in self.window.room_assignments.values()))
+        self.assertFalse(self.window.room_assignments["Attic"])
+        self.assertTrue(all(not observation.known_names for observation in self.window.house_view.observations.values()))
+        self.assertTrue(self.window.commit_attack("Jerry", "Kitchen"))
+        self.assertIn("occult_ritual", self.window.profile_store.read().unlocked)
+        self.assertEqual(self.window.profile_store.read().counters["reserved_room_kill"], 1)
+        self.assertFalse(self.window.commit_attack("Jerry", "Kitchen"))
+        self.assertEqual(self.window.profile_store.read().counters["reserved_room_kill"], 1)
+
     def test_how_to_play_covers_current_items_progression_and_evidence(self):
         guide = game.HowToPlayPage(self.window)
         text = guide.findChild(QTextEdit).toPlainText()
@@ -912,28 +939,32 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertIn(entry, self.window.inventory.entries)
         self.assertEqual(self.window.items_used, 0)
 
-    def test_lucky_match_and_deep_pockets_keep_second_pick_inline(self):
+    def test_lucky_match_and_deep_pockets_keep_all_three_picks_inline(self):
         self.night()
         self.conversation()
         self.window.item_drafts = DraftState("player", eligible_item_pool())
         self.use_card("lucky_match")
         self.use_card("deep_pockets")
-        self.assertEqual(self.window.item_drafts.rerolls_remaining, 2)
+        self.assertEqual(self.window.item_drafts.rerolls_remaining, 4)
         self.window.overlay_host.close_page()
         self.window.run_action_phase()
         self.window.room_assignments["Attic"] = ["Dave", "Jerry"]
         self.window.choose_room("Attic")
         first = self.window.draft_page
-        self.assertEqual(self.window.item_drafts.pending_offer.picks_remaining, 2)
+        self.assertEqual(self.window.item_drafts.pending_offer.picks_remaining, 3)
         first.take_buttons[0].click()
         self.assertEqual(len(self.window.inventory.entries), 1)
-        self.assertEqual(self.window.item_drafts.pending_offer.picks_remaining, 1)
+        self.assertEqual(self.window.item_drafts.pending_offer.picks_remaining, 2)
         self.assertIsNotNone(self.window.pending_room_action)
         self.assertTrue(self.window.characters["Dave"]["alive"])
         first.take_buttons[1].click()
         self.assertEqual(len(self.window.inventory.entries), 1)
         self.window.draft_page.take_buttons[0].click()
         self.assertEqual(len(self.window.inventory.entries), 2)
+        self.assertEqual(self.window.item_drafts.pending_offer.picks_remaining, 1)
+        self.assertIsNotNone(self.window.pending_room_action)
+        self.window.draft_page.take_buttons[0].click()
+        self.assertEqual(len(self.window.inventory.entries), 3)
         self.assertIsNone(self.window.pending_room_action)
         self.assertIsNone(self.window.draft_page)
 

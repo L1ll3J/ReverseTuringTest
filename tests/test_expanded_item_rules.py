@@ -59,11 +59,11 @@ class ExpandedItemRulesTests(unittest.TestCase):
                 rules = PlayerItemRules("owner", inventory, random.Random(1))
                 record = MemoryRecord(1, "experience", "A real supplied perception.", "self")
                 context = replace(self.context, memory_views=(NightMemoryView("j", 1, (record,)),))
-                target = {"living_npc": "j", "living_body": "j", "dead_body": "x"}.get(definition.target_kind)
+                target = {"living_npc": "j", "living_npc_room": "j", "living_body": "j", "dead_body": "x"}.get(definition.target_kind)
                 kwargs = {"activation_id": item_id}
                 if definition.requires_message:
                     kwargs["message"] = "I heard the window open."
-                if definition.target_kind == "room":
+                if definition.target_kind in {"room", "living_npc_room"}:
                     kwargs["room_id"] = "Cellar"
                 if item_id in {"lucky_match", "deep_pockets"}:
                     kwargs["drafts"] = DraftState("owner", tuple(ITEM_CATALOGUE))
@@ -208,16 +208,77 @@ class ExpandedItemRulesTests(unittest.TestCase):
                 self.rules.use_item(entry.instance_id, self.context, drafts=invalid)
             self.assertIn(entry, self.inventory.entries)
         self.rules.use_item(entry.instance_id, self.context, drafts=drafts)
-        self.assertEqual(drafts.rerolls_remaining, 2)
+        self.assertEqual(drafts.rerolls_remaining, 4)
         self.grant_use("deep_pockets", drafts=drafts)
         duplicate = self.inventory.grant("deep_pockets")
         with self.assertRaises(ItemRuleError):
             self.rules.use_item(duplicate.instance_id, self.context, drafts=drafts)
         self.assertIn(duplicate, self.inventory.entries)
         offer = drafts.enter_room("Kitchen", self.inventory.snapshot())
-        self.assertEqual(offer.picks_remaining, 2)
+        self.assertEqual(offer.picks_remaining, 3)
         drafts.choose(offer.offer_id, 0, self.inventory)
         self.assertIsNotNone(drafts.pending_offer)
+
+    def test_reservation_validates_replaces_caps_and_expires_without_observations(self):
+        third = BodyState("h", "Helen", True, True)
+        context = replace(self.context, bodies=(*self.bodies, third))
+        for target, room in ((None, "Kitchen"), ("p", "Kitchen"), ("x", "Kitchen"),
+                             ("j", None), ("j", "Missing")):
+            entry = self.inventory.grant("room_reservation")
+            with self.assertRaises(ItemRuleError):
+                self.rules.use_item(entry.instance_id, context, target, room_id=room)
+            self.assertIn(entry, self.inventory.entries)
+        for target in ("j", "d"):
+            events = self.rules.use_item(self.inventory.grant("room_reservation").instance_id,
+                                         context, target, room_id="Kitchen")
+            self.assert_mechanical(events)
+        entry = self.inventory.grant("room_reservation")
+        with self.assertRaises(ItemRuleError):
+            self.rules.use_item(entry.instance_id, context, "h", room_id="Kitchen")
+        self.assertIn(entry, self.inventory.entries)
+        self.rules.use_item(self.inventory.grant("room_reservation").instance_id,
+                            context, "j", room_id="Cellar")
+        self.rules.use_item(entry.instance_id, context, "h", room_id="Kitchen")
+        self.assertEqual(len(self.rules.reservations), 3)
+        self.rules.begin_night(2, context.bodies)
+        assignments = self.rules.reserved_room_assignments(2, context.bodies, ("Kitchen", "Cellar"))
+        self.assertEqual(dict(assignments), {"j": "Cellar", "d": "Kitchen", "h": "Kitchen"})
+        self.rules.begin_night(3, context.bodies)
+        self.assertFalse(self.rules.reservations)
+        self.assertFalse(self.rules.reserved_room_assignments(3, context.bodies, ("Kitchen", "Cellar")))
+
+    def test_reservation_follows_mind_and_only_real_matching_player_kill_counts_once(self):
+        for day, phase, room, owner, expected in (
+                (2, "action", "Kitchen", "owner", True),
+                (2, "action", "Cellar", "owner", False),
+                (2, "conversation", "Kitchen", "owner", False),
+                (2, "action", "Kitchen", "other", False),
+                (3, "action", "Kitchen", "owner", False)):
+            with self.subTest(day=day, phase=phase, room=room, owner=owner):
+                inventory = Inventory("owner")
+                rules = PlayerItemRules("owner", inventory)
+                rules.use_item(inventory.grant("room_reservation").instance_id,
+                               self.context, "j", room_id="Kitchen")
+                changed = (self.player, replace(self.dave, mind_id="j"), replace(self.jerry, mind_id="d"))
+                rules.begin_night(day, changed)
+                assignments = rules.reserved_room_assignments(day, changed, ("Kitchen", "Cellar"))
+                if day == 2:
+                    self.assertEqual(dict(assignments), {"d": "Kitchen"})
+                decision = rules.attempt_death("kill", changed[1], day, caused_by_owner_id=owner,
+                                               phase=phase, room_id=room)
+                self.assertEqual(any(event.event_type == "reserved_room_kill" for event in decision.events), expected)
+                replay = rules.attempt_death("kill", changed[1], day, caused_by_owner_id=owner,
+                                             phase=phase, room_id=room)
+                self.assertFalse(replay.is_new)
+                self.assertFalse(replay.events)
+                self.assertFalse(rules.reservations)
+
+    def test_dead_reservation_cannot_occupy_capacity_or_move_a_body(self):
+        self.grant_use("room_reservation", "j", room_id="Kitchen")
+        self.rules.attempt_death("earlier", self.jerry, 1)
+        self.assertFalse(self.rules.reservations)
+        self.rules.begin_night(2, self.bodies)
+        self.assertFalse(self.rules.reserved_room_assignments(2, self.bodies, ("Kitchen",)))
 
     def test_gavel_bypasses_only_length_not_required_reply_busy_phase_or_life(self):
         entry = self.inventory.grant("pocket_gavel")

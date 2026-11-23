@@ -81,13 +81,18 @@ ITEM_CATALOGUE = MappingProxyType({
         "watch_this_drive", "Watch This Drive", "Mark a suspect. Kill them next night to earn one extra basic room attack.",
         "living_npc", True, flavour="One good murder deserves another.",
     ),
+    "room_reservation": ItemDefinition(
+        "room_reservation", "Room Reservation",
+        "Send a living suspect to a chosen available room next night. Each room holds up to two suspects.",
+        "living_npc_room", True,
+    ),
     "lucky_match": ItemDefinition(
-        "lucky_match", "Lucky Match", "Gain one extra single-slot reroll for this run.", "self", True,
+        "lucky_match", "Lucky Match", "Gain three extra single-slot rerolls for this run.", "self", True,
         flavour="Perhaps the next disappointment will suit you better.",
     ),
     "deep_pockets": ItemDefinition(
-        "deep_pockets", "Deep Pockets", "Take up to two different items from your next room offer.", "self", True,
-        flavour="Greed is easier with room for both.",
+        "deep_pockets", "Deep Pockets", "Take up to three different items from your next room offer.", "self", True,
+        flavour="Greed is easier with room for everything.",
     ),
     "pocket_gavel": ItemDefinition(
         "pocket_gavel", "Pocket Gavel", "Call the normal vote early after answering any required question.",
@@ -294,7 +299,7 @@ class DraftState:
         if not eligible:
             return None
         options = tuple(self._rng.sample(eligible, min(3, len(eligible))))
-        picks = min(2 if self._extra_pick_armed else 1, len(options))
+        picks = min(3 if self._extra_pick_armed else 1, len(options))
         offer = DraftOffer(uuid4().hex, room_id, options, picks)
         self._pending_offer = offer
         self._extra_pick_armed = False
@@ -346,7 +351,7 @@ class DraftState:
         owned = inventory.snapshot().item_ids
         remaining = tuple(item_id for item_id in offer.options if item_id not in owned)
         self._pending_offer = (
-            DraftOffer(uuid4().hex, offer.room_id, remaining, offer.picks_remaining - 1,
+            DraftOffer(uuid4().hex, offer.room_id, remaining, min(offer.picks_remaining - 1, len(remaining)),
                        (*offer.picked_item_ids, entry.item_id))
             if offer.picks_remaining > 1 and remaining else None
         )

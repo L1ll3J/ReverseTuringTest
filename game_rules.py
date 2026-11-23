@@ -66,10 +66,17 @@ class BodyState:
     alive: bool
     is_npc: bool
     subject_pronoun: Literal["he", "she", "they"] = "they"
+    mind_id: str | None = None
+
+    @property
+    def mind_identity(self) -> str:
+        return self.mind_id if self.mind_id is not None else self.body_id
 
     def __post_init__(self):
         if not self.body_id or self.body_id == "NONE" or not self.label:
             raise ItemRuleError("Each body requires an identifier and a label")
+        if self.mind_id is not None and (not isinstance(self.mind_id, str) or not self.mind_id):
+            raise ItemRuleError("A mind identifier must be a nonempty string")
         if self.subject_pronoun not in ("he", "she", "they"):
             raise ItemRuleError("A body subject pronoun must be he, she or they")
 
@@ -174,6 +181,13 @@ class VoteSnapshot:
 
 
 @dataclass(frozen=True)
+class RoomReservation:
+    mind_id: str
+    room_id: str
+    due_day: int
+
+
+@dataclass(frozen=True)
 class RoomTrap:
     effect_id: str
     room_id: str
@@ -268,6 +282,8 @@ class PlayerItemRules:
         self._proxy_voters: dict[str, int] = {}
         self._skip_next_vote = False
         self._early_vote_day: int | None = None
+        self._reservations: dict[str, RoomReservation] = {}
+        self._reserved_assignments: dict[str, RoomReservation] = {}
         self._traps: dict[str, RoomTrap] = {}
         self._curses: dict[str, BodyCurse] = {}
         self._entry_receipts: dict[str, tuple[tuple, EffectResolution]] = {}
@@ -313,6 +329,23 @@ class PlayerItemRules:
     @property
     def skip_next_vote(self) -> bool:
         return self._skip_next_vote
+
+    @property
+    def reservations(self) -> tuple[RoomReservation, ...]:
+        return tuple(self._reservations.values())
+
+    def reserved_room_assignments(self, day: int, bodies: Iterable[BodyState],
+                                  available_rooms: Iterable[str]) -> Mapping[str, str]:
+        body_map = _body_map(bodies)
+        rooms = set(available_rooms)
+        assigned = {}
+        for body in body_map.values():
+            reservation = self._reservations.get(body.mind_identity)
+            if (reservation is not None and reservation.due_day == day and body.alive
+                    and body.is_npc and body.body_id not in self._known_dead and reservation.room_id in rooms):
+                assigned[body.body_id] = reservation.room_id
+                self._reserved_assignments[body.body_id] = reservation
+        return MappingProxyType(assigned)
 
     @property
     def traps(self) -> tuple[RoomTrap, ...]:
@@ -372,17 +405,17 @@ class PlayerItemRules:
             raise ItemRuleError(str(error)) from None
         definition = ITEM_CATALOGUE[entry.item_id]
         target = bodies.get(target_body_id) if target_body_id is not None else None
-        if definition.target_kind in {"living_npc", "living_body"}:
+        if definition.target_kind in {"living_npc", "living_body", "living_npc_room"}:
             if target is None or not target.alive or target.body_id in self._known_dead:
                 raise ItemRuleError("Choose a living body")
-            if definition.target_kind == "living_npc" and (not target.is_npc or target.body_id == actor.body_id):
+            if definition.target_kind in {"living_npc", "living_npc_room"} and (not target.is_npc or target.body_id == actor.body_id):
                 raise ItemRuleError("Choose a living suspect other than yourself")
         elif definition.target_kind == "dead_body":
             if target is None or (target.alive and target.body_id not in self._known_dead):
                 raise ItemRuleError("Choose a dead body")
         elif target_body_id is not None:
             raise ItemRuleError("This item does not take a target")
-        if definition.target_kind == "room":
+        if definition.target_kind in {"room", "living_npc_room"}:
             if room_id is None or room_id not in context.available_rooms:
                 raise ItemRuleError("Choose a currently available room")
         elif room_id is not None:
@@ -392,6 +425,14 @@ class PlayerItemRules:
                 raise ItemRuleError("Write a message between one and 2000 characters")
         elif message is not None:
             raise ItemRuleError("This item does not take a message")
+        if entry.item_id == "room_reservation":
+            occupied = sum(reservation.room_id == room_id and reservation.due_day == context.day + 1
+                           and mind_id != target.mind_identity
+                           and any(body.alive and body.body_id not in self._known_dead
+                                   and body.mind_identity == mind_id for body in bodies.values())
+                           for mind_id, reservation in self._reservations.items())
+            if occupied >= 2:
+                raise ItemRuleError("This room already has two reservations for next night")
         if entry.item_id == "muffle" and target.body_id in self._muffles:
             raise ItemRuleError("This suspect is already muffled")
         if entry.item_id == "guardian_angel" and self._protection_armed:
@@ -459,12 +500,15 @@ class PlayerItemRules:
             self._protection_armed = True
             self._protection_body_id = actor.body_id
             effect = self._event("guardian_armed", context.day, **values)
+        elif entry.item_id == "room_reservation":
+            self._reservations[target.mind_identity] = RoomReservation(target.mind_identity, room_id, context.day + 1)
+            effect = self._event("room_reserved", context.day, **values, room_id=room_id, due_day=context.day + 1)
         elif entry.item_id == "lucky_match":
-            drafts.add_rerolls()
-            effect = self._event("reroll_added", context.day, **values, amount=1)
+            drafts.add_rerolls(3)
+            effect = self._event("reroll_added", context.day, **values, amount=3)
         elif entry.item_id == "deep_pockets":
             drafts.arm_extra_pick()
-            effect = self._event("extra_pick_armed", context.day, **values, amount=1)
+            effect = self._event("extra_pick_armed", context.day, **values, amount=2)
         elif entry.item_id == "pocket_gavel":
             self._early_vote_day = context.day
             effect = self._event("early_vote_requested", context.day, **values)
@@ -557,10 +601,16 @@ class PlayerItemRules:
         self._bonus_receipts[action_id] = day
         return True
 
-    def _on_kill(self, decision: DeathDecision, corpse: BodyState, phase: str | None) -> tuple[ItemEvent, ...]:
+    def _on_kill(self, decision: DeathDecision, corpse: BodyState, phase: str | None, room_id: str | None) -> tuple[ItemEvent, ...]:
         events = []
         if not corpse.is_npc or decision.cause == DeathCause.EXECUTION:
             return ()
+        reservation = next((value for value in self._reserved_assignments.values()
+                            if value.mind_id == corpse.mind_identity), None)
+        if (reservation is not None and phase == "action" and reservation.due_day == decision.day
+                and reservation.room_id == room_id):
+            events.append(self._event("reserved_room_kill", decision.day, item_id="room_reservation",
+                                      target_body_id=corpse.body_id, room_id=room_id))
         if self._prepared_note is not None:
             note = self._prepared_note
             self._prepared_note = None
@@ -611,7 +661,7 @@ class PlayerItemRules:
             decisions = tuple(self.attempt_death(
                 f"trap:{trap.effect_id}:{body.body_id}", body, day, ownership.get(body.body_id),
                 cause=DeathCause.TRAP, source_id=entry_id,
-                caused_by_owner_id=trap.owner_id, phase="action")
+                caused_by_owner_id=trap.owner_id, phase="action", room_id=room_id)
                 for body in sorted(bodies.values(), key=lambda value: value.body_id))
             trigger = self._event("room_trap_triggered", day, item_id="booby_trap",
                                   actor_body_id=trap.actor_body_id, room_id=room_id)
@@ -667,7 +717,13 @@ class PlayerItemRules:
     def begin_night(self, day: int, bodies: Iterable[BodyState]) -> tuple[ItemEvent, ...]:
         if day < 1 or self._active_vote_id is not None:
             raise ItemRuleError("The next night cannot begin before voting is resolved")
-        living = {body_id for body_id, body in _body_map(bodies).items() if body.alive}
+        snapshots = _body_map(bodies)
+        living = {body_id for body_id, body in snapshots.items() if body.alive and body_id not in self._known_dead}
+        living_minds = {body.mind_identity for body in snapshots.values() if body.body_id in living}
+        self._reservations = {mind: reservation for mind, reservation in self._reservations.items()
+                              if mind in living_minds and reservation.due_day >= day}
+        self._reserved_assignments = {body_id: reservation for body_id, reservation in self._reserved_assignments.items()
+                                      if body_id in living and reservation.due_day >= day}
         self._proxy_voters = {body_id: round_number for body_id, round_number in self._proxy_voters.items()
                               if round_number >= day}
         if self._early_vote_day is not None and self._early_vote_day < day:
@@ -697,6 +753,7 @@ class PlayerItemRules:
         source_id: str | None = None,
         caused_by_owner_id: str | None = None,
         phase: str | None = None,
+        room_id: str | None = None,
     ) -> DeathDecision:
         if not attempt_id or day < 1:
             raise ItemRuleError("A death attempt requires an identifier and a day")
@@ -709,7 +766,7 @@ class PlayerItemRules:
         if caused_by_owner_id is not None and (not isinstance(caused_by_owner_id, str) or not caused_by_owner_id
                                                or phase not in {"action", "conversation", "voting"}):
             raise ItemRuleError("A caused death requires its owner and phase")
-        identity = (target.body_id, target.label, day, target_owner_id, cause, source_id, caused_by_owner_id, phase)
+        identity = (target.body_id, target.label, day, target_owner_id, cause, source_id, caused_by_owner_id, phase, room_id)
         if attempt_id in self._death_decisions:
             original_identity, original = self._death_decisions[attempt_id]
             if identity != original_identity:
@@ -751,7 +808,10 @@ class PlayerItemRules:
         decision = DeathDecision(attempt_id, target.body_id, outcome, True, events,
                                  cause, source_id, protection, day)
         if decision.killed and caused_by_owner_id == self.owner_id:
-            decision = replace(decision, events=(*decision.events, *self._on_kill(decision, target, phase)))
+            decision = replace(decision, events=(*decision.events, *self._on_kill(decision, target, phase, room_id)))
+        if decision.killed:
+            self._reservations.pop(target.mind_identity, None)
+            self._reserved_assignments.pop(target.body_id, None)
         self._death_decisions[attempt_id] = identity, decision
         if cause == DeathCause.EXECUTION:
             self._execution_attempts[source_id] = decision
