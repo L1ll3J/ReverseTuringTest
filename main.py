@@ -173,6 +173,7 @@ class GameWindow(QMainWindow):
         self.progress_sequence = 0
         self.pending_progress = []
         self.items_used = 0
+        self.run_player_kills = 0
         self.innocents_executed = 0
         self.witness_body_ids = set()
         self.night_attacks = []
@@ -271,10 +272,16 @@ class GameWindow(QMainWindow):
         self.progress_retry_button.show()
 
     def queue_progress(self, event_type):
-        self.progress_sequence += 1
-        event = ProgressEvent(self.run_id, self.progress_sequence, event_type)
-        self.pending_progress.append(event)
-        self.trace.record("progress_queued", {"event": event})
+        event_types = [event_type]
+        if event_type == "player_kill":
+            self.run_player_kills += 1
+            if self.run_player_kills == 3:
+                event_types.append("three_kills_one_run")
+        for queued_type in event_types:
+            self.progress_sequence += 1
+            event = ProgressEvent(self.run_id, self.progress_sequence, queued_type)
+            self.pending_progress.append(event)
+            self.trace.record("progress_queued", {"event": event})
         self.flush_progress()
 
     def flush_progress(self):
@@ -551,6 +558,7 @@ class GameWindow(QMainWindow):
             "rerolls_remaining": self.item_drafts.rerolls_remaining if self.item_drafts else 0,
             "attacks": self.night_attacks, "witness_body_ids": sorted(self.witness_body_ids),
             "progress_sequence": self.progress_sequence, "pending_progress": self.pending_progress,
+            "run_player_kills": self.run_player_kills,
             "vote_snapshot": self.vote_snapshot,
             "vote_weights": dict(self.vote_snapshot.weights) if self.vote_snapshot else {},
         }
@@ -1649,7 +1657,9 @@ class GameWindow(QMainWindow):
 
             # --- Description (smaller, grey, wrapped) ---
             unlocked = wpn["id"] in available_content(self.profile, "weapon")
-            description = wpn["desc"] if unlocked else "Locked: " + UNLOCK_GOALS[wpn["id"]]
+            description = wpn["desc"]
+            if not unlocked:
+                description += "\n\nLocked: " + UNLOCK_GOALS[wpn["id"]]
             desc = QLabel(description, card)
             desc.setWordWrap(True)
             desc.setAlignment(Qt.AlignHCenter | Qt.AlignTop)

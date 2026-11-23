@@ -120,9 +120,12 @@ class ItemIntegrationTests(unittest.TestCase):
 
     def test_offer_inventory_and_unlock_goals_resolve_readable_body_fonts(self):
         goals = [label for label in self.window.weapon_picker_widget.findChildren(QLabel)
-                 if label.text().startswith("Locked:")]
+                 if "\n\nLocked:" in label.text()]
         self.assertTrue(goals)
         self.assertTrue(all(QFontInfo(label.font()).family() != self.window.pixel_font_family for label in goals))
+        for weapon in self.window.weapons:
+            if weapon["id"] != "bare":
+                self.assertTrue(any(label.text().startswith(weapon["desc"]) for label in goals))
         self.night()
         self.window.choose_room("Basement")
         self.app.processEvents()
@@ -385,6 +388,33 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.pending_progress)
         self.window.retry_progress()
         self.assertEqual(dict(self.window.profile_store.read().counters), dict(profile.counters))
+
+    def test_three_actual_kills_unlock_c4_once_and_save_retry_does_not_recount(self):
+        self.night()
+        self.assertTrue(self.window.commit_attack("Dave", "Attic"))
+        self.assertFalse(self.window.commit_attack("Dave", "Attic"))
+        self.assertTrue(self.window.commit_attack("Jerry", "Attic"))
+        self.assertEqual(self.window.run_player_kills, 2)
+        self.assertNotIn("c4", self.window.profile.unlocked)
+        with patch.object(self.window.profile_store, "record", side_effect=ProfileError("Disk unavailable")):
+            self.assertTrue(self.window.commit_attack("Hank", "Kitchen"))
+        self.assertEqual([event.event_type for event in self.window.pending_progress],
+                         ["player_kill", "three_kills_one_run"])
+        self.window.retry_progress()
+        self.window.retry_progress()
+        self.assertEqual(self.window.run_player_kills, 3)
+        self.assertEqual(self.window.profile.counters["player_kill"], 3)
+        self.assertEqual(self.window.profile.counters["three_kills_one_run"], 1)
+        self.assertIn("c4", self.window.profile.unlocked)
+        self.assertNotIn("c4", self.window.run_weapons)
+
+    def test_execution_and_prevented_death_do_not_count_towards_c4(self):
+        self.conversation()
+        self.give("guardian_angel")
+        self.assertTrue(self.window.resolve_death("Alex", "prevented").prevented)
+        self.assertTrue(self.window.resolve_death("Dave", "execution").killed)
+        self.assertEqual(self.window.run_player_kills, 0)
+        self.assertNotIn("three_kills_one_run", self.window.profile.counters)
 
     def test_corrupt_profile_is_never_overwritten_or_silently_reset(self):
         self.path.write_text("not a profile", encoding="utf-8")
