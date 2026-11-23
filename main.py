@@ -14,6 +14,7 @@ from conversation_flow import DirectReplyPolicy, GroupTurnSnapshot, TurnPreparat
 from conversation_widgets import DialogueView, ConversationStage, StageParticipant, character_art_path
 from message_view import DisplayRecord, MessageLog
 from house_view import HouseView, RoomObservation, ROOM_LABELS, ARTWORK_SIZE
+from night_arrivals import NightArrivals, assign_guest_rooms, flight_destination, room_capacity
 from overlay_host import OverlayHost
 from unlock_ui import UnlockPage, unlock_presentation
 from npc_items import NPCItemState, NPC_ITEM_REGISTRY
@@ -122,6 +123,7 @@ class AIWorker(QThread):
 class GameWindow(QMainWindow):
     development_trace_notice = pyqtSignal(str)
     history_record_added = pyqtSignal(object)
+    night_arrival_resolved = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()  # Ensure the parent class is initialized
@@ -138,6 +140,15 @@ class GameWindow(QMainWindow):
         self.rooms = ["Attic", "Kitchen", "Library", "Basement", "Cellar"]
         self.old_crime_scenes = []
         self.room_assignments = {}
+        self.night_arrivals = None
+        self._arrival_entry_events = set()
+        self._arrival_memory_receipts = set()
+        self._disclosed_item_deaths = set()
+        self._arrival_known_corpse_rooms = {}
+        self._arrival_observed_bodies = {room: [] for room in self.rooms}
+        self._player_entry_receipts = set()
+        self._arrival_finalized = False
+        self._room_choice_in_progress = False
         self.round_number = 0
         self.phase = "start"
         self.conversation_length = 0  # To track when the "Call Vote" button should appear
@@ -878,7 +889,7 @@ class GameWindow(QMainWindow):
         self.update_muffled_player_controls()
         return death_applied
 
-    def apply_delayed_item_resolution(self, resolution, *, room_id=None):
+    def apply_delayed_item_resolution(self, resolution, *, room_id=None, disclose=True):
         """Reconcile engine decisions without inventing ordinary attack witnesses."""
         killed_any = False
         for decision in resolution.decisions:
@@ -895,7 +906,9 @@ class GameWindow(QMainWindow):
                 decision.attempt_id, decision.target_body_id, decision.day, decision.cause, room_id,
                 self.perceived_name(decision.target_body_id))
             label = self.perceived_name(decision.target_body_id)
-            self.record_history(f"{decision.cause.value}: {label} died.", display=True)
+            if disclose:
+                self.record_history(f"{decision.cause.value}: {label} died.", display=True)
+                self._disclosed_item_deaths.add(decision.attempt_id)
             if decision.target_body_id != self.body_id(self.player_name):
                 self.queue_progress("player_kill")
         self.apply_item_events(resolution.events)
@@ -909,7 +922,7 @@ class GameWindow(QMainWindow):
         self.apply_delayed_item_resolution(result)
         return self.finish_item_death_outcomes(result.decisions)
 
-    def resolve_room_entry_items(self, entry_id, room_id, body_ids):
+    def resolve_room_entry_items(self, entry_id, room_id, body_ids, *, disclose=True):
         requested = set(body_ids)
         if not requested:
             return False
@@ -921,7 +934,7 @@ class GameWindow(QMainWindow):
         result = self.item_rules.resolve_entry(entry_id, room_id, entrants, self.round_number, owners=owners)
         if not result.decisions and not result.events:
             return False
-        self.apply_delayed_item_resolution(result, room_id=room_id)
+        self.apply_delayed_item_resolution(result, room_id=room_id, disclose=disclose)
         return self.finish_item_death_outcomes(result.decisions)
 
     def finish_item_death_outcomes(self, decisions):
@@ -1563,6 +1576,31 @@ class GameWindow(QMainWindow):
         self.house_sidebar_layout = QVBoxLayout(self.house_sidebar_content)
         self.house_sidebar_layout.setContentsMargins(0, 0, 0, 0)
         self.house_sidebar_layout.setSpacing(16)
+        self.arrival_controls = QWidget()
+        arrival_layout = QVBoxLayout(self.arrival_controls)
+        arrival_layout.setContentsMargins(0, 0, 0, 0)
+        arrival_layout.setSpacing(12)
+        self.arrival_clock = QLabel("19:45")
+        self.arrival_clock.setObjectName("arrivalClock")
+        self.arrival_clock.setAccessibleName("Night arrival time")
+        InventoryPage._font(self.arrival_clock, self.speaker_font)
+        arrival_layout.addWidget(self.arrival_clock)
+        self.loiter_button = QPushButton("Loiter outside")
+        self.loiter_button.setObjectName("loiterButton")
+        self.loiter_button.setAccessibleName("Wait outside for the next guest")
+        self.loiter_button.setFocusPolicy(Qt.StrongFocus)
+        InventoryPage._font(self.loiter_button, body_font)
+        self.loiter_button.setMinimumHeight(44)
+        arrival_layout.addWidget(self.loiter_button)
+        self.arrival_status = QLabel()
+        self.arrival_status.setObjectName("arrivalStatus")
+        self.arrival_status.setWordWrap(True)
+        InventoryPage._font(self.arrival_status, body_font)
+        arrival_layout.addWidget(self.arrival_status)
+        self.house_sidebar_layout.addWidget(self.arrival_controls)
+        self.arrival_clock.hide()
+        self.loiter_button.hide()
+        self.arrival_status.hide()
         self.house_sidebar_layout.addWidget(self.house_view.info_panel)
         self.house_sidebar_layout.addStretch(1)
         self.house_sidebar.setWidget(self.house_sidebar_content)
@@ -2261,6 +2299,8 @@ class GameWindow(QMainWindow):
             room_id, available=self.room_buttons[label].isEnabled(),
             known_names=self.house_view.observations[room_id].known_names,
             unknown_remainder=self.house_view.observations[room_id].unknown_remainder,
+            observed_at=self.house_view.observations[room_id].observed_at,
+            light_on=self.house_view.observations[room_id].light_on,
         ) for room_id, label in ROOM_LABELS.items())
         self.house_view.set_observations(records)
 
@@ -2767,64 +2807,41 @@ class GameWindow(QMainWindow):
         self.update_inventory_button()
         self.record_history(f"Night {self.round_number}", kind="section", display=True)
 
-        # Room assignments for each character
-        self.room_assignments = {room: [] for room in self.rooms}
-        available_rooms = [room for room in self.rooms if room not in self.old_crime_scenes]
+        living_bodies = tuple(body for body in self.body_states() if body.is_npc and body.alive)
+        available_rooms, reopened = room_capacity(self.rooms, self.old_crime_scenes, len(living_bodies))
+        self.old_crime_scenes = [room for room in self.old_crime_scenes if room not in reopened]
+        self.night_rooms = available_rooms
+        if reopened:
+            self.record_history("Reopened rooms: " + ", ".join(reopened) + ".", display=True)
         reserved = self.item_rules.reserved_room_assignments(
             self.round_number, self.body_states(), available_rooms)
-        for body_id, room in reserved.items():
-            self.room_assignments[room].append(self.label_for_body(body_id))
-        room_with_two_people = next((room for room, occupants in self.room_assignments.items()
-                                     if len(occupants) == 2), None)
-        for character, data in self.characters.items():
-            if not data["alive"] or self.body_id(character) in reserved:
-                continue
-            candidates = [room for room in available_rooms if len(self.room_assignments[room]) < 2]
-            if self.round_number == 1 and room_with_two_people is not None:
-                candidates = [room for room in candidates if not self.room_assignments[room]]
-            room = random.choice(candidates)
-            self.room_assignments[room].append(character)
-            if len(self.room_assignments[room]) == 2:
-                room_with_two_people = room
-
-        for room, occupants in self.room_assignments.items():
-            if self.resolve_room_entry_items(
-                    f"{self.run_id}:night:{self.round_number}:assigned:{room}", room,
-                    {self.body_id(name) for name in occupants}):
-                return
-
-        living_npcs = tuple(name for name, data in self.characters.items()
-                            if data["alive"] and name != self.player_name)
-        self.npc_items.capture_night(
-            self.round_number,
-            self.room_assignments,
-            living_npcs,
-            appearance_names={name: self.perceived_actor(name) for name in self.body_ids},
-            body_ids=self.body_ids,
-        )
-        self.refresh_known_equipment()
-        self.trace_action("night_rooms_assigned", assignments=self.room_assignments)
-
-        # Display room assignments if in normal mode
-        if self.show_room_allocations:
-            formatted_assignments = []
-            for room, occupants in self.room_assignments.items():
-                if occupants:
-                    observed_occupants = self.room_actor_labels(room, occupants)
-                    occupants_str = ", ".join(observed_occupants[:-1]) + (f" and {observed_occupants[-1]}" if len(observed_occupants) > 1 else observed_occupants[0])
-                    formatted_assignments.append(f"{room}: {occupants_str}")
-
-                elif room not in self.old_crime_scenes:
-                    formatted_assignments.append(f"{room}: EMPTY")
-            
-            assignments_output = "\n \n ".join(formatted_assignments)
-            self.record_history(f"Room Assignments; \n \n {assignments_output} \n")
-
+        planned_rooms = assign_guest_rooms(
+            tuple(body.body_id for body in living_bodies), available_rooms, reserved,
+            first_night=self.round_number == 1)
+        self.night_arrivals = NightArrivals(self.round_number, planned_rooms)
+        self._arrival_entry_events = set()
+        self._arrival_memory_receipts = set()
+        self._arrival_known_corpse_rooms = {}
+        self._arrival_observed_bodies = {room: [] for room in self.rooms}
+        self._player_entry_receipts = set()
+        self._arrival_finalized = False
+        self._room_choice_in_progress = False
+        self.room_assignments = {room: [] for room in self.rooms}
         self.house_view.reset_observations(tuple(
-            RoomObservation(room_id,
-                            known_names=self.room_actor_labels(label, self.room_assignments[label]) if self.show_room_allocations else (),
-                            unknown_remainder=not self.show_room_allocations)
-            for room_id, label in ROOM_LABELS.items()))
+            RoomObservation(room_id, unknown_remainder=not self.show_room_allocations)
+            for room_id in ROOM_LABELS))
+        for event in self.night_arrivals.initial:
+            if self.apply_arrival(event, observed=self.show_room_allocations):
+                return
+        self.refresh_known_equipment()
+        self.trace_action("night_arrivals_started", arrivals=self.night_arrivals.events,
+                          initial_count=self.night_arrivals.initial_count)
+        if self.show_room_allocations:
+            assignments_output = "\n".join(
+                f"{room}: {', '.join(self.room_actor_labels(room, occupants)) or 'EMPTY'}"
+                for room, occupants in self.room_assignments.items() if room in available_rooms)
+            self.record_history(f"Initial room arrivals;\n{assignments_output}")
+        self.update_arrival_controls()
 
         # Ask the player to choose a room
         self.append_output_text("Choose a room in the house. Point at a room to inspect it.")
@@ -2848,22 +2865,217 @@ class GameWindow(QMainWindow):
         self.weapon_action_panel.raise_()
 
 
+    def update_arrival_controls(self):
+        state = self.night_arrivals
+        if state is None:
+            self.loiter_button.hide()
+            self.arrival_clock.hide()
+            self.arrival_status.hide()
+            return
+        self.arrival_clock.setText(state.clock)
+        self.arrival_clock.show()
+        self.arrival_status.show()
+        self.loiter_button.show()
+        waiting = (self.phase == "action" and not self.game_over
+                   and self.pending_room_action is None and state.committed_room is None)
+        exhaustion_known = state.complete and (self.show_room_allocations or state.exhausted_observed)
+        self.loiter_button.setEnabled(waiting and not exhaustion_known)
+        if state.committed_room is not None:
+            self.arrival_status.setText("You have entered the house.")
+        elif exhaustion_known:
+            self.arrival_status.setText("All guests have arrived. Choose a room to enter.")
+        else:
+            self.arrival_status.setText("Enter a room now, or wait outside for the next guest.")
+        try:
+            self.loiter_button.clicked.disconnect()
+        except TypeError:
+            pass
+        night, cursor = state.night, state.cursor
+        self.loiter_button.clicked.connect(
+            lambda _checked=False, day=night, index=cursor: self.loiter_outside(day, index))
+
+    def loiter_outside(self, night, cursor):
+        state = self.night_arrivals
+        if (state is None or state.night != night or state.cursor != cursor
+                or self.phase != "action" or self.game_over or self.pending_room_action is not None
+                or state.committed_room is not None or self.room_buttons_widget.isHidden()):
+            return
+        event = state.advance(f"night:{night}:wait:{cursor}")
+        if event is not None:
+            self.apply_arrival(event, observed=True, outside=True)
+        self.update_arrival_controls()
+
+    def remember_arrival(self, event_id, body_id, text, *, source, speaker_body_id=None):
+        """Persist one private perception to the mind present when it occurred."""
+        self.ensure_identity_state()
+        mind_id = self.identity_state.mind_for_body(body_id)
+        receipt = (event_id, mind_id, source)
+        if receipt in self._arrival_memory_receipts:
+            return
+        self._arrival_memory_receipts.add(receipt)
+        if mind_id == self.player_owner_id:
+            self.record_history(text, display=True)
+        else:
+            self.mind_data[mind_id]["experiences"].append(
+                MemoryRecord(self.round_number, "experience", text, source))
+            self.invalidate_prepared_turn("arrival_memory_added", changed=True)
+        self.trace.record("arrival_memory_added", {
+            "event_id": event_id, "recipient_body_id": body_id, "recipient_mind_id": mind_id,
+            "source": source, "speaker_body_id": speaker_body_id, "text": text})
+
+    def arrival_is_visible(self, room, *, outside=False):
+        state = self.night_arrivals
+        return outside or (state.committed_room is None and self.show_room_allocations) or state.committed_room == room
+
+    def apply_arrival(self, event, *, observed=False, outside=False):
+        """Apply one physical entry once; only disclosed observations reach the player."""
+        if event.event_id in self._arrival_entry_events:
+            return self.game_over
+        self._arrival_entry_events.add(event.event_id)
+        guest = self.label_for_body(event.body_id)
+        if not self.characters.get(guest, {}).get("alive"):
+            return self.game_over
+        self.room_assignments[event.room].append(guest)
+        if outside:
+            self.remember_arrival(event.event_id, event.body_id,
+                f"At {event.time}, you saw {self.perceived_actor(self.player_name)} outside the house as you {event.route}. They glanced towards you.",
+                source="eyewitness")
+        room = event.room
+        reports = []
+        while True:
+            visible = observed if room == event.room else self.arrival_is_visible(room, outside=outside)
+            if visible:
+                self.project_arrival(replace(event, room=room))
+                self.record_history(
+                    f"At {event.time}, {self.perceived_name(event.body_id)} entered the {room}.", display=True)
+            corpses = tuple(record for record in self.item_deaths.values()
+                            if record.day == self.round_number and record.room_id == room)
+            if not corpses:
+                break
+            known = self._arrival_known_corpse_rooms.setdefault(event.body_id, set())
+            known.add(room)
+            living_ids = tuple(body.body_id for body in self.body_states() if body.is_npc and body.alive)
+            destination, reopened = flight_destination(
+                self.rooms, self.old_crime_scenes, self.night_arrivals.destinations,
+                living_ids, event.body_id, known)
+            for reopened_room in reopened:
+                self.old_crime_scenes.remove(reopened_room)
+                self.night_rooms = tuple(room for room in self.rooms if room not in self.old_crime_scenes)
+                self.room_buttons[reopened_room].setEnabled(True)
+                self.record_history(f"Reopened room: {reopened_room}.", display=True)
+            for corpse in corpses:
+                victim = corpse.observed_name or self.perceived_name(corpse.body_id)
+                self.remember_arrival(f"{event.event_id}:discovery:{room}:{corpse.body_id}", event.body_id,
+                    f"At {event.time}, you stepped into the {room}. Blood and scattered remains lay across the floor. Among them, you recognised {victim}; their body had been torn apart. You backed out of the room and hurried to the {destination}.",
+                    source="eyewitness")
+                reports.append((room, corpse.body_id, victim))
+            self.room_assignments[room].remove(guest)
+            if visible:
+                self._arrival_observed_bodies[room].remove(event.body_id)
+                self.project_arrival_departure(room, event.time)
+            self.night_arrivals.destinations[event.body_id] = destination
+            self.room_assignments[destination].append(guest)
+            self.trace_action("arrival_fled_corpse", arrival=event, room=room, destination=destination)
+            room = destination
+        terminal = self.resolve_room_entry_items(
+            f"{self.run_id}:{event.event_id}:entry:{room}", room, {event.body_id}, disclose=visible)
+        self.trace_action("night_arrival_resolved", arrival=event, room=room, observed=visible)
+        if not terminal and self.characters.get(guest, {}).get("alive"):
+            recipients = [self.body_id(name) for name in self.room_assignments[room]
+                          if name != guest and self.characters.get(name, {}).get("alive")]
+            if self.night_arrivals.committed_room == room and self.player_alive:
+                recipients.append(self.body_id(self.player_name))
+            discoverer = self.perceived_name(event.body_id)
+            for original_room, corpse_body_id, victim in reports:
+                for recipient in recipients:
+                    self._arrival_known_corpse_rooms.setdefault(recipient, set()).add(original_room)
+                    self.remember_arrival(
+                        f"{event.event_id}:report:{original_room}:{corpse_body_id}", recipient,
+                        f"At {event.time}, {discoverer} told you what they had found in the {original_room}. They described {victim}'s body torn apart, with blood and scattered remains across the floor.",
+                        source="hearsay", speaker_body_id=event.body_id)
+            self.night_arrival_resolved.emit({"arrival": event, "room": room,
+                                             "corpse_body_ids": tuple(body_id for _, body_id, _ in reports)})
+        self.update_room_button_states()
+        return terminal
+
+    def prepare_room_entry(self, selected_room):
+        """Commit before rewards, finish unseen arrivals, then take the camera snapshot."""
+        state = self.night_arrivals
+        key = (self.round_number, len(self.rooms_visited), selected_room)
+        if key in self._player_entry_receipts:
+            return True
+        if state is not None and state.committed_room is None:
+            state.commit(selected_room)
+        self.update_arrival_controls()
+        self._player_entry_receipts.add(key)
+        if self.resolve_room_entry_items(
+                f"{self.run_id}:night:{self.round_number}:player:{len(self.rooms_visited)}:{selected_room}",
+                selected_room, {self.body_id(self.player_name)}):
+            return False
+        for record in self.item_deaths.values():
+            if (record.day == self.round_number and record.room_id == selected_room
+                    and record.attempt_id not in self._disclosed_item_deaths):
+                label = record.observed_name or self.perceived_name(record.body_id)
+                self.record_history(f"{record.cause.value}: {label} died.", display=True)
+                self._disclosed_item_deaths.add(record.attempt_id)
+        if state is not None and not self._arrival_finalized:
+            for event in state.finish():
+                if self.apply_arrival(event, observed=event.room == selected_room):
+                    return False
+            living = tuple(body.label for body in self.body_states() if body.alive)
+            camera_rooms = {room: list(names) for room, names in self.room_assignments.items()}
+            camera_rooms[selected_room].append(self.player_name)
+            self.npc_items.capture_night(
+                self.round_number, camera_rooms, living,
+                appearance_names={name: self.perceived_actor(name) for name in self.body_ids},
+                body_ids=self.body_ids)
+            self._arrival_finalized = True
+            self.trace_action("arrival_camera_boundary", room=selected_room, assignments=camera_rooms)
+        self.observe_house_room(selected_room, tuple(
+            name for name in self.room_assignments[selected_room]
+            if self.characters.get(name, {}).get("alive")))
+        self.update_arrival_controls()
+        return True
+
+    def project_arrival_departure(self, room, time):
+        records = []
+        for room_id, label in ROOM_LABELS.items():
+            old = self.house_view.observations[room_id]
+            if label == room:
+                names = self.room_actor_labels(room, tuple(
+                    self.label_for_body(body_id) for body_id in self._arrival_observed_bodies[room]))
+                old = replace(old, known_names=names, observed_at=time)
+            records.append(old)
+        self.house_view.set_observations(records)
+
+    def project_arrival(self, event):
+        if event.body_id not in self._arrival_observed_bodies[event.room]:
+            self._arrival_observed_bodies[event.room].append(event.body_id)
+        self.project_arrival_departure(event.room, event.time)
+
     def choose_room(self, selected_room):
         if (self.phase != "action" or self.game_over or self.pending_room_action is not None
-                or selected_room not in self.room_buttons
+                or self._room_choice_in_progress or selected_room not in self.room_buttons
                 or self.room_buttons_widget.isHidden()
                 or not self.room_buttons[selected_room].isEnabled()):
             return
-        self.offer_room_item(selected_room, lambda: self.finish_room_choice(selected_room))
+        self._room_choice_in_progress = True
+        try:
+            if not self.prepare_room_entry(selected_room):
+                return
+            if self.bonus_action_pending:
+                self.finish_room_choice(selected_room)
+            else:
+                self.offer_room_item(selected_room, lambda: self.finish_room_choice(selected_room))
+        finally:
+            self._room_choice_in_progress = False
 
     def finish_room_choice(self, selected_room):
         if (self.phase != "action" or self.game_over or self.pending_room_action is not None
                 or self.room_buttons_widget.isHidden()
                 or not self.room_buttons[selected_room].isEnabled()):
             return
-        if self.resolve_room_entry_items(
-                f"{self.run_id}:night:{self.round_number}:player:{len(self.rooms_visited)}:{selected_room}",
-                selected_room, {self.body_id(self.player_name)}):
+        if not self.prepare_room_entry(selected_room):
             return
         self.record_history(f"\nYou have chosen to stay in the {selected_room}.\n", display=True)
         occupants = [name for name in self.room_assignments[selected_room]
@@ -2980,10 +3192,12 @@ class GameWindow(QMainWindow):
         """Project a complete room fact already disclosed by an action outcome."""
         labels = self.room_actor_labels(
             room, names, include_player=bool(self.rooms_visited and self.rooms_visited[-1] == room))
-        records = tuple(RoomObservation(
-            key, available=button.isEnabled(),
+        records = tuple(replace(
+            self.house_view.observations[key], available=button.isEnabled(),
             known_names=labels if ROOM_LABELS[key] == room else self.house_view.observations[key].known_names,
             unknown_remainder=False if ROOM_LABELS[key] == room else self.house_view.observations[key].unknown_remainder,
+            observed_at=(self.night_arrivals.clock if self.night_arrivals is not None else None)
+                        if ROOM_LABELS[key] == room else self.house_view.observations[key].observed_at,
         ) for key, button in self.house_view.buttons.items())
         self.house_view.set_observations(records)
 
