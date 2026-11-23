@@ -3405,12 +3405,19 @@ class GameWindow(QMainWindow):
         weapon_id = self.selected_weapon["id"]
         panel = QWidget(self)
         panel.setObjectName("weaponAftermath")
+        panel.setMaximumSize(760, 230)
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        panel.setStyleSheet("QWidget#weaponAftermath { background:#0b0b0b; border:1px solid #444; }")
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(18)
         title = QLabel("Leave the weapon behind?")
         title.setFont(self.speaker_font)
+        title.setStyleSheet(f'font-family:"{self.speaker_font.family()}"; font-size:12px; color:#eee; border:none;')
         layout.addWidget(title)
         hint = QLabel("You can ditch a weapon once per run. The Detective will find it in the morning.")
         hint.setFont(readable_body_font())
+        hint.setStyleSheet(f'font-family:"{readable_body_font().family()}"; font-size:18px; color:#bbb; border:none;')
         hint.setWordWrap(True)
         layout.addWidget(hint)
         buttons = QHBoxLayout()
@@ -3418,13 +3425,20 @@ class GameWindow(QMainWindow):
         self.ditch_weapon_button = QPushButton("Ditch weapon")
         for button in (self.keep_weapon_button, self.ditch_weapon_button):
             button.setFont(self.speaker_font)
-            button.setStyleSheet("padding:12px 20px; border:1px solid #999; color:white; background:#111;")
+            button.setCursor(Qt.PointingHandCursor)
+            button.setStyleSheet(f'''
+                QPushButton {{ font-family:"{self.speaker_font.family()}"; font-size:12px;
+                    padding:12px 20px; border:1px solid #666; color:#eee; background:#111; }}
+                QPushButton:hover {{ color:white; border-color:#aaa; background:#1a1a1a; }}
+                QPushButton:focus {{ border-color:white; }}
+            ''')
             buttons.addWidget(button)
         self.keep_weapon_button.clicked.connect(lambda: self.choose_weapon_aftermath(night, body, weapon_id, False))
         self.ditch_weapon_button.clicked.connect(lambda: self.choose_weapon_aftermath(night, body, weapon_id, True))
         layout.addLayout(buttons)
         self.weapon_aftermath_panel = panel
-        self.layout.addWidget(panel)
+        self.layout.addWidget(panel, 0, Qt.AlignCenter)
+        self.message_log.hide()
         self.room_buttons_widget.hide()
         self.weapon_action_panel.hide()
         self.retire_weapon_editors()
@@ -3448,6 +3462,7 @@ class GameWindow(QMainWindow):
         self.layout.removeWidget(panel)
         panel.hide()
         panel.deleteLater()
+        self.message_log.show()
         self.complete_night_aftermath()
 
     def complete_night_aftermath(self):
