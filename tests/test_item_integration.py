@@ -20,7 +20,7 @@ from PyQt5 import sip
 from PyQt5.QtCore import QCoreApplication, QEvent, QPoint, Qt
 from PyQt5.QtTest import QTest
 from PyQt5.QtGui import QFont, QFontInfo
-from PyQt5.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QTextEdit
+from PyQt5.QtWidgets import QApplication, QComboBox, QDialog, QLabel, QPushButton, QTextEdit
 
 import main as game
 from content import CONTENT_CATALOGUE
@@ -221,6 +221,124 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.room_buttons["Cellar"].isEnabled())
         self.assertEqual(sum(record.text == "You left the items behind."
                              for record in self.window.history_records), 1)
+
+    def test_preexisting_weapon_editors_cannot_save_after_room_action_is_accepted(self):
+        editors = (("knife", self.window.open_knife_dialog),
+                   ("pen", self.window.open_pen_editor),
+                   ("blackmagic", self.window.open_blackmagic_dialog),
+                   ("c4", self.window.open_c4_dialog))
+
+        def configuration():
+            return (self.window.pending_pen_note_text, self.window.black_magic_controller,
+                    self.window.black_magic_target, self.window.knife_extra_target,
+                    self.window.knife_used_bloodlust, self.window.c4_target_room)
+
+        for weapon_id, open_editor in editors:
+            with self.subTest(weapon=weapon_id):
+                self.window.show_weapon_select_screen()
+                for character in self.window.characters.values():
+                    character["alive"] = True
+                self.night(weapon_id)
+                if weapon_id == "pen":
+                    self.window.pending_pen_note_text = "Accepted note"
+                elif weapon_id == "blackmagic":
+                    self.window.black_magic_controller, self.window.black_magic_target = "Dave", "Hank"
+                elif weapon_id == "c4":
+                    self.window.c4_target_room = "Kitchen"
+                self.window.apply_weapon_gating()
+                open_editor()
+                editor = self.window._weapon_windows[weapon_id]
+                if weapon_id == "pen":
+                    editor.findChild(QTextEdit).setPlainText("Unsaved replacement")
+                else:
+                    boxes = editor.findChildren(QComboBox)
+                    boxes[-1].setCurrentText("Hank" if weapon_id == "knife"
+                                             else "Jerry" if weapon_id == "blackmagic" else "Cellar")
+                save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Save")
+                before = configuration()
+                QTest.mouseClick(self.window.room_buttons["Basement"], Qt.LeftButton)
+                offer = self.window.item_drafts.pending_offer
+                self.assertIsNotNone(offer)
+                self.assertIsNotNone(self.window.pending_room_action)
+                history = tuple(self.window.history_records)
+                save.click()
+                self.assertEqual(configuration(), before)
+                self.assertEqual(tuple(self.window.history_records), history)
+                self.assertIs(self.window.item_drafts.pending_offer, offer)
+                self.assertTrue(editor.isHidden())
+                self.assertIsNone(self.window._weapon_windows[weapon_id])
+                self.assertTrue(self.window.weapon_action_panel.isHidden())
+                self.assertTrue(all(not button.isEnabled() for button in self.window.room_buttons.values()))
+                self.window.build_weapon_action_panel()
+                self.assertTrue(self.window.weapon_action_panel.isHidden())
+                self.settle_offer()
+                resolved = configuration()
+                history = tuple(self.window.history_records)
+                save.click()
+                self.assertEqual(configuration(), resolved)
+                self.assertEqual(tuple(self.window.history_records), history)
+                self.assertEqual(self.window.rooms_visited, ["Basement"])
+                self.assertEqual(self.window.inventory.entries, ())
+                self.window.show_weapon_select_screen()
+                self.night(weapon_id)
+                open_editor()
+                replacement = self.window._weapon_windows[weapon_id]
+                self.assertIsNot(replacement, editor)
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+                self.assertTrue(sip.isdeleted(editor))
+                self.assertIs(self.window._weapon_windows[weapon_id], replacement)
+                replacement.close()
+
+    def test_weapon_editor_saves_still_configure_current_unaccepted_action(self):
+        editors = (("knife", self.window.open_knife_dialog),
+                   ("pen", self.window.open_pen_editor),
+                   ("blackmagic", self.window.open_blackmagic_dialog),
+                   ("c4", self.window.open_c4_dialog))
+        for weapon_id, open_editor in editors:
+            with self.subTest(weapon=weapon_id):
+                self.window.show_weapon_select_screen()
+                self.night(weapon_id)
+                self.window.apply_weapon_gating()
+                open_editor()
+                editor = self.window._weapon_windows[weapon_id]
+                if weapon_id == "pen":
+                    editor.findChild(QTextEdit).setPlainText("Current note")
+                else:
+                    boxes = editor.findChildren(QComboBox)
+                    if weapon_id == "blackmagic":
+                        boxes[0].setCurrentText("Dave")
+                    boxes[-1].setCurrentText("Kitchen" if weapon_id == "c4" else "Hank")
+                save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Save")
+                QTest.mouseClick(save, Qt.LeftButton)
+                self.assertTrue(editor.isHidden())
+                self.assertTrue(self.window.room_buttons["Basement"].isEnabled())
+                if weapon_id == "pen":
+                    self.assertEqual(self.window.pending_pen_note_text, "Current note")
+                elif weapon_id == "blackmagic":
+                    self.assertEqual((self.window.black_magic_controller, self.window.black_magic_target),
+                                     ("Dave", "Hank"))
+                elif weapon_id == "knife":
+                    self.assertEqual(self.window.knife_extra_target, "Hank")
+                    self.assertTrue(self.window.knife_used_bloodlust)
+                else:
+                    self.assertEqual(self.window.c4_target_room, "Kitchen")
+
+    def test_room_acceptance_retires_editor_when_room_has_no_new_reward(self):
+        self.night("knife")
+        previous = self.window.item_drafts.enter_room("Basement")
+        self.window.item_drafts.skip(previous.offer_id)
+        self.window.open_knife_dialog()
+        editor = self.window._weapon_windows["knife"]
+        editor.findChild(QComboBox).setCurrentText("Hank")
+        save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Save")
+        QTest.mouseClick(self.window.room_buttons["Basement"], Qt.LeftButton)
+        self.assertIsNone(self.window.draft_page)
+        self.assertIsNone(self.window.pending_room_action)
+        self.assertEqual(self.window.rooms_visited, ["Basement"])
+        self.assertTrue(editor.isHidden())
+        save.click()
+        self.assertIsNone(self.window.knife_extra_target)
+        self.assertFalse(self.window.knife_used_bloodlust)
 
     def test_offer_reroll_invalidates_old_buttons_and_only_spends_with_alternative(self):
         self.night()

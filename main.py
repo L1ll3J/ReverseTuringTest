@@ -357,6 +357,7 @@ class GameWindow(QMainWindow):
         if self.phase != "action" or self.game_over or self.pending_room_action is not None:
             return
         offer = self.item_drafts.enter_room(room) if self.item_drafts else None
+        self.retire_weapon_editors()
         if offer is None:
             continuation()
             return
@@ -1916,6 +1917,9 @@ class GameWindow(QMainWindow):
 
     def build_weapon_action_panel(self):
         """Right-side card for the currently equipped weapon during Action Phase."""
+        if self.phase != "action" or self.game_over or self.pending_room_action is not None:
+            self.weapon_action_panel.hide()
+            return
         # clear panel
         lay = self.weapon_action_panel.layout()
         while lay.count():
@@ -2093,6 +2097,25 @@ class GameWindow(QMainWindow):
         self.position_weapon_panel()
 
     # Weapon-gating logic
+    def can_configure_weapon(self, weapon_id, editor=None, night=None):
+        """Only current setup may change before a room action is accepted."""
+        return (self.phase == "action" and not self.game_over
+                and self.pending_room_action is None
+                and (self.selected_weapon or {}).get("id") == weapon_id
+                and (editor is None or (self._weapon_windows.get(weapon_id) is editor
+                                        and night == self.round_number)))
+
+    def retire_weapon_editors(self):
+        for weapon_id, editor in tuple(self._weapon_windows.items()):
+            if editor is not None:
+                self._weapon_windows[weapon_id] = None
+                editor.close()
+                editor.deleteLater()
+
+    def forget_weapon_editor(self, weapon_id, editor):
+        if self._weapon_windows.get(weapon_id) is editor:
+            self._weapon_windows[weapon_id] = None
+
     def weapon_is_mandatory(self):
         wpn = getattr(self, "selected_weapon", None)
         if not wpn:
@@ -3518,7 +3541,7 @@ class GameWindow(QMainWindow):
 
     # Weapon-specific windows
     def open_pen_editor(self):
-        if self.pending_room_action is not None:
+        if not self.can_configure_weapon("pen"):
             return
         if self._weapon_windows.get("pen") and self._weapon_windows["pen"].isVisible():
             self._weapon_windows["pen"].raise_()
@@ -3529,12 +3552,13 @@ class GameWindow(QMainWindow):
         fams = QFontDatabase.applicationFontFamilies(font_id)
         font_family = fams[0] if fams else "Sans-Serif"
 
+        editor_night = self.round_number
         w = QWidget(self)
         w.setWindowFlags(Qt.FramelessWindowHint)
         w.setAttribute(Qt.WA_StyledBackground, True)
         w.setStyleSheet("background-color:#2A2A2A;")
         self._weapon_windows["pen"] = w
-        w.destroyed.connect(lambda: self._weapon_windows.__setitem__("pen", None))
+        w.destroyed.connect(lambda: self.forget_weapon_editor("pen", w))
 
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -3582,6 +3606,8 @@ class GameWindow(QMainWindow):
         save.setCursor(Qt.PointingHandCursor)
         save.setStyleSheet("background-color:#2e7d32;color:white;padding:8px 16px;border-radius:8px; font-size:15px;")
         def do_save():
+            if not self.can_configure_weapon("pen", w, editor_night):
+                return
             txt = edit.toPlainText().strip()
             self.pending_pen_note_text = txt if txt else None
             self.record_history(f"You prepared a forged note: {txt}" if txt else "You cleared your prepared note.")
@@ -3616,7 +3642,7 @@ class GameWindow(QMainWindow):
         w.raise_()
 
     def open_blackmagic_dialog(self):
-        if self.pending_room_action is not None:
+        if not self.can_configure_weapon("blackmagic"):
             return
         if self._weapon_windows.get("blackmagic") and self._weapon_windows["blackmagic"].isVisible():
             self._weapon_windows["blackmagic"].raise_()
@@ -3629,12 +3655,13 @@ class GameWindow(QMainWindow):
 
         alive = [c for c in self.characters if self.characters[c]["alive"]]
 
+        editor_night = self.round_number
         w = QWidget(self)
         w.setWindowFlags(Qt.FramelessWindowHint)
         w.setAttribute(Qt.WA_StyledBackground, True)
         w.setStyleSheet("background-color:#2A2A2A;")
         self._weapon_windows["blackmagic"] = w
-        w.destroyed.connect(lambda: self._weapon_windows.__setitem__("blackmagic", None))
+        w.destroyed.connect(lambda: self.forget_weapon_editor("blackmagic", w))
         outer = QVBoxLayout(w); outer.setContentsMargins(0,0,0,0); outer.setSpacing(0)
 
         # Header (same style as your other windows)
@@ -3708,6 +3735,8 @@ class GameWindow(QMainWindow):
         save.setCursor(Qt.PointingHandCursor)
         save.setStyleSheet("background-color:#2e7d32;color:white;padding:8px 16px;border-radius:8px; font-size:16px;")
         def do_save():
+            if not self.can_configure_weapon("blackmagic", w, editor_night):
+                return
             c, t = ctrl.currentText(), tgt.currentText()
             if c and t and c != t:
                 self.black_magic_controller, self.black_magic_target = c, t
@@ -3744,7 +3773,7 @@ class GameWindow(QMainWindow):
         w.raise_()
 
     def open_knife_dialog(self):
-        if self.pending_room_action is not None:
+        if not self.can_configure_weapon("knife"):
             return
         if self._weapon_windows.get("knife") and self._weapon_windows["knife"].isVisible():
             self._weapon_windows["knife"].raise_()
@@ -3752,11 +3781,12 @@ class GameWindow(QMainWindow):
             return
         
         alive = [c for c in self.characters if self.characters[c]["alive"]]
+        editor_night = self.round_number
         w = QWidget(self); w.setWindowFlags(Qt.FramelessWindowHint)
         w.setAttribute(Qt.WA_StyledBackground, True)
         w.setStyleSheet("background-color:#2A2A2A;")
         self._weapon_windows["knife"] = w
-        w.destroyed.connect(lambda: self._weapon_windows.__setitem__("knife", None))
+        w.destroyed.connect(lambda: self.forget_weapon_editor("knife", w))
         outer = QVBoxLayout(w); outer.setContentsMargins(0,0,0,0)
 
         # Header
@@ -3798,6 +3828,8 @@ class GameWindow(QMainWindow):
         save = QPushButton("Save")
         save.setStyleSheet("background:#2e7d32;color:white;padding:8px 16px;border-radius:8px; font-size:16px;")
         def do_save():
+            if not self.can_configure_weapon("knife", w, editor_night):
+                return
             choice = victim.currentText()
             if choice == "(none)":
                 self.knife_extra_target = None
@@ -3831,7 +3863,7 @@ class GameWindow(QMainWindow):
         w.show(); w.raise_()
 
     def open_c4_dialog(self):
-        if self.pending_room_action is not None:
+        if not self.can_configure_weapon("c4"):
             return
         if self._weapon_windows.get("c4") and self._weapon_windows["c4"].isVisible():
             self._weapon_windows["c4"].raise_()
@@ -3841,11 +3873,12 @@ class GameWindow(QMainWindow):
         # Planting is mandatory (unless on cooldown)
         rooms = list(self.rooms.keys()) if isinstance(self.rooms, dict) else list(self.rooms)
 
+        editor_night = self.round_number
         w = QWidget(self); w.setWindowFlags(Qt.FramelessWindowHint)
         w.setAttribute(Qt.WA_StyledBackground, True)
         w.setStyleSheet("background-color:#2A2A2A;")
         self._weapon_windows["c4"] = w
-        w.destroyed.connect(lambda: self._weapon_windows.__setitem__("c4", None))
+        w.destroyed.connect(lambda: self.forget_weapon_editor("c4", w))
         outer = QVBoxLayout(w); outer.setContentsMargins(0,0,0,0)
 
         header = QWidget()
@@ -3889,6 +3922,8 @@ class GameWindow(QMainWindow):
         save = QPushButton("Save")
         save.setStyleSheet("background:#2e7d32;color:white;padding:8px 16px;border-radius:8px; font-size:16px;")
         def do_save():
+            if not self.can_configure_weapon("c4", w, editor_night):
+                return
             sel = room_box.currentText().strip()
             if sel:
                 self.c4_target_room = sel
