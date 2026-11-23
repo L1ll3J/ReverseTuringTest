@@ -10,7 +10,7 @@ from progression import ProfileError
 
 class ItemCataloguePanel(QWidget):
     def __init__(self, definitions, profile, unlock_goals, on_toggle, body_font,
-                 parent=None, *, icon_root=None):
+                 parent=None, *, icon_root=None, title_font=None):
         super().__init__(parent)
         self.setObjectName("itemCataloguePanel")
         self.setFont(body_font)
@@ -26,6 +26,7 @@ class ItemCataloguePanel(QWidget):
         self._unlock_goals = dict(unlock_goals)
         self._on_toggle = on_toggle
         self._body_font = QFont(body_font)
+        self._title_font = QFont(title_font) if title_font is not None else None
         self._icon_root = icon_root
         self._profile = profile
         self.checkboxes = {}
@@ -83,9 +84,15 @@ class ItemCataloguePanel(QWidget):
             details = QVBoxLayout()
             name = self._label(definition.name)
             name.setObjectName(f"itemName_{item_id}")
-            name_font = QFont(self._body_font)
-            name_font.setBold(True)
+            name_font = QFont(self._title_font or self._body_font)
+            if self._title_font is None:
+                name_font.setBold(True)
             name.setFont(name_font)
+            if self._title_font is not None:
+                size = (f"{name_font.pixelSize()}px" if name_font.pixelSize() > 0
+                        else f"{name_font.pointSizeF()}pt")
+                name.setStyleSheet(f'font-family: "{name_font.family()}"; '
+                                  f'font-size: {size};')
             details.addWidget(name)
             description = self._label(definition.description)
             description.setObjectName(f"itemDescription_{item_id}")

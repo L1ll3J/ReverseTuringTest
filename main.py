@@ -25,7 +25,7 @@ from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
 from item_ui import InlineItemDraftPage, InventoryPage
 from item_catalogue_ui import ItemCataloguePanel
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea
+from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea, QStyle, QStyleOptionButton
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
 from PyQt5.QtGui import QColor, QTextCursor, QTextCharFormat, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
@@ -204,7 +204,7 @@ class GameWindow(QMainWindow):
         self.vote_snapshot = None
 
         # Set a consistent window size
-        self.setFixedSize(800, 600)
+        self.resize(800, 600)
 
         #WEAPONS
         self.selected_weapon = None           
@@ -1052,29 +1052,16 @@ class GameWindow(QMainWindow):
         screen_width = screen_size.width()
 
         
-        # Set the font size based on the screen width
-        # Adjust this formula as needed for better scaling
-        font_size = max(24, int(screen_width * 0.07))
-        
-
         # Title of the game
         self.title_label = QLabel("AlibAi", self)
         self.title_label.setAlignment(Qt.AlignCenter)  # Center the title text
-        self.title_label.setStyleSheet(f"""
-            QLabel {{
-                font-family: 'Press Start 2P';
-                font-size: {font_size}px;  /* Increase the font size for prominence */
-                color: white;
-                padding-bottom: 2px;  /* Add some space below the title */
-            }}
-        """)
 
         # Input field for player's name
         self.player_name_label = QLabel(self)
         self.player_name_label.setText("Enter your name:")
         self.player_name_label.setFixedHeight(40)
         self.player_name_label.setAlignment(Qt.AlignCenter)
-        self.player_name_label.setStyleSheet(f"font-size: {int(24*screen_width/2560)}px; color: #DCDCDC;")  # Increase the label size
+        self.player_name_label.setStyleSheet("font-size: 18px; color: #DCDCDC;")
 
         self.player_name_input = QLineEdit(self)
         self.player_name_input.setFixedHeight(40)  # Increase the height of the input field
@@ -1103,21 +1090,10 @@ class GameWindow(QMainWindow):
 
         # Toggle button for game difficulty (Normal/Super Hard)
         self.difficulty_button = QPushButton("Mode: Normal", self)
-        self.difficulty_button.setFixedHeight(100)  # Increase the button size
-        self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: #8CFF9E")
         self.difficulty_button.clicked.connect(self.toggle_mode)
 
         # Button to start the game
         self.start_button = QPushButton('Start Game!', self)
-        self.start_button.setFixedHeight(100)  # Increase the button size
-        self.start_button.setStyleSheet(f"""
-            QPushButton{{
-            font-size: {start_buttons_font_size}px; padding: 10px; color: white
-            }}
-            QPushButton:hover {{
-                color: #808080;
-            }}
-            """)
         self.start_button.clicked.connect(self.start_game)
 
         # Buttons for rooms in action phase
@@ -1425,9 +1401,21 @@ class GameWindow(QMainWindow):
         self.start_layout.addLayout(self.player_name_layout)
         self.start_layout.addWidget(self.difficulty_button)
         self.start_layout.addWidget(self.start_button)
-        self.start_layout.setContentsMargins(50, 50, 50, 50)  # Adjust the spacing around the layout
+        self.start_layout.setContentsMargins(24, 16, 24, 16)
+        self.start_layout.setSpacing(16)
+        self.play_content = QWidget()
+        self.play_content.setMaximumWidth(1000)
+        self.play_content.setLayout(self.start_layout)
         self.play_page = QWidget()
-        self.play_page.setLayout(self.start_layout)
+        play_layout = QVBoxLayout(self.play_page)
+        play_layout.setContentsMargins(0, 0, 0, 0)
+        play_layout.addStretch()
+        play_row = QHBoxLayout()
+        play_row.addStretch()
+        play_row.addWidget(self.play_content, 1)
+        play_row.addStretch()
+        play_layout.addLayout(play_row)
+        play_layout.addStretch()
         self.menu_widget = QWidget()
         menu_layout = QVBoxLayout(self.menu_widget)
         menu_layout.setContentsMargins(0, 10, 0, 0)
@@ -1435,9 +1423,11 @@ class GameWindow(QMainWindow):
         tabs.addStretch()
         self.play_tab_button = QPushButton("Play", self.menu_widget)
         self.items_tab_button = QPushButton("Items", self.menu_widget)
-        tab_style = f'''QPushButton {{ font-family: "{body_family}"; font-size: 18px;
-            padding: 8px 22px; color: #bbb; border: 1px solid #333; }}
-            QPushButton:checked {{ color: white; background: #222; border-color: #777; }}'''
+        tab_style = f'''QPushButton {{ font-family: "{font_family}"; font-size: 14px;
+            padding: 12px 22px; color: #aaa; background: black; border: none;
+            border-bottom: 2px solid transparent; }}
+            QPushButton:checked {{ color: white; border-bottom-color: white; }}
+            QPushButton:hover, QPushButton:focus {{ color: white; background: #222; }}'''
         for button in (self.play_tab_button, self.items_tab_button):
             button.setCheckable(True)
             button.setAutoExclusive(True)
@@ -1452,7 +1442,8 @@ class GameWindow(QMainWindow):
         self.menu_stack.addWidget(self.play_page)
         self.item_catalogue = ItemCataloguePanel(
             ITEM_CATALOGUE, self.profile, UNLOCK_GOALS, self.set_menu_item_enabled,
-            body_font, self.menu_widget, icon_root=resource_path("icons/items"))
+            body_font, self.menu_widget, icon_root=resource_path("icons/items"),
+            title_font=self.speaker_font)
         self.menu_stack.addWidget(self.item_catalogue)
         menu_layout.addLayout(self.menu_stack, 1)
 
@@ -1517,7 +1508,7 @@ class GameWindow(QMainWindow):
         self.how_to_play_button = QPushButton("How to Play", self)
         self.how_to_play_button.setStyleSheet(f"""
             QPushButton{{
-            font-size: {int(start_buttons_font_size/2)}px; padding: 10px; color: white;
+            font-size: 14px; padding: 10px; color: white;
             background-color: rgba(0, 0, 0, 0);
             }}
             QPushButton:hover {{
@@ -1558,7 +1549,6 @@ class GameWindow(QMainWindow):
         self.update_mute_button_icon()
         self.mute_button.clicked.connect(self.toggle_mute)
         self.mute_button.setGeometry(0, button_y, button_width // 2, button_height)
-        self.mute_button.setIconSize(QSize(64, 64))
         self.mute_button.show()
 
         self.showFullScreen()  # Make the window fullscreen
@@ -1593,7 +1583,24 @@ class GameWindow(QMainWindow):
         # Configure the output area
         self.output_area.setStyleSheet(f'background-color: #1E1E1E; color: #E0E0E0; border: none; font-family: "{body_family}"; font-size: 18px; padding-left: 16px; padding-right: 24px;')
         self.setStyleSheet(f"color: white; background-color: black; font-family: {font_family};")
+        self.resize_menu_content()
         self.position_corner_controls()
+
+    def resize_menu_content(self):
+        if not hasattr(self, "play_content"):
+            return
+        available_width = min(1000, max(1, self.width() - 32))
+        title_size = max(24, min(144, int(available_width * 0.09), int(self.height() * 0.12)))
+        self.title_label.setStyleSheet(
+            f'font-family: "{self.pixel_font_family}"; font-size: {title_size}px; color: white; padding-bottom: 2px;')
+        control_size = max(16, min(32, int(available_width * 0.026), int(self.height() * 0.045)))
+        control_height = max(50, min(84, int(self.height() * 0.08)))
+        mode_color = "#8CFF9E" if self.show_room_allocations else "#EF5350"
+        for button, color in ((self.difficulty_button, mode_color), (self.start_button, "white")):
+            button.setFixedHeight(control_height)
+            button.setStyleSheet(
+                f'QPushButton {{ font-size: {control_size}px; padding: 10px; color: {color}; border: none; }} '
+                'QPushButton:hover, QPushButton:focus { background: #222; }')
 
     def position_corner_controls(self):
         if not hasattr(self, "how_to_play_button") or not hasattr(self, "mute_button"):
@@ -1601,9 +1608,24 @@ class GameWindow(QMainWindow):
         width = min(max(int(self.width() * 0.15), self.how_to_play_button.sizeHint().width(),
                         self.transcript_button.sizeHint().width()), max(1, self.width() - 20))
         height = max(int(width * 0.35), self.how_to_play_button.sizeHint().height())
+        if self.phase == "start":
+            width = max(self.how_to_play_button.sizeHint().width(), min(220, width))
+            height = max(48, self.how_to_play_button.sizeHint().height())
         for button in (self.how_to_play_button, self.transcript_button):
             button.setGeometry(self.width() - width - 10, 10, width, height)
         self.mute_button.setGeometry(0, 10, width // 2, height)
+        mute_option = QStyleOptionButton()
+        self.mute_button.initStyleOption(mute_option)
+        mute_contents = self.mute_button.style().subElementRect(
+            QStyle.SE_PushButtonContents, mute_option, self.mute_button)
+        icon_size = max(1, min(64, mute_contents.width(), mute_contents.height()))
+        self.mute_button.setIconSize(QSize(icon_size, icon_size))
+        if self.phase == "start":
+            controls = (self.how_to_play_button, self.transcript_button, self.mute_button)
+            bottom = max((button.geometry().bottom() + 1 for button in controls
+                          if not button.isHidden()), default=0)
+            top = max(10, self.menu_widget.mapFrom(self, QPoint(0, bottom + 12)).y())
+            self.menu_widget.layout().setContentsMargins(0, top, 0, 0)
         if self.draft_page is not None:
             controls = (self.how_to_play_button, self.transcript_button, self.mute_button)
             bottom = max((button.geometry().bottom() + 1 for button in controls
@@ -1816,19 +1838,14 @@ class GameWindow(QMainWindow):
             self.effect_player.play()
 
     def toggle_mode(self):
-        screen = QGuiApplication.primaryScreen()  # Get the primary screen
-        screen_size = screen.size()  # Get screen size
-        screen_width = screen_size.width()
-        start_buttons_font_size = max(int(50*(screen_width/2560)), 37)
         # Toggle between Normal and Super Hard modes
         if self.show_room_allocations:
             self.difficulty_button.setText("Mode: Super Hard")
             self.show_room_allocations = False
-            self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: #EF5350")
         else:
             self.difficulty_button.setText("Mode: Coward")
             self.show_room_allocations = True
-            self.difficulty_button.setStyleSheet(f"font-size: {start_buttons_font_size}px; padding: 10px; color: #8CFF9E")
+        self.resize_menu_content()
 
     def start_game(self):
         if self.phase != "start":
@@ -2215,6 +2232,7 @@ class GameWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.resize_menu_content()
         self.position_corner_controls()
         self.position_weapon_panel()
 
