@@ -79,6 +79,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window = game.GameWindow()
         self.window.player_name_input.setText("Alex")
         self.window.start_game()
+        self.window.rooms_visited = []
         self.stack.enter_context(patch.object(self.window, "run_conversation_loop"))
         self.stack.enter_context(patch.object(self.window, "finish_night", side_effect=
             keep_completed_night_weapon(self.window, self.window.finish_night)))
