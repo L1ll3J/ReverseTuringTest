@@ -227,3 +227,24 @@ Subject: A folded ivory court writ held by a deep blue wax seal with a small sil
 ```text
 Subject: A charming old brass house-room key with a long shaped bow and a blank muted-plum enamel tag, one small ivory door-shaped inlay on the tag, no numbers or writing.
 ```
+
+
+## Ominous replacements after playtest feedback
+
+Generated with the built-in `image_gen` tool using `transparent_background=true`. Each existing sprite was edited separately. The returned PNGs were copied unchanged; originals remain in the generated-image directory. These replacements remove the gendered portrait from Dark Whisper and the cheerful heart motif from Love Potion.
+
+### dark_whisper.png (replacement)
+
+Source: `C:/Users/Josh/.codex/generated_images/01a2048b-9a4a-7631-b641-942c692efb20/exec-b57c7c24-8ab8-4e46-9ee0-7425477e04f5.png`
+
+```text
+Use case: precise-object-edit. Edit this Dark Whisper inventory sprite. Preserve the beautifully crafted open tarnished-silver locket, centered composition, midnight-teal palette, detailed deliberate pixel-art material work and transparent background. Remove the woman's portrait completely, including every recognizable face, head, hair silhouette and human profile in the vapor. Make its interior an ominous empty ink-dark recess with a restrained thin curl of pale silver-teal whisper-mist escaping from it. Suggest an unseen presence without depicting a person, skull, eyes, ghost mascot or gender. The result should feel mysterious and beautiful, not cute or cartoony. Maintain a strong compact silhouette at64px, crisp square pixel clusters, no text, surrounding scene or opaque background.
+```
+
+### love_potion.png (replacement)
+
+Source: `C:/Users/Josh/.codex/generated_images/01a2048b-9a4a-7631-b641-942c692efb20/exec-d6d3683d-4b32-4aa8-bc67-ad789b723bd2.png`
+
+```text
+Use case: precise-object-edit. Refine this Love Potion inventory sprite into a more ominous, less sweet magical object while preserving its beautifully drawn faceted glass vial, coherent silhouette, centered composition and transparent background. Shift bright candy pink glass toward deep ruby-wine and muted plum, with dark crimson liquid, restrained warm light through the facets and aged brass rather than shiny cheerful gold. Remove the obvious heart emblem and replace it with a subtle intertwined ornamental motif in the brass collar. Keep the item elegant, tactile and evocative, with deliberate crisp pixel clusters and readability at64px. This is an instantly targeted magical charm in the game: show only the potion object, with no throwing, spraying, drinking figure or delivery animation. No skull, cute face, cartoon sparkles, text, scene, frame or opaque background.
+```
