@@ -9,13 +9,16 @@ from items import DraftState, Inventory, InventoryError, eligible_item_pool
 
 class InventoryTests(unittest.TestCase):
     def test_default_pool_cannot_be_disabled_and_unlocks_require_permission(self):
-        defaults = ("banana", "muffle", "spare_paper")
+        defaults = ("banana", "muffle", "spare_paper", "throw_voice", "dark_whisper", "forged_note",
+                    "divine_revelation", "mail_in_ballot", "watch_this_drive", "lucky_match", "deep_pockets",
+                    "pocket_gavel", "listening_glass", "stay_of_execution")
+        with_guardian = (*defaults[:3], "guardian_angel", *defaults[3:])
         self.assertEqual(eligible_item_pool(), defaults)
         self.assertEqual(eligible_item_pool((), ("guardian_angel",)), defaults)
         self.assertEqual(eligible_item_pool(("guardian_angel",), ()), defaults)
-        self.assertEqual(eligible_item_pool(("guardian_angel",)), (*defaults, "guardian_angel"))
+        self.assertEqual(eligible_item_pool(("guardian_angel",)), with_guardian)
         self.assertEqual(eligible_item_pool(("guardian_angel", "future_item"), ("guardian_angel",)),
-                         (*defaults, "guardian_angel"))
+                         with_guardian)
 
     def test_inventory_hoards_distinct_instances_without_auto_activation(self):
         inventory = Inventory("player")
@@ -98,7 +101,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(drafts.rerolls_remaining, 0)
 
     def test_exhausted_pool_does_not_spend_reroll_or_change_offer(self):
-        drafts = DraftState("player", eligible_item_pool(), random.Random(6))
+        drafts = DraftState("player", ("banana", "muffle", "spare_paper"), random.Random(6))
         offer = drafts.enter_room("Kitchen")
         with self.assertRaises(InventoryError):
             drafts.reroll(offer.offer_id, 0)
@@ -133,6 +136,86 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(inventory.entries, ())
         self.assertEqual(other.entries, ())
         self.assertIs(drafts.pending_offer, offer)
+        self.assertEqual(drafts.rerolls_remaining, 1)
+
+    def test_extra_pick_has_two_distinct_choices_and_invalidates_each_previous_offer(self):
+        drafts = DraftState("player", eligible_item_pool(("guardian_angel",)), random.Random(9))
+        inventory = Inventory("player")
+        drafts.arm_extra_pick()
+        self.assertTrue(drafts.extra_pick_armed)
+        with self.assertRaises(InventoryError):
+            drafts.arm_extra_pick()
+        first = drafts.enter_room("Kitchen")
+        self.assertEqual(first.picks_remaining, 2)
+        self.assertFalse(drafts.extra_pick_armed)
+        taken = drafts.choose(first.offer_id, 1, inventory)
+        second = drafts.pending_offer
+        self.assertIsNotNone(second)
+        self.assertNotEqual(second.offer_id, first.offer_id)
+        self.assertEqual(second.picks_remaining, 1)
+        self.assertEqual(second.picked_item_ids, (taken.item_id,))
+        self.assertNotIn(taken.item_id, second.options)
+        for operation in (lambda: drafts.choose(first.offer_id, 0, inventory),
+                          lambda: drafts.reroll(first.offer_id, 0),
+                          lambda: drafts.skip(first.offer_id)):
+            with self.assertRaises(InventoryError):
+                operation()
+        rerolled = drafts.reroll(second.offer_id, 0)
+        self.assertNotIn(taken.item_id, rerolled.options)
+        self.assertEqual(rerolled.picks_remaining, 1)
+        other = drafts.choose(rerolled.offer_id, 0, inventory)
+        self.assertNotEqual(taken.item_id, other.item_id)
+        self.assertEqual(inventory.entries, (taken, other))
+        self.assertIsNone(drafts.pending_offer)
+        self.assertIsNone(drafts.enter_room("Kitchen"))
+        self.assertEqual(drafts.enter_room("Library").picks_remaining, 1)
+
+    def test_extra_pick_can_be_skipped_after_one_and_cannot_restore_the_first_offer(self):
+        drafts = DraftState("player", ("banana", "muffle", "spare_paper"), random.Random(10))
+        inventory = Inventory("player")
+        drafts.arm_extra_pick()
+        offer = drafts.enter_room("Kitchen")
+        first = drafts.choose(offer.offer_id, 0, inventory)
+        remaining = drafts.pending_offer
+        # Already selected items cannot reappear as reroll alternatives.
+        with self.assertRaises(InventoryError):
+            drafts.reroll(remaining.offer_id, 0)
+        self.assertEqual(drafts.rerolls_remaining, 1)
+        drafts.skip(remaining.offer_id)
+        self.assertEqual(inventory.entries, (first,))
+        self.assertIsNone(drafts.pending_offer)
+        self.assertIsNone(drafts.enter_room("Kitchen"))
+
+    def test_extra_pick_arms_for_a_new_offer_and_requires_two_pool_items(self):
+        small = DraftState("player", ("banana",))
+        with self.assertRaises(InventoryError):
+            small.arm_extra_pick()
+        self.assertFalse(small.extra_pick_armed)
+        drafts = DraftState("player", eligible_item_pool(), random.Random(11))
+        current = drafts.enter_room("Kitchen")
+        drafts.arm_extra_pick()
+        self.assertEqual(current.picks_remaining, 1)
+        drafts.skip(current.offer_id)
+        self.assertIsNone(drafts.enter_room("Kitchen"))
+        self.assertTrue(drafts.extra_pick_armed)
+        self.assertEqual(drafts.enter_room("Library").picks_remaining, 2)
+
+    def test_added_reroll_charges_can_be_spent_without_reopening_a_room(self):
+        drafts = DraftState("player", eligible_item_pool(("guardian_angel",)), random.Random(12))
+        offer = drafts.enter_room("Kitchen")
+        for count in (0, -1, True, 1.5, "1"):
+            with self.assertRaises(InventoryError):
+                drafts.add_rerolls(count)
+        self.assertEqual(drafts.rerolls_remaining, 1)
+        drafts.add_rerolls(2)
+        for _ in range(3):
+            offer = drafts.reroll(offer.offer_id, 0)
+        self.assertEqual(drafts.rerolls_remaining, 0)
+        with self.assertRaises(InventoryError):
+            drafts.reroll(offer.offer_id, 0)
+        drafts.skip(offer.offer_id)
+        drafts.add_rerolls()
+        self.assertIsNone(drafts.enter_room("Kitchen"))
         self.assertEqual(drafts.rerolls_remaining, 1)
 
 
