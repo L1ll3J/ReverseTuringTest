@@ -21,7 +21,7 @@ from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, DeathCause, ItemUseContext, NightMemoryView, PlayerItemRules, ItemRuleError, GUARDIAN_PUBLIC
 from identity_state import IdentityState
 from love_potion import LoveDose, LovePotionHistory
-from muffled import muffled_sound
+from muffled import TONES, TONE_LABELS, muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
 from item_ui import InlineItemDraftPage, InventoryPage
@@ -344,6 +344,7 @@ class GameWindow(QMainWindow):
         self.retry_action = None
         self.required_reply_anchor = None
         self.prepared_retry_snapshot = None
+        self.cancel_dictation()
         self.interject_input.clear()
         self.retire_weapon_editors()
         self.pending_pen_note_text = None
@@ -361,6 +362,7 @@ class GameWindow(QMainWindow):
                                 or self.body_weapons.pop(target_body_id, None)
                                 or next(weapon for weapon in self.weapons if weapon["id"] == "bare"))
         self.stopwatch_selected = self.selected_weapon["id"] == "stopwatch"
+        self.refresh_recipient_choices()
         self.trace_action("identity_changed", previous_body=old_label, current_body=target.label)
         return new_state
 
@@ -752,6 +754,7 @@ class GameWindow(QMainWindow):
                 target = f" on {recipient}" if recipient is not None and recipient != self.player_name else ""
                 self.record_history(f"You used {item_name}{target}.")
 
+        self.update_muffled_player_controls()
         return death_applied
 
     def apply_delayed_item_resolution(self, resolution, *, room_id=None):
@@ -1045,6 +1048,12 @@ class GameWindow(QMainWindow):
             self.invalidate_prepared_turn("private_experiences_changed", changed=True)
 
     def append_speech(self, speaker, speech, addressee=None, *, origin="ordinary", direct_reply=False):
+        if speaker == self.player_name and origin == "ordinary" and self.player_is_muffled():
+            if (self.phase != "conversation" or self.game_over or self.ai_busy
+                    or not self.player_reply_required()):
+                return False
+            speech = muffled_sound(self.player_name, self.muffled_player_tone.currentData())
+            addressee = None
         if self.phase == "conversation":
             self.direct_replies.begin_discussion(self.round_number)
         ordinary_npc = (origin == "ordinary" and speaker != self.player_name
@@ -1136,6 +1145,7 @@ class GameWindow(QMainWindow):
                 on_success(result)
             finally:
                 self.trace_callback_scope = previous_scope
+            self.update_muffled_player_controls()
             if scope is not None:
                 scope.record("job_applied", {"round": self.round_number, "phase": self.phase})
 
@@ -1167,6 +1177,7 @@ class GameWindow(QMainWindow):
                 self.pass_button.setEnabled(not self.player_reply_required())
                 self.interject_button.setEnabled(True)
                 self.vote_button.setEnabled(self.can_call_vote())
+            self.update_muffled_player_controls()
 
         worker = AIWorker(lambda: operation(scope) if trace_task is not None else operation())
         worker.result_ready.connect(ready)
@@ -1408,6 +1419,20 @@ class GameWindow(QMainWindow):
         self.say_button.clicked.connect(self.send_interjection)
         self.say_button.hide()  # Hidden until needed
 
+        self.muffled_player_controls = QWidget()
+        muffled_layout = QHBoxLayout(self.muffled_player_controls)
+        muffled_layout.setContentsMargins(0, 0, 0, 0)
+        muffled_label = QLabel("You can only make muffled sounds. Choose your tone:")
+        self.muffled_player_tone = QComboBox()
+        for tone, label in zip(TONES, TONE_LABELS):
+            self.muffled_player_tone.addItem(label.capitalize(), tone)
+        self.muffled_player_tone.setCurrentIndex(2)
+        for widget in (muffled_label, self.muffled_player_tone):
+            widget.setFont(body_font)
+            widget.setStyleSheet(f'font-family: "{body_family}"; font-size: 18px; padding: 5px;')
+            muffled_layout.addWidget(widget)
+        self.muffled_player_controls.hide()
+
         self.recipient_controls = QWidget()
         recipient_layout = QHBoxLayout(self.recipient_controls)
         recipient_layout.setContentsMargins(0, 0, 0, 0)
@@ -1589,6 +1614,7 @@ class GameWindow(QMainWindow):
         input_row.addWidget(self.interject_input, 1)
         input_row.addWidget(self.dictation_controls)
         interject_layout.addLayout(input_row)
+        interject_layout.addWidget(self.muffled_player_controls)
         interject_layout.addWidget(self.recipient_hint)
         interject_layout.addWidget(self.dictation_status)
         interject_layout.addWidget(self.say_button)
@@ -1773,8 +1799,44 @@ class GameWindow(QMainWindow):
                 self.cancel_dictation()
         return super().eventFilter(obj, event)
 
+    def player_is_muffled(self):
+        return bool(self.player_name and self.item_rules.is_muffled(self.body_id(self.player_name)))
+
+    def update_muffled_player_controls(self):
+        if not hasattr(self, "muffled_player_controls"):
+            return
+        muffled = self.player_is_muffled()
+        was_muffled = getattr(self, "_player_muffle_active", False)
+        self._player_muffle_active = muffled
+        conversation = self.phase == "conversation" and not self.game_over
+        required = conversation and self.player_reply_required()
+        self.muffled_player_controls.setVisible(muffled and required)
+        self.muffled_player_tone.setEnabled(not self.ai_busy)
+        if muffled:
+            self.interject_input.clear()
+            self.interject_input.hide()
+            self.interject_input.setEnabled(False)
+            self.recipient_controls.hide()
+            self.recipient_selector.setEnabled(False)
+            self.recipient_hint.hide()
+            self.interject_button.setEnabled(False)
+            self.say_button.setVisible(required)
+            self.say_button.setEnabled(required and not self.ai_busy)
+            if required:
+                self.pass_button.setEnabled(False)
+            if hasattr(self, "dictation_recorder") and self.dictation_context is not None:
+                self.cancel_dictation()
+        if was_muffled and not muffled:
+            self.interject_input.setEnabled(not self.ai_busy)
+            self.interject_button.setEnabled(conversation and not self.ai_busy)
+            if required:
+                self.interject_input.show()
+                self.say_button.show()
+        self.update_dictation_controls()
+
     def can_dictate(self):
         return (self.phase == "conversation" and not self.game_over and not self.ai_busy
+                and not self.player_is_muffled()
                 and not self.interject_input.isHidden() and self.interject_input.isEnabled())
 
     def can_toggle_dictation(self):
@@ -2842,7 +2904,7 @@ class GameWindow(QMainWindow):
             return
         visible = (self.phase == "conversation" and not self.game_over
                    and not self.interject_input.isHidden())
-        self.recipient_controls.setVisible(visible)
+        self.recipient_controls.setVisible(visible and not self.player_is_muffled())
         self.recipient_selector.setEnabled(not self.ai_busy)
         body_id = self.recipient_selector.currentData()
         capped = body_id is not None and not self.direct_replies.can_direct(body_id)
@@ -2858,8 +2920,11 @@ class GameWindow(QMainWindow):
         self.recipient_hint.setVisible(visible and bool(hint))
         self.say_button.setEnabled(self.phase == "conversation" and not self.game_over
                                    and not self.ai_busy and not capped)
+        self.update_muffled_player_controls()
 
     def choose_speaker_recipient(self, body_id):
+        if self.player_is_muffled():
+            return
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
         name = self.label_for_body(body_id)
@@ -3168,6 +3233,9 @@ class GameWindow(QMainWindow):
         
 
     def interject_conversation(self):
+        if self.player_is_muffled():
+            self.update_muffled_player_controls()
+            return
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
         self.invalidate_prepared_turn("interjection_started")
@@ -3186,6 +3254,15 @@ class GameWindow(QMainWindow):
         self.refresh_recipient_choices()
 
     def send_interjection(self):
+        if self.player_is_muffled():
+            if (self.phase != "conversation" or self.game_over or self.ai_busy
+                    or not self.player_reply_required()):
+                return
+            if self.append_speech(self.player_name, ""):
+                self.cancel_dictation()
+                self.update_muffled_player_controls()
+                self.run_conversation_loop()
+            return
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
         speech = self.interject_input.text().strip()
