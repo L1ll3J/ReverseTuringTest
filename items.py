@@ -28,29 +28,35 @@ ITEM_CATALOGUE = MappingProxyType({
         "banana", "Banana of Friendship",
         "Give a living suspect a banana. They will remember your friendly gesture.",
         "living_npc", True,
+        flavour="A modest contribution to a deeply suspicious friendship.",
     ),
     "muffle": ItemDefinition(
         "muffle", "Muffle",
         "A living suspect can only make muffled sounds until the next night. They can still vote.",
         "living_npc", True,
+        flavour="They may object. It will be difficult to tell.",
     ),
     "spare_paper": ItemDefinition(
         "spare_paper", "Spare Paper",
         "Add two extra copies of your next ballot. Extra copies stack.",
         "self", True,
+        flavour="One person, one vote. A little more paper helps.",
     ),
     "guardian_angel": ItemDefinition(
         "guardian_angel", "Guardian Angel",
         "Arm one protection against your next death. Protection follows you through possession.",
         "self", False,
+        flavour="Death can wait. Once.",
     ),
     "throw_voice": ItemDefinition(
         "throw_voice", "Throw Voice", "Send one apparent message in a living suspect's voice.",
         "living_npc", True, requires_message=True,
+        flavour="Let someone else put your foot in their mouth.",
     ),
     "dark_whisper": ItemDefinition(
         "dark_whisper", "Dark Whisper", "Send one apparent message from a dead character's voice.",
         "dead_body", True, requires_message=True,
+        flavour="Death needn't have the last word.",
     ),
     "love_potion": ItemDefinition(
         "love_potion", "Love Potion",
@@ -60,6 +66,7 @@ ITEM_CATALOGUE = MappingProxyType({
     "forged_note": ItemDefinition(
         "forged_note", "Forged Note", "Prepare a signed note for the body of your next victim.",
         "self", True, requires_message=True,
+        flavour="Your victim has one last thing to say. You wrote it.",
     ),
     "divine_revelation": ItemDefinition(
         "divine_revelation", "Divine Revelation", "Send a private message that seems to come from a higher power.",
@@ -68,6 +75,7 @@ ITEM_CATALOGUE = MappingProxyType({
     "mail_in_ballot": ItemDefinition(
         "mail_in_ballot", "Mail-in Ballot", "Choose a suspect whose ballot you will cast this round.",
         "living_npc", True,
+        flavour="Their civic duty is in your capable hands.",
     ),
     "watch_this_drive": ItemDefinition(
         "watch_this_drive", "Watch This Drive", "Mark a suspect. Kill them next night to earn one extra basic room attack.",
@@ -75,25 +83,31 @@ ITEM_CATALOGUE = MappingProxyType({
     ),
     "lucky_match": ItemDefinition(
         "lucky_match", "Lucky Match", "Gain one extra single-slot reroll for this run.", "self", True,
+        flavour="Perhaps the next disappointment will suit you better.",
     ),
     "deep_pockets": ItemDefinition(
         "deep_pockets", "Deep Pockets", "Take up to two different items from your next room offer.", "self", True,
+        flavour="Greed is easier with room for both.",
     ),
     "pocket_gavel": ItemDefinition(
         "pocket_gavel", "Pocket Gavel", "Call the normal vote early after answering any required question.",
         "self", True,
+        flavour="Enough discussion. Time for regrettable decisions.",
     ),
     "listening_glass": ItemDefinition(
         "listening_glass", "Listening Glass", "Privately inspect one suspect's recorded experience from the latest night.",
         "living_npc", True,
+        flavour="Some nights bear listening to twice.",
     ),
     "stay_of_execution": ItemDefinition(
         "stay_of_execution", "Stay of Execution", "Protect one body from execution in the next actual vote only.",
         "living_body", True,
+        flavour="A postponement can feel remarkably like a pardon.",
     ),
     "booby_trap": ItemDefinition(
         "booby_trap", "Booby Trap", "Prepare a room trap for next night. The next entering group triggers it once.",
         "room", False,
+        flavour="Do come in. Everyone at once.",
     ),
     "lucky_coin": ItemDefinition(
         "lucky_coin", "(Un)Lucky Coin", "Flip between your death and a chosen living body's death. Reusable.",
@@ -102,16 +116,20 @@ ITEM_CATALOGUE = MappingProxyType({
     ),
     "spin_the_dagger": ItemDefinition(
         "spin_the_dagger", "Spin the Dagger", "Strike a random living person, possibly yourself.", "self", False,
+        flavour="At last, a fair chance to make this your own problem.",
     ),
     "presidential_decree": ItemDefinition(
         "presidential_decree", "Presidential Decree", "Skip the next vote without spending pending extra ballots.",
         "self", False,
+        flavour="The people have spoken quite enough.",
     ),
     "occult_ritual": ItemDefinition(
         "occult_ritual", "Occult Ritual", "Curse a body to die at the action phase after next.", "living_body", False,
+        flavour="Some appointments are best forgotten. This one isn't.",
     ),
     "revolver": ItemDefinition(
         "revolver", "Revolver", "Shoot one living body immediately in public.", "living_body", False,
+        flavour="A rather loud way to end a discussion.",
     ),
 })
 
