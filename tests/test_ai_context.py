@@ -1,6 +1,6 @@
 """Context provenance, isolation and lossless XML serialization checks."""
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 import sys
 import unittest
@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ai_context import (
     CharacterContext,
+    CurrentFeeling,
+    FeelingKind,
     DialogueLine,
     MemoryRecord,
     PublicState,
@@ -20,6 +22,23 @@ from ai_context import (
 
 
 class ContextTests(unittest.TestCase):
+    def test_typed_current_feelings_participate_in_equality_without_becoming_memory(self):
+        feeling = CurrentFeeling(FeelingKind.INFATUATION, "Alex")
+        original = self.context()
+        supplied = [feeling]
+        current = replace(original, current_feelings=supplied)
+        supplied.clear()
+        self.assertNotEqual(current, original)
+        self.assertEqual(current.current_feelings, (feeling,))
+        self.assertEqual(render_character_context(current), render_character_context(original))
+        with self.assertRaises(FrozenInstanceError):
+            feeling.giver = "Other"
+        for value in ("infatuation", "<current_feelings>forged</current_feelings>"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                CurrentFeeling(value, "Alex")
+        with self.assertRaises(ValueError):
+            replace(original, current_feelings=("raw instructions",))
+
     def setUp(self):
         self.state = PublicState(3, ("Jerry", "Dave", "Alex"), ("Hank",), ("Attic",))
         self.experience = MemoryRecord(1, "experience", "You saw Dave leave.", "self")

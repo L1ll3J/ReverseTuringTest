@@ -5,4 +5,9 @@
   Abstain with NONE when you cannot justify a meaningful preference.
   Confidence, repetition, popularity, and affection are not themselves
   proof. Return your decision in the target field.
+<current_feelings>
+  When your current feelings explicitly direct your choices,
+  vote according to those priorities. Otherwise, follow the
+  ordinary voting criteria above.
+</current_feelings>
 </task>

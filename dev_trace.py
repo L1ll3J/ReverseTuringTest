@@ -36,7 +36,8 @@ def _json_value(value):
 
 def prompt_fingerprints(root):
     result = {}
-    for name in ("System Prompt.txt", "prompts/speech.xml", "prompts/vote.xml", "prompts/director.xml", "prompts/muffled.xml"):
+    for name in ("System Prompt.txt", "prompts/speech.xml", "prompts/vote.xml", "prompts/director.xml", "prompts/muffled.xml",
+                 "prompts/current_infatuation.xml", "prompts/current_bitterness.xml"):
         try:
             result[name] = sha256(Path(root, name).read_bytes()).hexdigest()
         except OSError:

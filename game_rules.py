@@ -113,6 +113,7 @@ class ItemEvent:
     observed_day: int | None = None
     observed_source: str | None = None
     death_decision: DeathDecision | None = None
+    giver_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -444,6 +445,9 @@ class PlayerItemRules:
         elif entry.item_id == "muffle":
             self._muffles[target.body_id] = MuffleEffect(target.body_id, context.day, context.day + 1)
             effect = self._event("muffle_applied", context.day, **values, private_text=MUFFLE_PRIVATE)
+        elif entry.item_id == "love_potion":
+            effect = self._event("love_potion_applied", context.day, **values,
+                                 subject_body_id=actor.body_id, giver_label=actor.label)
         elif entry.item_id == "spare_paper":
             self._pending_ballot_bonus += 2
             effect = self._event("extra_ballots_added", context.day, **values)

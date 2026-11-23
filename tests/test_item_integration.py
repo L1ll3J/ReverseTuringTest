@@ -542,8 +542,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.offer_room_item("Basement", continuation)
         offer = self.window.item_drafts.pending_offer
         self.assertEqual(offer.options, ("spare_paper",))
-        buttons = [button for button in self.window.draft_page.findChildren(QPushButton)
-                   if button.text() == "Reroll"]
+        buttons = list(self.window.draft_page.reroll_buttons.values())
         self.assertTrue(buttons)
         self.assertTrue(all(not button.isEnabled() for button in buttons))
         self.window.choose_item_offer(offer.offer_id, 0)

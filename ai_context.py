@@ -1,6 +1,7 @@
 """Immutable, source-separated inputs for character and reply-selection requests."""
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Mapping
 from xml.etree import ElementTree as ET
 
@@ -11,6 +12,23 @@ class MemoryRecord:
     kind: str
     text: str
     source: str = ""
+
+
+class FeelingKind(str, Enum):
+    INFATUATION = "infatuation"
+    BITTERNESS = "bitterness"
+
+
+@dataclass(frozen=True)
+class CurrentFeeling:
+    kind: FeelingKind
+    giver: str
+
+    def __post_init__(self):
+        if not isinstance(self.kind, FeelingKind):
+            raise ValueError("A current feeling requires a known kind")
+        if not isinstance(self.giver, str) or not self.giver.strip():
+            raise ValueError("A current feeling requires its original subject name")
 
 
 @dataclass(frozen=True)
@@ -42,10 +60,13 @@ class CharacterContext:
     dispositions: tuple[MemoryRecord, ...]
     public_events: tuple[MemoryRecord, ...]
     dialogue: tuple[DialogueLine, ...]
+    current_feelings: tuple[CurrentFeeling, ...] = ()
 
     def __post_init__(self):
-        for name in ("persona", "experiences", "dispositions", "public_events", "dialogue"):
+        for name in ("persona", "experiences", "dispositions", "public_events", "dialogue", "current_feelings"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        if any(not isinstance(feeling, CurrentFeeling) for feeling in self.current_feelings):
+            raise ValueError("Current feelings must be typed snapshots")
 
 
 @dataclass(frozen=True)
