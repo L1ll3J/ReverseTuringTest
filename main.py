@@ -16,7 +16,7 @@ from message_view import DisplayRecord, MessageLog
 from house_view import HouseView, RoomObservation, ROOM_LABELS, ARTWORK_SIZE
 from overlay_host import OverlayHost
 from unlock_ui import UnlockPage, unlock_presentation
-from npc_items import NPCItemState
+from npc_items import NPCItemState, NPC_ITEM_REGISTRY
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, DeathCause, ItemUseContext, NightMemoryView, PlayerItemRules, ItemRuleError, GUARDIAN_PUBLIC
 from love_potion import LoveDose, LovePotionHistory
@@ -1280,7 +1280,11 @@ class GameWindow(QMainWindow):
         self.npc_equipment_label = QLabel()
         self.npc_equipment_label.setTextFormat(Qt.PlainText)
         self.npc_equipment_label.setWordWrap(True)
-        self.npc_equipment_label.setAlignment(Qt.AlignCenter)
+        self.npc_equipment_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.npc_equipment_label.setFont(body_font)
+        self.npc_equipment_label.setStyleSheet(
+            f'font-family: "{body_family}"; font-size: 18px; color: #E0E0E0;')
+        self.house_sidebar_layout.insertWidget(1, self.npc_equipment_label)
         self.npc_equipment_label.hide()
 
         # Main Layout
@@ -1336,8 +1340,7 @@ class GameWindow(QMainWindow):
         menu_layout.addLayout(self.menu_stack, 1)
 
         self.layout = QVBoxLayout()
-        self.layout.addWidget(self.npc_equipment_label)
-        self.layout.insertWidget(1, self.weapon_scroll, 1)
+        self.layout.addWidget(self.weapon_scroll, 1)
         #self.layout.addWidget(self.top_right_widget)
         self.layout.addWidget(self.menu_widget, 1)
         self.layout.addWidget(self.room_buttons_widget, 1)
@@ -1459,7 +1462,7 @@ class GameWindow(QMainWindow):
         self.weapon_action_panel.setLayout(QVBoxLayout())
         self.weapon_action_panel.layout().setContentsMargins(0, 0, 0, 0)
         self.weapon_action_panel.layout().setSpacing(0)
-        self.house_sidebar_layout.insertWidget(1, self.weapon_action_panel)
+        self.house_sidebar_layout.insertWidget(2, self.weapon_action_panel)
         self.room_buttons_widget.installEventFilter(self)
         QTimer.singleShot(0, self.position_weapon_panel)
 
@@ -1474,10 +1477,25 @@ class GameWindow(QMainWindow):
         self.media_player.mediaStatusChanged.connect(self.loop_music)
 
         # Configure the output area
-        self.output_area.setStyleSheet(f'background-color: #1E1E1E; color: #E0E0E0; border: none; font-family: "{body_family}"; font-size: 18px; padding-left: 16px; padding-right: 24px;')
+        self.set_action_output_mode(False)
         self.setStyleSheet(f"color: white; background-color: black; font-family: {font_family};")
         self.resize_menu_content()
         self.position_corner_controls()
+
+    def set_action_output_mode(self, compact):
+        self.message_log.setMaximumHeight(128 if compact else 16777215)
+        background = "black" if compact else "#1E1E1E"
+        self.output_area.setStyleSheet(
+            f'background-color: {background}; color: #E0E0E0; border: none; '
+            f'font-family: "{readable_body_font().family()}"; font-size: 18px; '
+            'padding-left: 16px; padding-right: 24px;')
+
+    def refresh_known_equipment(self, living_npcs):
+        living = set(living_npcs)
+        holders = [f"{owner}: {NPC_ITEM_REGISTRY[item_id].name}"
+                   for owner, item_id in self.npc_items.equipment.items() if owner in living]
+        self.npc_equipment_label.setText("Known equipment\n" + "\n".join(holders) if holders else "")
+        self.npc_equipment_label.setVisible(bool(holders))
 
     def resize_menu_content(self):
         if not hasattr(self, "play_content"):
@@ -1778,7 +1796,6 @@ class GameWindow(QMainWindow):
             name for name, data in self.characters.items() if data["alive"]
         )
         equipment_description = self.npc_items.equipment_description()
-        self.npc_equipment_label.setText(equipment_description)
         self.add_public_event(equipment_description, source="Visible equipment", display=False)
 
         # Start the first action phase
@@ -1793,7 +1810,7 @@ class GameWindow(QMainWindow):
         self.phase = "weapon_select"
         self.cancel_dictation()
         self.menu_widget.hide()
-        self.npc_equipment_label.show()
+        self.npc_equipment_label.hide()
         self.mute_button.hide()
         self.message_log.hide()
         self.room_buttons_widget.hide()
@@ -2169,7 +2186,7 @@ class GameWindow(QMainWindow):
         self.cancel_item_offer()
         self.invalidate_prepared_turn("night_started", changed=True)
         self.phase = "action"
-        self.message_log.setMaximumHeight(128)
+        self.set_action_output_mode(True)
         self.position_corner_controls()
         self.cancel_dictation()
         self.request_serial += 1
@@ -2222,7 +2239,8 @@ class GameWindow(QMainWindow):
             self.room_assignments,
             living_npcs,
         )
-        self.record_history(self.npc_items.equipment_description(living_npcs), display=True)
+        self.record_history(self.npc_items.equipment_description(living_npcs))
+        self.refresh_known_equipment(living_npcs)
         self.trace_action("night_rooms_assigned", assignments=self.room_assignments)
 
         # Display room assignments if in normal mode
@@ -3295,7 +3313,7 @@ class GameWindow(QMainWindow):
         self.game_over = True
         self.invalidate_prepared_turn("game_over", changed=True)
         self.phase = "game_over"
-        self.message_log.setMaximumHeight(16777215)
+        self.set_action_output_mode(False)
         self.position_corner_controls()
         self.cancel_dictation()
         self.update_inventory_button()
@@ -3470,7 +3488,8 @@ class GameWindow(QMainWindow):
         self.direct_replies.begin_discussion(self.round_number)
         self.refresh_recipient_choices()
         self.phase = "conversation"
-        self.message_log.setMaximumHeight(16777215)
+        self.npc_equipment_label.hide()
+        self.set_action_output_mode(False)
         self.position_corner_controls()
         self.cancel_dictation()
         self.update_inventory_button()

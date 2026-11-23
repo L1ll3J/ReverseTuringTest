@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PyQt5 import sip
 from PyQt5.QtCore import QCoreApplication, QEvent, Qt
-from PyQt5.QtGui import QFont, QFontInfo
+from PyQt5.QtGui import QColor, QFont, QFontInfo, QPalette
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
@@ -173,6 +173,104 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.assertIn("Dave is carrying a Camera", text)
         self.assertIn(f"The {empty} is empty and is now also a crime scene.", text)
         self.assertNotIn("You must choose another room.", text)
+
+    def test_known_equipment_moves_from_weapon_selection_to_house_sidebar(self):
+        self.window.player_name_input.setText("Alex")
+        with patch.object(game.NPCItemState, "allocate", return_value=game.NPCItemState({"Dave": "camera"})):
+            self.window.phase = "start"
+            self.window.start_game()
+        expected = "Known equipment: Dave is carrying a Camera."
+        public_equipment = [event for event in self.window.public_events if event.source == "Visible equipment"]
+        self.assertEqual([(event.round_number, event.text) for event in public_equipment], [(0, expected)])
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+        self.assertEqual(self.window.layout.indexOf(self.window.npc_equipment_label), -1)
+        self.assertIs(self.window.npc_equipment_label.parentWidget(), self.window.house_sidebar_content)
+        self.window.show_room_allocations = False
+        bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.select_weapon_and_start(bare)
+        self.app.processEvents()
+        label = self.window.npc_equipment_label
+        self.assertTrue(label.isVisible())
+        self.assertEqual(label.text(), "Known equipment\nDave: Camera")
+        self.assertEqual(label.font().pixelSize(), 18)
+        self.assertTrue(all(not record.known_names and record.unknown_remainder
+                            for record in self.window.house_view.observations.values()))
+        self.assertNotIn("Known equipment", self.window.output_area.toPlainText())
+        self.assertEqual([record.text for record in self.window.history_records if record.text == expected],
+                         [expected, expected])
+        self.assertEqual([event.text for event in self.window.public_events if event.source == "Visible equipment"],
+                         [expected])
+
+    def test_no_living_equipment_hides_section_but_preserves_nightly_history(self):
+        self.window.npc_items = game.NPCItemState({"Dave": "camera"})
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.run_action_phase()
+        self.assertEqual(self.window.npc_equipment_label.text(), "Known equipment\nDave: Camera")
+        self.window.characters["Dave"]["alive"] = False
+        self.window.run_action_phase()
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+        self.assertEqual(self.window.npc_equipment_label.text(), "")
+        empty_equipment = "Known equipment: No special equipment is visible."
+        self.assertEqual([record.text for record in self.window.history_records
+                          if record.round_number == self.window.round_number
+                          and record.text.startswith("Known equipment:")], [empty_equipment])
+        self.assertNotIn(empty_equipment, self.window.output_area.toPlainText())
+        self.window.npc_items = game.NPCItemState()
+        self.window.run_action_phase()
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+        self.assertEqual([record.text for record in self.window.history_records
+                          if record.round_number == self.window.round_number
+                          and record.text.startswith("Known equipment:")], [empty_equipment])
+
+    def test_equipment_sidebar_follows_reward_and_discussion_visibility(self):
+        from items import DraftState
+        self.window.npc_items = game.NPCItemState({"Dave": "camera"})
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.item_drafts = DraftState(self.window.player_owner_id, ("banana", "muffle", "spare_paper"))
+        self.window.run_action_phase()
+        self.assertTrue(self.window.npc_equipment_label.isVisible())
+        empty = next(room for room, occupants in self.window.room_assignments.items() if not occupants)
+        self.window.choose_room(empty)
+        self.assertFalse(self.window.npc_equipment_label.isVisible())
+        self.window.draft_page.leave_button.click()
+        self.assertTrue(self.window.npc_equipment_label.isVisible())
+        self.assertIn("empty", self.window.output_area.toPlainText())
+        self.window.victims_last_night = ["Earlier victim"]
+        self.window.run_conversation_phase()
+        self.assertFalse(self.window.npc_equipment_label.isVisible())
+        self.window.run_action_phase()
+        self.assertTrue(self.window.npc_equipment_label.isVisible())
+
+    def test_action_feedback_has_black_background_and_expanded_phases_restore_style(self):
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.run_action_phase()
+        self.app.processEvents()
+        editor = self.window.output_area
+        self.assertTrue(editor.isVisible())
+        self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("black"))
+        self.assertEqual(self.window.message_log.maximumHeight(), 128)
+        self.window.append_output_text("A weapon effect.\nAn action error.")
+        self.assertIn("An action error.", editor.toPlainText())
+        self.assertEqual(editor.document().find("An action error.").charFormat().font().pixelSize(), 18)
+        self.window.victims_last_night = ["Earlier victim"]
+        self.window.run_conversation_phase()
+        self.app.processEvents()
+        self.assertEqual(self.window.message_log.maximumHeight(), 16777215)
+        self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("#1E1E1E"))
+        with patch.object(self.window, "start_ai_request"):
+            self.window.run_voting_phase()
+        self.assertEqual(self.window.message_log.maximumHeight(), 16777215)
+        self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("#1E1E1E"))
+
+    def test_game_over_directly_from_action_restores_normal_output_background(self):
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.run_action_phase()
+        editor = self.window.output_area
+        self.window.end_game_screen(4)
+        self.app.processEvents()
+        self.assertEqual(self.window.message_log.maximumHeight(), 16777215)
+        self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("#1E1E1E"))
+        self.assertTrue(editor.isVisible())
 
     def test_controlled_attacker_is_retained_in_private_player_history(self):
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "blackmagic")

@@ -1014,20 +1014,20 @@ class RuntimeRegressionTests(unittest.TestCase):
                 worker.wait(3000)
             self.app.processEvents()
 
-    def test_camera_equipment_is_visible_at_start_without_revealing_rooms_in_hard_mode(self):
+    def test_camera_equipment_is_action_information_without_revealing_rooms_in_hard_mode(self):
         self.window.show_room_allocations = False
         self.window.player_name_input.setText("Alex")
         camera = game.NPCItemState({"Hank": "camera"})
         with patch.object(game.NPCItemState, "allocate", return_value=camera):
             self.window.start_game()
-        self.assertTrue(self.window.npc_equipment_label.isVisible())
-        self.assertIn("Hank is carrying a Camera", self.window.npc_equipment_label.text())
-        self.assertFalse(any(room in self.window.npc_equipment_label.text() for room in self.window.rooms))
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
         bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.select_weapon_and_start(bare)
-        self.assertTrue(self.window.npc_equipment_label.isHidden())
+        self.assertTrue(self.window.npc_equipment_label.isVisible())
+        self.assertEqual(self.window.npc_equipment_label.text(), "Known equipment\nHank: Camera")
+        self.assertFalse(any(room in self.window.npc_equipment_label.text() for room in self.window.rooms))
         text = self.window.output_area.toPlainText()
-        self.assertIn("Hank is carrying a Camera", text)
+        self.assertNotIn("Known equipment", text)
         self.assertNotIn("Room Assignments", text)
         self.assertNotIn("Visible room:", text)
         context = self.window.build_character_context("Jerry")
