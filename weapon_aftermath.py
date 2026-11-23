@@ -7,7 +7,7 @@ from types import MappingProxyType
 
 PHYSICAL_WEAPONS = frozenset({"pen", "knife", "c4", "stopwatch"})
 OBJECT_NAMES = MappingProxyType({"pen": "fountain pen", "knife": "kitchen knife",
-                                 "c4": "improvised plastic explosive", "stopwatch": "silver stopwatch"})
+                                 "c4": "bundle of plastic explosive", "stopwatch": "silver stopwatch"})
 OBJECT_DESCRIPTIONS = MappingProxyType({
     "pen": "It is a fountain pen with a dark barrel and a metal nib. There is blood on it.",
     "knife": "It is a kitchen knife with a pointed steel blade. There is blood on it.",
