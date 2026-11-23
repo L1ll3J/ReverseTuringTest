@@ -157,6 +157,7 @@ class GameWindow(QMainWindow):
         self.request_serial = 0
         self.retry_action = None
         self.direct_replies = DirectReplyPolicy()
+        self.pending_direct_reply = None
         self.turn_preparation = TurnPreparation()
         self.conversation_revision = 0
         self.awaiting_preparation = None
@@ -465,7 +466,7 @@ class GameWindow(QMainWindow):
         self.retry_action = None
         self.retry_button.hide()
         self.apply_item_events(events)
-        self.update_inventory_button()
+        self.restore_conversation_decision()
         self.trace_action("inventory_item_used", events=events)
         if self.inventory_page is not None:
             self.open_inventory()
@@ -690,6 +691,7 @@ class GameWindow(QMainWindow):
                         and self.characters.get(speaker, {}).get("alive", False))
         if ordinary_npc and direct_reply and not self.direct_replies.can_direct(self.body_id(speaker)):
             return False
+        self.pending_direct_reply = None
         self.invalidate_prepared_turn("speech_committed", changed=True)
         self.retry_action = None
         self.retry_button.hide()
@@ -2445,19 +2447,26 @@ class GameWindow(QMainWindow):
                     self.remember(occupant, "experience",
                         f"You and " + ' and '.join(others) + f" shared a picturesque and beautifully intimate night in the {self.rooms_visited[-1]}. It was everything your heart yearned for, espcially due to {self.player_name}.")
 
-    def restore_conversation_decision(self):
+    def restore_conversation_decision(self, *, open_floor_blocked=False):
         if self.phase != "conversation" or self.game_over:
             return
         self.secondary_output_area.clear()
         self.interject_input.setEnabled(True)
-        self.pass_button.setEnabled(not self.player_reply_required())
-        self.interject_button.setEnabled(True)
+        required = self.player_reply_required()
+        composing = not self.interject_input.isHidden()
+        blocked = not required and (open_floor_blocked
+                  or (self.all_npcs_muffled() and self.addressed_muffled_npc() is None))
+        self.pass_button.setEnabled(not required and not blocked and not composing)
+        self.interject_button.setEnabled(required or not composing)
         self.vote_button.setEnabled(self.can_call_vote())
-        if self.player_reply_required():
+        if required:
             self.interject_input.show()
             self.say_button.show()
         self.refresh_recipient_choices()
         self.update_inventory_button()
+        if blocked:
+            self.secondary_output_area.setText("Nobody can speak freely. Address a suspect or call a vote.")
+            self.secondary_output_area.show()
 
     def refresh_recipient_choices(self):
         if not hasattr(self, "recipient_selector"):
@@ -2859,10 +2868,7 @@ class GameWindow(QMainWindow):
         return bool(living) and all(self.item_rules.is_muffled(self.body_id(name)) for name in living)
 
     def no_open_speaker(self):
-        self.restore_conversation_decision()
-        self.pass_button.setEnabled(False)
-        self.secondary_output_area.setText("Nobody can speak freely. Address a suspect or call a vote.")
-        self.secondary_output_area.show()
+        self.restore_conversation_decision(open_floor_blocked=True)
 
     def can_call_vote(self):
         return (self.phase == "conversation" and not self.game_over and not self.ai_busy
@@ -3345,15 +3351,20 @@ class GameWindow(QMainWindow):
                 or self.player_reply_required()
                 or mentioned not in self.characters or not self.characters[mentioned]["alive"]):
             return
-        if direct_reply and not self.direct_replies.can_direct(self.body_id(mentioned)):
+        body_id = self.body_id(mentioned)
+        latest = self.public_dialogue[-1] if self.public_dialogue else None
+        pending = self.pending_direct_reply
+        direct_reply = direct_reply or (pending is not None and pending[0] is latest and pending[1] == body_id)
+        if direct_reply and not self.direct_replies.can_direct(body_id):
             self.update_recipient_controls()
             return
         self.invalidate_prepared_turn("direct_response")
-        body_id = self.body_id(mentioned)
         data = self.characters[mentioned]
         muted = self.item_rules.is_muffled(body_id)
         if muted and self.addressed_muffled_npc() != mentioned:
             return
+        if direct_reply:
+            self.pending_direct_reply = (latest, body_id)
         context = self.build_character_context(mentioned)
         snapshot = self.group_turn_snapshot()
         style = data.get("muffle_style", "fallback")

@@ -606,12 +606,52 @@ class ConversationIntegrationTests(unittest.TestCase):
                     self.assertEqual(tuple(self.window.public_dialogue), before)
                     self.assertEqual(self.window.direct_replies.count, 0)
 
+    def test_failed_player_direct_muffle_recovered_through_pass_counts_towards_cap(self):
+        self.free_floor()
+        self.muffle("Dave")
+        outcomes = [outcome for _ in range(3)
+                    for outcome in (ai_runtime.AIRequestError("Try again"), -1)]
+        with patch.object(self.window.ai_runtime, "muffled_tone", side_effect=outcomes) as tone:
+            for count in range(1, 4):
+                self.send_direct("Dave")
+                self.wait_for(lambda: not self.window.active_workers)
+                self.assertEqual(self.window.public_dialogue[-1].speaker, "Alex")
+                self.assertEqual(self.window.direct_replies.count, count - 1)
+                self.assertTrue(self.window.pass_button.isEnabled())
+                self.window.pass_conversation()
+                self.wait_for(lambda: not self.window.active_workers)
+                self.assertEqual(self.window.public_dialogue[-1].text, muffled_sound("Dave", -1))
+                self.assertEqual(self.window.direct_replies.count, count)
+            before = tuple(self.window.public_dialogue)
+            self.send_direct("Dave")
+            self.assertEqual(tuple(self.window.public_dialogue), before)
+            self.assertEqual(tone.call_count, 6)
+        self.speech.assert_not_called()
+        self.selector.assert_not_called()
+
+    def test_intervening_apparent_speech_does_not_inherit_failed_direct_provenance(self):
+        self.free_floor()
+        self.muffle("Dave")
+        with patch.object(self.window.ai_runtime, "muffled_tone",
+                          side_effect=[ai_runtime.AIRequestError("Try again"), 0]) as tone:
+            self.send_direct("Dave")
+            self.wait_for(lambda: not self.window.active_workers)
+            self.window.append_speech("Alex", "An apparent question.", "Dave", origin="forged")
+            self.window.pass_conversation()
+            self.wait_for(lambda: not self.window.active_workers)
+            self.assertEqual(tone.call_count, 2)
+            self.assertEqual(self.window.public_dialogue[-1].text, muffled_sound("Dave", 0))
+            self.assertEqual(self.window.direct_replies.count, 0)
+
     def test_all_muffled_only_bypasses_vote_minimum_and_has_no_empty_selector(self):
         self.free_floor()
         for name in self.window.characters:
             self.muffle(name)
         self.assertLess(len(self.window.current_conversation), self.window.minimum_to_call_vote)
         self.assertTrue(self.window.can_call_vote())
+        self.assertTrue(self.window.vote_button.isEnabled())
+        self.assertFalse(self.window.pass_button.isEnabled())
+        self.assertIn("Nobody can speak freely", self.window.secondary_output_area.text())
         self.window.run_conversation_loop()
         self.assertFalse(self.window.pass_button.isEnabled())
         self.assertIn("Nobody can speak freely", self.window.secondary_output_area.text())
@@ -631,6 +671,38 @@ class ConversationIntegrationTests(unittest.TestCase):
         self.window.characters.clear()
         self.assertFalse(self.window.all_npcs_muffled())
         self.assertFalse(self.window.can_call_vote())
+
+    def test_item_control_refresh_preserves_composition_overlay_and_required_reply(self):
+        self.free_floor()
+        self.muffle("Dave")
+        self.muffle("Hank")
+        self.window.interject_conversation()
+        self.target("Dave")
+        self.window.interject_input.setText("My unfinished account")
+        self.window.open_inventory()
+        self.muffle("Jerry")
+        self.app.processEvents()
+        self.assertIs(self.window.overlay_host.current_page, self.window.inventory_page)
+        self.assertEqual(self.window.overlay_host.title_label.text(), "Inventory")
+        self.assertFalse(self.window.interject_input.isHidden())
+        self.assertEqual(self.window.interject_input.text(), "My unfinished account")
+        self.assertEqual(self.window.recipient_selector.currentData(), self.window.body_id("Dave"))
+        self.assertFalse(self.window.pass_button.isEnabled())
+        self.assertFalse(self.window.interject_button.isEnabled())
+        self.assertTrue(self.window.say_button.isEnabled())
+        self.assertTrue(self.window.vote_button.isEnabled())
+        self.window.overlay_host.close_page()
+        self.window.append_speech("Hank", "Alex, answer me.", "Alex")
+        self.window.run_conversation_loop()
+        entry = self.window.inventory.grant("banana")
+        self.assertTrue(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
+        self.app.processEvents()
+        self.assertTrue(self.window.player_reply_required())
+        self.assertFalse(self.window.pass_button.isEnabled())
+        self.assertFalse(self.window.vote_button.isEnabled())
+        self.assertFalse(self.window.interject_input.isHidden())
+        self.assertEqual(self.window.interject_input.text(), "My unfinished account")
+        self.assertTrue(self.window.say_button.isEnabled())
 
     def test_muffled_style_is_persona_metadata_instead_of_public_label(self):
         self.free_floor()
