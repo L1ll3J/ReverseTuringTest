@@ -492,6 +492,7 @@ class GrittyStudy(QWidget):
         layout.addLayout(controls)
         self.listen_shortcut = QShortcut(QKeySequence("Space"), page)
         self.listen_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.listen_shortcut.setAutoRepeat(False)
         self.listen_shortcut.activated.connect(self.next_line)
         return page
 
