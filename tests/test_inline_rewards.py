@@ -78,7 +78,7 @@ class InlineRewardsTests(unittest.TestCase):
     def test_caller_replaces_snapshot_and_stale_callbacks_remain_authoritatively_guarded(self):
         drafts = DraftState("player", eligible_item_pool(("guardian_angel",)), random.Random(5))
         inventory = Inventory("player")
-        offer = drafts.enter_room("Kitchen")
+        offer = drafts.enter_room("Kitchen", inventory.snapshot())
         rejected = []
 
         def take(offer_id, slot):
@@ -91,7 +91,7 @@ class InlineRewardsTests(unittest.TestCase):
         old = self.page(offer)
         self.assertIs(drafts.pending_offer, offer)
         self.assertEqual(inventory.entries, ())
-        updated = drafts.reroll(offer.offer_id, 1)
+        updated = drafts.reroll(offer.offer_id, 1, inventory.snapshot())
         fresh = self.page(updated, reroll_count=0, can_reroll=False)
         old.take_buttons[1].click()
         self.assertEqual(rejected, ["This item offer is no longer available"])

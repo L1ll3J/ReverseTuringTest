@@ -6,7 +6,7 @@ import sys
 from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QPixmap, QPolygon
 from PyQt5.QtWidgets import (
-    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
+    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
 )
 
@@ -104,7 +104,7 @@ class InventoryPage(QWidget):
     """
 
     def __init__(self, entries, definitions, targets, on_use, *, can_use=True,
-                 body_font=None, title_font=None, parent=None):
+                 body_font=None, title_font=None, target_options=None, unavailable=None, parent=None):
         super().__init__(parent)
         if not callable(on_use):
             raise TypeError("Inventory use requires a callback")
@@ -149,10 +149,17 @@ class InventoryPage(QWidget):
             QWidget#inventoryPage QPushButton:disabled { color: #777; border-color: #555; }
         ''')
         self.target_boxes = {}
+        self.message_boxes = {}
         self.use_buttons = {}
         target_snapshot = tuple(targets)
+        options = {"living_npc": target_snapshot, **(target_options or {})}
+        unavailable = unavailable or {}
+        self.feedback_label = self._label("", self._body_font)
+        self.feedback_label.setObjectName("inventoryFeedback")
+        self.feedback_label.hide()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.feedback_label)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
@@ -190,13 +197,13 @@ class InventoryPage(QWidget):
             row.addLayout(description)
             controls = QHBoxLayout()
             target = None
-            if definition.target_kind == "living_npc":
+            if definition.target_kind != "self":
                 target = _TargetComboBox()
                 target.setObjectName(f"inventoryTarget_{entry.instance_id}")
                 target.setAccessibleName(f"Recipient for {definition.name}")
                 target.setFocusPolicy(Qt.StrongFocus)
                 self._font(target, self._body_font)
-                for body_id, name in target_snapshot:
+                for body_id, name in options.get(definition.target_kind, ()):
                     target.addItem(name, body_id)
                 self.target_boxes[entry.instance_id] = target
                 controls.addWidget(target, 1)
@@ -209,15 +216,48 @@ class InventoryPage(QWidget):
             button.setAutoDefault(False)
             self._font(button, self._title_font)
             button.setEnabled(can_use and (target is None or target.count() > 0))
-            button.clicked.connect(lambda _checked=False, instance=entry.instance_id, box=target:
-                                   on_use(instance, box.currentData() if box is not None else None))
             self.use_buttons[entry.instance_id] = button
             controls.addWidget(button)
             row.addLayout(controls)
+            message = None
+            if definition.requires_message:
+                message = QPlainTextEdit()
+                message.setObjectName(f"inventoryMessage_{entry.instance_id}")
+                message.setAccessibleName(f"Message for {definition.name}")
+                message.setPlaceholderText("Write your message (up to 2000 characters)")
+                message.setMaximumHeight(110)
+                self._font(message, self._body_font)
+                message.setStyleSheet(message.styleSheet() + "background:#1b1b1b; color:#e0e0e0; border:1px solid #888;")
+                row.insertWidget(row.count() - 1, message)
+                self.message_boxes[entry.instance_id] = message
+            reason = unavailable.get(entry.item_id)
+            if reason:
+                button.setEnabled(False)
+                button.setToolTip(reason)
+                row.addWidget(self._label(reason, self._body_font))
+            def activate(_checked=False, instance=entry.instance_id, box=target,
+                         editor=message, kind=definition.target_kind):
+                kwargs = {}
+                if editor is not None:
+                    text = editor.toPlainText()
+                    if not text.strip() or len(text) > 2000:
+                        self.show_feedback("Write a message between one and 2000 characters.")
+                        return
+                    kwargs["message"] = text
+                target_id = box.currentData() if box is not None else None
+                if kind == "room":
+                    kwargs["room_id"] = target_id
+                    target_id = None
+                on_use(instance, target_id, **kwargs)
+            button.clicked.connect(activate)
             rows.addWidget(card)
         rows.addStretch()
         self.scroll.setWidget(content)
         layout.addWidget(self.scroll)
+
+    def show_feedback(self, message):
+        self.feedback_label.setText(message)
+        self.feedback_label.show()
 
     @staticmethod
     def _font(widget, font):

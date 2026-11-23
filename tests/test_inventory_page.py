@@ -154,6 +154,23 @@ class InventoryPageTests(unittest.TestCase):
                          targets=((body, label) for body, label in (("d", "Dave"), ("h", "Hank"))))
         self.assertEqual([box.count() for box in page.target_boxes.values()], [2, 2])
 
+    def test_message_and_body_kinds_use_literal_inputs_and_opaque_choices(self):
+        page = self.page((InventoryEntry("voice", "dark_whisper"), InventoryEntry("stay", "stay_of_execution")),
+                         target_options={"dead_body": (("dead-id", "Dead suspect"),),
+                                         "living_body": (("player-id", "Player"),)})
+        page.message_boxes["voice"].setPlainText("A literal <message> & a quote.")
+        page.use_buttons["voice"].click()
+        self.use.assert_called_with("voice", "dead-id", message="A literal <message> & a quote.")
+        page.use_buttons["stay"].click()
+        self.use.assert_called_with("stay", "player-id")
+
+    def test_missing_dead_target_and_blank_message_do_not_call_effects(self):
+        page = self.page((InventoryEntry("voice", "dark_whisper"), InventoryEntry("note", "forged_note")))
+        self.assertFalse(page.use_buttons["voice"].isEnabled())
+        page.use_buttons["note"].click()
+        self.assertFalse(page.feedback_label.isHidden())
+        self.use.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -327,7 +327,7 @@ class ItemIntegrationTests(unittest.TestCase):
 
     def test_room_acceptance_retires_editor_when_room_has_no_new_reward(self):
         self.night("knife")
-        previous = self.window.item_drafts.enter_room("Basement")
+        previous = self.window.item_drafts.enter_room("Basement", self.window.inventory.snapshot())
         self.window.item_drafts.skip(previous.offer_id)
         self.window.open_knife_dialog()
         editor = self.window._weapon_windows["knife"]
@@ -542,7 +542,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.offer_room_item("Basement", continuation)
         offer = self.window.item_drafts.pending_offer
         self.assertEqual(offer.options, ("spare_paper",))
-        buttons = [button for button in self.window.draft_dialog.findChildren(QPushButton)
+        buttons = [button for button in self.window.draft_page.findChildren(QPushButton)
                    if button.text() == "Reroll"]
         self.assertTrue(buttons)
         self.assertTrue(all(not button.isEnabled() for button in buttons))
@@ -553,7 +553,7 @@ class ItemIntegrationTests(unittest.TestCase):
         exhausted.assert_called_once_with()
         self.assertIsNone(self.window.pending_room_action)
         self.assertIsNone(self.window.item_drafts.pending_offer)
-        self.assertIsNone(self.window.draft_dialog)
+        self.assertIsNone(self.window.draft_page)
 
     def test_inventory_preserves_composing_draft_when_used(self):
         self.night()
@@ -843,6 +843,303 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.game_over)
         self.assertNotIn("voodoo", self.window.profile.unlocked)
         self.assertNotIn("bare_hands_no_item_victory", self.window.profile.counters)
+
+    def use_card(self, item_id, target=None, message=None):
+        entry = self.window.inventory.grant(item_id)
+        self.window.open_inventory()
+        page = self.window.inventory_page
+        if target is not None:
+            box = page.target_boxes[entry.instance_id]
+            index = box.findData(self.window.body_id(target))
+            self.assertGreaterEqual(index, 0)
+            box.setCurrentIndex(index)
+        if message is not None:
+            page.message_boxes[entry.instance_id].setPlainText(message)
+        page.use_buttons[entry.instance_id].click()
+        return entry
+
+    def watch_night(self, weapon_id="bare", marked="Dave"):
+        self.night(weapon_id)
+        self.conversation()
+        self.use_card("watch_this_drive", marked)
+        self.window.overlay_host.close_page()
+        self.window.run_action_phase()
+        self.window.room_assignments = {
+            "Attic": ["Dave", "Jerry"], "Kitchen": ["Hank", "Owen"],
+            "Library": ["Debra"], "Basement": [], "Cellar": [],
+        }
+
+    def test_projected_voice_preserves_required_answer_and_direct_cap(self):
+        self.conversation()
+        self.window.append_speech("Dave", "An answer.", direct_reply=True)
+        self.window.append_speech("Dave", "Another answer.", direct_reply=True)
+        self.window.append_speech("Detective", "Alex, where were you?", "Alex")
+        self.use_card("throw_voice", "Hank", "Dave, Alex was nowhere near me.")
+        self.assertEqual(self.window.public_dialogue[-1].speaker, "Hank")
+        self.assertIsNone(self.window.public_dialogue[-1].addressee)
+        self.assertEqual(self.window.direct_replies.count_for(self.window.body_id("Dave")), 2)
+        self.assertTrue(self.window.player_reply_required())
+        self.assertFalse(self.window.pass_button.isEnabled())
+        self.assertFalse(self.window.can_call_vote())
+        private = self.window.characters["Hank"]["experiences"][-1].text
+        self.assertEqual(private, 'You heard your own voice say: "Dave, Alex was nowhere near me." You did not say those words.')
+        self.window.append_speech("Alex", "Here is my account.")
+        self.assertFalse(self.window.player_reply_required())
+
+    def test_dark_whisper_dead_target_and_private_revelation_use_actual_controls(self):
+        self.conversation()
+        self.window.characters["Dave"]["alive"] = False
+        entry = self.use_card("dark_whisper", "Dave", "A voice from the darkness.")
+        self.assertNotIn(entry, self.window.inventory.entries)
+        self.assertEqual(self.window.public_events[-1].text,
+            'Everyone hears the unmistakeable voice of the dead Dave, loudly and clearly they speak:\n\n"A voice from the darkness."')
+        before = tuple(self.window.public_events)
+        self.use_card("divine_revelation", "Hank", "<truth> & certainty")
+        self.assertEqual(tuple(self.window.public_events), before)
+        self.assertEqual(self.window.characters["Hank"]["experiences"][-1].text,
+            'You hear a voice inside your mind that seems to come from a higher power: "<truth> & certainty"')
+        for name in ("Jerry", "Owen", "Debra"):
+            self.assertFalse(any("<truth>" in record.text for record in self.window.characters[name]["experiences"]))
+
+    def test_invalid_message_is_not_consumed_and_error_stays_in_inventory(self):
+        self.conversation()
+        entry = self.use_card("divine_revelation", "Hank", "   ")
+        page = self.window.inventory_page
+        self.assertIn(entry, self.window.inventory.entries)
+        self.assertFalse(page.feedback_label.isHidden())
+        page.message_boxes[entry.instance_id].setPlainText("x" * 2001)
+        page.use_buttons[entry.instance_id].click()
+        self.assertIn(entry, self.window.inventory.entries)
+        self.assertEqual(self.window.items_used, 0)
+
+    def test_lucky_match_and_deep_pockets_keep_second_pick_inline(self):
+        self.night()
+        self.conversation()
+        self.window.item_drafts = DraftState("player", eligible_item_pool())
+        self.use_card("lucky_match")
+        self.use_card("deep_pockets")
+        self.assertEqual(self.window.item_drafts.rerolls_remaining, 2)
+        self.window.overlay_host.close_page()
+        self.window.run_action_phase()
+        self.window.room_assignments["Attic"] = ["Dave", "Jerry"]
+        self.window.choose_room("Attic")
+        first = self.window.draft_page
+        self.assertEqual(self.window.item_drafts.pending_offer.picks_remaining, 2)
+        first.take_buttons[0].click()
+        self.assertEqual(len(self.window.inventory.entries), 1)
+        self.assertEqual(self.window.item_drafts.pending_offer.picks_remaining, 1)
+        self.assertIsNotNone(self.window.pending_room_action)
+        self.assertTrue(self.window.characters["Dave"]["alive"])
+        first.take_buttons[1].click()
+        self.assertEqual(len(self.window.inventory.entries), 1)
+        self.window.draft_page.take_buttons[0].click()
+        self.assertEqual(len(self.window.inventory.entries), 2)
+        self.assertIsNone(self.window.pending_room_action)
+        self.assertIsNone(self.window.draft_page)
+
+    def test_mail_ballot_is_selected_in_vote_ui_and_skips_reserved_ai(self):
+        self.conversation()
+        self.use_card("mail_in_ballot", "Dave")
+        self.window.overlay_host.close_page()
+        with patch.object(self.window.ai_runtime, "vote", return_value="NONE") as vote:
+            self.window.run_voting_phase()
+            self.assertIsNone(self.window.vote_snapshot)
+            old_button = next(button for button in self.window.vote_buttons_widget.findChildren(QPushButton)
+                              if button.text() == "Vote for Hank")
+            old_button.click()
+            self.assertEqual(self.window.ballot_actor, "Dave")
+            old_button.click()
+            self.assertNotIn("Dave", self.window.votes)
+            buttons = self.window.vote_buttons_widget.findChildren(QPushButton)
+            self.assertNotIn("Vote for Dave", [button.text() for button in buttons])
+            next(button for button in buttons if button.text() == "Vote for Alex").click()
+            self.wait_for_workers()
+            self.assertEqual(self.window.votes["Dave"], "Alex")
+            self.assertNotIn("Dave", [call.args[0].character for call in vote.call_args_list])
+            self.assertEqual(self.window.vote_snapshot.proxy_ballots[self.window.body_id("Dave")], self.window.body_id("Alex"))
+            self.assertTrue(self.window.voting_resolved)
+
+    def test_player_ballot_callback_before_first_vote_is_ignored(self):
+        history = tuple(self.window.history_records)
+        self.window.player_vote("Dave")
+        self.window.collect_player_vote("Dave")
+        self.assertEqual(tuple(self.window.history_records), history)
+        self.assertEqual(self.window.phase, "weapon_select")
+
+    def test_stay_protects_chosen_body_without_false_execution_or_innocence(self):
+        self.conversation()
+        self.use_card("stay_of_execution", "Alex")
+        self.window.overlay_host.close_page()
+        ballots = {name: "Alex" for name in self.window.characters}
+        ballots["Alex"] = "Dave"
+        self.vote(ballots)
+        self.assertTrue(self.window.player_alive)
+        self.assertFalse(self.window.game_over)
+        self.assertEqual(self.window.innocents_executed, 0)
+        self.assertIn("Against all expectation, Alex survives.", [event.text for event in self.window.public_events])
+
+    def test_pocket_gavel_honors_required_reply_then_opens_normal_vote(self):
+        self.conversation()
+        self.window.append_speech("Detective", "Alex, answer.", "Alex")
+        entry = self.use_card("pocket_gavel")
+        self.assertIn(entry, self.window.inventory.entries)
+        self.assertEqual(self.window.phase, "conversation")
+        self.window.append_speech("Alex", "My account.")
+        self.window.inventory_page.use_buttons[entry.instance_id].click()
+        self.wait_for_workers()
+        self.assertEqual(self.window.phase, "voting")
+        self.assertIsNone(self.window.overlay_host.current_page)
+        self.assertLess(len(self.window.current_conversation), self.window.minimum_to_call_vote)
+
+    def test_listening_glass_reveals_only_authoritative_night_record_to_player(self):
+        self.night()
+        self.window.remember("Jerry", "experience", "Earlier private record.")
+        self.window.choose_room("Attic")
+        self.settle_offer()
+        self.window.kill_victim("Dave")
+        view = next(view for view in self.window.night_memory_views if view.body_id == self.window.body_id("Jerry"))
+        self.assertFalse(any(record.text == "Earlier private record." for record in view.experiences))
+        self.window.remember("Jerry", "experience", "Later private revelation.")
+        before = tuple(self.window.public_events)
+        self.use_card("listening_glass", "Jerry")
+        self.assertEqual(tuple(self.window.public_events), before)
+        self.assertIn(view.experiences[-1].text, self.window.history_records[-2].text)
+        self.assertNotIn("Later private revelation.", self.window.history_records[-2].text)
+        self.assertIn(view.experiences[-1].text, self.window.inventory_page.feedback_label.text())
+        self.assertFalse(self.window.inventory_page.feedback_label.isHidden())
+
+    def test_forged_note_binds_next_actual_victim_and_is_announced_once(self):
+        self.night()
+        self.conversation()
+        self.use_card("forged_note", message="Trust the banana.")
+        self.window.overlay_host.close_page()
+        self.window.run_action_phase()
+        self.window.room_assignments = {"Attic": ["Dave", "Jerry"], "Kitchen": ["Hank", "Owen"],
+                                        "Library": ["Debra"], "Basement": [], "Cellar": []}
+        self.window.choose_room("Attic")
+        self.settle_offer()
+        self.window.kill_victim("Dave")
+        text = "The Detective reveals that a note was found by the body, it reads: Trust the banana. - Signed: Dave"
+        self.assertEqual([event.text for event in self.window.public_events].count(text), 1)
+        self.assertIsNone(self.window.item_rules.prepared_note)
+        self.assertEqual(self.window.morning_item_notes, [])
+
+    def test_watch_bonus_new_room_gets_first_reward_and_basic_attack(self):
+        self.watch_night("stopwatch")
+        self.window.choose_room("Attic")
+        self.settle_offer()
+        self.window.kill_victim("Dave")
+        self.assertTrue(self.window.bonus_action_pending)
+        self.assertEqual(self.window.phase, "action")
+        self.assertFalse(self.window._night_memories_written)
+        self.window.choose_room("Kitchen")
+        self.assertIsNotNone(self.window.draft_page)
+        self.window.draft_page.take_buttons[0].click()
+        self.window.kill_victim("Hank")
+        self.assertEqual([attack["weapon_id"] for attack in self.window.night_attacks], ["stopwatch", "bare"])
+        self.assertEqual(self.window.item_rules.bonus_actions, 0)
+        self.assertEqual(self.window.phase, "conversation")
+        self.assertTrue(any("You witnessed Alex kill Hank" in record.text for record in self.window.characters["Owen"]["experiences"]))
+        self.assertFalse(self.window.characters["Owen"]["dispositions"])
+        self.assertIn("booby_trap", self.window.profile.unlocked)
+
+    def test_watch_bonus_revisited_room_has_no_second_reward(self):
+        self.watch_night()
+        self.window.choose_room("Attic")
+        self.settle_offer()
+        self.window.kill_victim("Dave")
+        self.window.choose_room("Attic")
+        self.assertIsNone(self.window.draft_page)
+        self.assertEqual(self.window.item_rules.bonus_actions, 0)
+        self.assertFalse(self.window.characters["Jerry"]["alive"])
+        self.assertEqual(self.window.phase, "conversation")
+
+    def test_watch_after_c4_finishes_extra_attack_before_morning(self):
+        self.watch_night("c4", "Hank")
+        self.window.c4_target_room = "Kitchen"
+        self.window.apply_weapon_gating()
+        self.window.choose_room("Attic")
+        self.settle_offer()
+        self.assertTrue(self.window.bonus_action_pending)
+        self.assertFalse(self.window._night_memories_written)
+        self.window.choose_room("Library")
+        self.settle_offer()
+        self.assertEqual([attack["weapon_id"] for attack in self.window.night_attacks], ["c4", "c4", "bare"])
+        self.assertEqual(self.window.run_player_kills, 3)
+        self.assertIn("revolver", self.window.profile.unlocked)
+        self.assertIn("c4", self.window.profile.unlocked)
+
+    def test_item_event_replay_does_not_duplicate_private_memory_or_usage(self):
+        self.conversation()
+        entry = self.window.inventory.grant("divine_revelation")
+        events = self.window.item_rules.use_item(entry.instance_id, self.window.item_use_context(),
+            self.window.body_id("Dave"), message="A recorded voice.", activation_id="activation")
+        self.window.apply_item_events(events)
+        self.window.apply_item_events(events)
+        self.assertEqual(self.window.items_used, 1)
+        self.assertEqual(len(self.window.characters["Dave"]["experiences"]), 1)
+
+    def test_unlocks_follow_actual_weighted_vote_intervention_and_run_victory(self):
+        self.conversation()
+        self.use_card("banana", "Dave")
+        self.use_card("muffle", "Hank")
+        self.use_card("spare_paper")
+        self.use_card("guardian_angel")
+        self.window.overlay_host.close_page()
+        ballots = {name: "Alex" for name in self.window.characters}
+        ballots["Alex"] = "NONE"
+        self.vote(ballots)
+        self.assertTrue(self.window.player_alive)
+        self.assertTrue(self.window.guardian_intervened_this_run)
+        self.assertIn("presidential_decree", self.window.profile.unlocked)
+        self.assertNotIn("lucky_coin", self.window.profile.unlocked)
+        self.assertNotIn("spin_the_dagger", self.window.profile.unlocked)
+        self.window.run_action_phase()
+        for name in ("Dave", "Jerry", "Hank", "Owen"):
+            room = next(room for room, occupants in self.window.room_assignments.items() if name in occupants)
+            self.assertTrue(self.window.commit_attack(name, room))
+        self.window.finish_night()
+        self.assertTrue(self.window.game_over)
+        self.assertIn("lucky_coin", self.window.profile.unlocked)
+        self.assertIn("spin_the_dagger", self.window.profile.unlocked)
+        self.assertEqual(self.window.profile.counters["three_item_types_victory"], 1)
+        self.window.end_game_screen(5)
+        self.assertEqual(self.window.profile.counters["guardian_intervention_run_survived"], 1)
+
+    def test_watch_controlled_attack_keeps_controller_and_bonus_separate(self):
+        self.watch_night("blackmagic", "Hank")
+        self.window.black_magic_controller, self.window.black_magic_target = "Dave", "Hank"
+        self.window.apply_weapon_gating()
+        self.window.choose_room("Attic")
+        self.settle_offer()
+        self.assertTrue(self.window.bonus_action_pending)
+        self.window.choose_room("Library")
+        self.settle_offer()
+        self.assertEqual([attack["weapon_id"] for attack in self.window.night_attacks], ["blackmagic", "bare"])
+        self.assertEqual([attack["attacker_label"] for attack in self.window.night_attacks], ["Dave", "Alex"])
+        self.assertEqual(self.window.item_rules.bonus_actions, 0)
+
+    def test_watch_basic_bonus_does_not_transfer_pen_signature_to_bonus_victim(self):
+        self.watch_night("pen")
+        self.window.pending_pen_note_text = "A single pen note."
+        self.window.apply_weapon_gating()
+        self.window.choose_room("Attic")
+        self.settle_offer()
+        self.window.kill_victim("Dave")
+        self.window.choose_room("Kitchen")
+        self.settle_offer()
+        with patch.object(game.random, "random", return_value=1.0):
+            self.window.kill_victim("Hank")
+        notes = [event.text for event in self.window.public_events if "A single pen note." in event.text]
+        self.assertEqual(notes, ["The Detective reveals that a note was found by the body, it reads: A single pen note. - Signed: Dave"])
+
+    def test_optional_unfinished_use_is_explicitly_blocked_without_consuming(self):
+        self.conversation()
+        entry = self.use_card("revolver", "Dave")
+        self.assertIn(entry, self.window.inventory.entries)
+        self.assertFalse(self.window.inventory_page.use_buttons[entry.instance_id].isEnabled())
+        self.assertFalse(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
+        self.assertTrue(self.window.characters["Dave"]["alive"])
 
     def test_final_attack_publishes_camera_before_awarding_bare_no_items_victory(self):
         self.night()

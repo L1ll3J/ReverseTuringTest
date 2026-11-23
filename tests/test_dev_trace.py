@@ -258,6 +258,7 @@ class GameTraceTests(unittest.TestCase):
 
     def prepare_night(self, weapon_id, assignments):
         self.window.phase = "action"
+        self.window.round_number = 1
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == weapon_id)
         self.window.room_assignments = assignments
         self.window.rooms_visited = []

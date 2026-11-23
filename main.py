@@ -16,7 +16,7 @@ from message_view import DisplayRecord, MessageLog
 from overlay_host import OverlayHost
 from npc_items import NPCItemState
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
-from game_rules import BodyState, ItemUseContext, PlayerItemRules, ItemRuleError
+from game_rules import BodyState, DeathCause, ItemUseContext, NightMemoryView, PlayerItemRules, ItemRuleError, GUARDIAN_PUBLIC
 from muffled import muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
@@ -158,6 +158,8 @@ class GameWindow(QMainWindow):
         self.retry_action = None
         self.direct_replies = DirectReplyPolicy()
         self.pending_direct_reply = None
+        self.required_reply_anchor = None
+        self.last_speech_origin = None
         self.turn_preparation = TurnPreparation()
         self.conversation_revision = 0
         self.awaiting_preparation = None
@@ -184,6 +186,13 @@ class GameWindow(QMainWindow):
         self.progress_sequence = 0
         self.pending_progress = []
         self.items_used = 0
+        self.used_item_types = set()
+        self.applied_item_events = set()
+        self.morning_item_notes = []
+        self.night_memory_views = ()
+        self.guardian_intervened_this_run = False
+        self.bonus_action_pending = False
+        self.bonus_action_id = None
         self.run_player_kills = 0
         self.innocents_executed = 0
         self.witness_body_ids = set()
@@ -376,6 +385,7 @@ class GameWindow(QMainWindow):
             self.reroll_item_offer, self.skip_item_offer,
             reroll_count=self.item_drafts.rerolls_remaining,
             can_reroll=bool(self.item_drafts.reroll_alternatives(offer.offer_id, self.inventory.snapshot())),
+            picks_remaining=offer.picks_remaining,
             body_font=readable_body_font(), title_font=self.speaker_font,
         )
         self.layout.insertWidget(self.layout.indexOf(self.room_buttons_widget), self.draft_page, 1)
@@ -416,6 +426,10 @@ class GameWindow(QMainWindow):
             return
         self.trace_action("item_acquired", entry=entry, offer_id=offer_id)
         self.record_history(f"You kept {ITEM_CATALOGUE[entry.item_id].name}.")
+        if self.item_drafts.pending_offer is not None:
+            self.show_item_offer(self.item_drafts.pending_offer)
+            self.update_inventory_button()
+            return
         self.finish_item_offer()
 
     def skip_item_offer(self, offer_id):
@@ -475,10 +489,19 @@ class GameWindow(QMainWindow):
         if ((current is not None and current is not self.inventory_page)
                 or self.separate_surface_open()):
             return
-        targets = [(body.body_id, body.label) for body in self.body_states() if body.alive and body.is_npc]
+        bodies = self.body_states()
+        targets = [(body.body_id, body.label) for body in bodies if body.alive and body.is_npc]
+        options = {
+            "living_body": [(body.body_id, body.label) for body in bodies if body.alive],
+            "dead_body": [(body.body_id, body.label) for body in bodies if not body.alive],
+            "room": [(room, room) for room in self.night_rooms],
+        }
+        unavailable = {item_id: "Not available in this development build yet."
+                       for item_id, definition in ITEM_CATALOGUE.items()
+                       if not definition.default and item_id != "guardian_angel"}
         page = InventoryPage(self.inventory.entries, ITEM_CATALOGUE, targets, self.use_inventory_item,
                              can_use=self.can_use_items(), body_font=readable_body_font(),
-                             title_font=self.speaker_font)
+                             title_font=self.speaker_font, target_options=options, unavailable=unavailable)
         self.inventory_page = page
         help_text = "Keep items between nights. Use them while the discussion is waiting for you."
         if current is not None:
@@ -490,16 +513,28 @@ class GameWindow(QMainWindow):
             if current is not None:
                 page.deleteLater()
 
-    def use_inventory_item(self, instance_id, target_body_id=None):
+    def item_use_context(self):
+        return ItemUseContext(max(1, self.round_number), self.phase, self.ai_busy,
+                              self.player_owner_id, self.body_id(self.player_name), self.body_states(),
+                              available_rooms=self.night_rooms, required_player_reply=self.player_reply_required(),
+                              memory_views=self.night_memory_views)
+
+    def use_inventory_item(self, instance_id, target_body_id=None, *, message=None, room_id=None, activation_id=None):
         if not self.can_use_items():
             return False
-        context = ItemUseContext(max(1, self.round_number), self.phase, self.ai_busy,
-                                 self.player_owner_id, self.body_id(self.player_name), self.body_states())
+        context = self.item_use_context()
         try:
-            events = self.item_rules.use_item(instance_id, context, target_body_id)
-        except ItemRuleError as error:
+            definition = ITEM_CATALOGUE[self.inventory.get(instance_id).item_id]
+            if not definition.default and definition.item_id != "guardian_angel":
+                raise ItemRuleError("This item is not available in this development build yet.")
+            events = self.item_rules.use_item(instance_id, context, target_body_id,
+                                             message=message, room_id=room_id, drafts=self.item_drafts,
+                                             activation_id=activation_id or uuid4().hex)
+        except (ItemRuleError, InventoryError) as error:
             self.secondary_output_area.setText(str(error))
             self.secondary_output_area.show()
+            if self.inventory_page is not None:
+                self.inventory_page.show_feedback(str(error))
             return False
         self.invalidate_prepared_turn("item_used", changed=True)
         self.request_serial += 1
@@ -508,13 +543,24 @@ class GameWindow(QMainWindow):
         self.apply_item_events(events)
         self.restore_conversation_decision()
         self.trace_action("inventory_item_used", events=events)
+        if any(event.event_type == "early_vote_requested" for event in events):
+            self.overlay_host.close_page()
+            self.call_vote()
+            return True
         if self.inventory_page is not None:
             self.open_inventory()
+            messages = [f"Listening Glass: {self.label_for_body(event.target_body_id)}, night {event.observed_day}\n{event.message}"
+                        for event in events if event.event_type == "private_memory_revealed"]
+            if messages and self.inventory_page is not None:
+                self.inventory_page.show_feedback("\n\n".join(messages))
         self.maybe_prepare_next_turn()
         return True
 
     def apply_item_events(self, events):
         for event in events:
+            if event.event_id in self.applied_item_events:
+                continue
+            self.applied_item_events.add(event.event_id)
             self.trace.record("item_effect", {"event": event})
             recipient = self.label_for_body(event.target_body_id)
             if event.public_text:
@@ -526,16 +572,32 @@ class GameWindow(QMainWindow):
                     self.remember(recipient, "disposition", event.disposition_text)
             if event.event_type == "banana_given":
                 self.queue_progress("banana_given")
+            elif event.event_type == "apparent_speech" and event.origin == "projected_voice":
+                self.append_speech(recipient, event.message, origin=event.origin)
+            elif event.event_type == "private_memory_revealed":
+                self.record_history(f"Listening Glass: {recipient}, night {event.observed_day}\n{event.message}", display=True)
+            elif event.event_type == "prepared_note_bound":
+                self.morning_item_notes.append((event.event_id, recipient, event.message))
+            elif event.event_type == "extra_action_earned":
+                self.queue_progress("marked_kill_completed")
+            elif event.event_type == "execution_stayed":
+                self.add_public_event(GUARDIAN_PUBLIC.format(target=recipient))
+            elif event.event_type == "guardian_intervened" and recipient == self.player_name:
+                self.guardian_intervened_this_run = True
             elif event.event_type == "item_used":
                 self.items_used += 1
+                self.used_item_types.add(event.item_id)
                 item_name = ITEM_CATALOGUE[event.item_id].name
                 target = f" on {recipient}" if recipient is not None and recipient != self.player_name else ""
                 self.record_history(f"You used {item_name}{target}.")
 
-    def resolve_death(self, label, attempt_id):
+    def resolve_death(self, label, attempt_id, *, cause=DeathCause.ATTACK, source_id=None, caused_by_player=False):
         target = next(body for body in self.body_states() if body.label == label)
         owner = self.player_owner_id if label == self.player_name else None
-        decision = self.item_rules.attempt_death(attempt_id, target, max(1, self.round_number), owner)
+        decision = self.item_rules.attempt_death(
+            attempt_id, target, max(1, self.round_number), owner, cause=cause, source_id=source_id,
+            caused_by_owner_id=self.player_owner_id if caused_by_player else None,
+            phase=self.phase if caused_by_player else None)
         if decision.is_new:
             self.invalidate_prepared_turn("death_resolved", changed=True)
         self.apply_item_events(decision.events)
@@ -568,14 +630,16 @@ class GameWindow(QMainWindow):
             self.room_assignments[room].remove(target)
             self.room_assignments[room].append(old_body)
             attack.update(corpse_label=old_body, corpse_body_id=self.body_id(old_body))
-            decision = self.resolve_death(old_body, attack["attack_id"])
+            decision = self.resolve_death(old_body, attack["attack_id"], caused_by_player=True)
             self.record_history(f"You possessed the body of {target} in the {room} and left behind {old_body} as a corpse.")
             self.trace_action("identity_changed", previous_body=old_body, current_body=target)
         else:
-            decision = self.resolve_death(target, attack["attack_id"])
+            decision = self.resolve_death(target, attack["attack_id"], caused_by_player=True)
         if not decision.killed:
             return False
         self.night_attacks.append(attack)
+        if weapon_id == "pen":
+            self.pen_last_victim_name = attack["corpse_label"]
         self.victims_last_night.append(attack["corpse_label"])
         if room not in self.new_crime_scenes:
             self.new_crime_scenes.append(room)
@@ -736,7 +800,12 @@ class GameWindow(QMainWindow):
         self.retry_action = None
         self.retry_button.hide()
         self.request_serial += 1
-        self.public_dialogue.append(DialogueLine(self.round_number, speaker, speech, addressee))
+        line = DialogueLine(self.round_number, speaker, speech, addressee)
+        self.public_dialogue.append(line)
+        self.last_speech_origin = (line, origin)
+        if origin == "ordinary":
+            self.required_reply_anchor = ((line, self.body_id(self.player_name))
+                                          if addressee == self.player_name and speaker != self.player_name else None)
         self.trace.record("speech_committed", {"round": self.round_number, "speaker": speaker,
                                               "speech": speech, "addressee": addressee,
                                               "origin": origin, "direct_reply": direct_reply},
@@ -1917,7 +1986,7 @@ class GameWindow(QMainWindow):
 
     def build_weapon_action_panel(self):
         """Right-side card for the currently equipped weapon during Action Phase."""
-        if self.phase != "action" or self.game_over or self.pending_room_action is not None:
+        if self.phase != "action" or self.game_over or self.pending_room_action is not None or self.bonus_action_pending:
             self.weapon_action_panel.hide()
             return
         # clear panel
@@ -2045,7 +2114,7 @@ class GameWindow(QMainWindow):
         if not getattr(self, "weapon_action_panel", None):
             return
         if (self.phase != "action" or self.game_over or not self.selected_weapon
-                or self.pending_room_action is not None
+                or self.pending_room_action is not None or self.bonus_action_pending
                 or self.room_buttons_widget.isHidden()):
             self.weapon_action_panel.hide()
             return
@@ -2100,7 +2169,7 @@ class GameWindow(QMainWindow):
     def can_configure_weapon(self, weapon_id, editor=None, night=None):
         """Only current setup may change before a room action is accepted."""
         return (self.phase == "action" and not self.game_over
-                and self.pending_room_action is None
+                and self.pending_room_action is None and not self.bonus_action_pending
                 and (self.selected_weapon or {}).get("id") == weapon_id
                 and (editor is None or (self._weapon_windows.get(weapon_id) is editor
                                         and night == self.round_number)))
@@ -2117,6 +2186,8 @@ class GameWindow(QMainWindow):
             self._weapon_windows[weapon_id] = None
 
     def weapon_is_mandatory(self):
+        if self.bonus_action_pending:
+            return False
         wpn = getattr(self, "selected_weapon", None)
         if not wpn:
             return False
@@ -2140,7 +2211,9 @@ class GameWindow(QMainWindow):
 
     def set_room_buttons_enabled(self, enabled: bool):
         enabled = enabled and self.pending_room_action is None
-        unavailable = set(self.old_crime_scenes) | set(getattr(self, "new_crime_scenes", []))
+        unavailable = set(self.old_crime_scenes)
+        if not self.bonus_action_pending:
+            unavailable.update(getattr(self, "new_crime_scenes", []))
         for room, btn in self.room_buttons.items():
             btn.setEnabled(enabled and room not in unavailable)
         self.update_room_button_states()
@@ -2183,6 +2256,9 @@ class GameWindow(QMainWindow):
         self.round_number += 1
         self.night_attacks = []
         self._night_memories_written = False
+        self.night_memory_views = ()
+        self.bonus_action_pending = False
+        self.bonus_action_id = None
         self.apply_item_events(self.item_rules.begin_night(self.round_number, self.body_states()))
         self.update_inventory_button()
         self.append_output_text(f"Action Phase {self.round_number} begins!\n")
@@ -2271,13 +2347,14 @@ class GameWindow(QMainWindow):
                 or not self.room_buttons[selected_room].isEnabled()):
             return
         self.record_history(f"\nYou have chosen to stay in the {selected_room}.\n", display=True)
-        occupants = self.room_assignments[selected_room]
+        occupants = [name for name in self.room_assignments[selected_room]
+                     if self.characters.get(name, {}).get("alive")]
 
         self.rooms_visited.append(selected_room)
         self.new_crime_scenes.append(selected_room)
         self.trace_action("room_entered", room=selected_room, occupants=list(occupants))
 
-        wpn_id = (self.selected_weapon or {}).get("id")
+        wpn_id = None if self.bonus_action_pending else (self.selected_weapon or {}).get("id")
 
         # ---- Special weapons decouple sleep room from kill ----
         if wpn_id in ("c4", "blackmagic", "love"):
@@ -2299,19 +2376,12 @@ class GameWindow(QMainWindow):
 
                 # No crime scenes; straight to convo
                 self.new_crime_scenes = []
-                if len(self.victims_last_night) == 0:
-                    self.update_witness_memories(None)
-                elif len(self.victims_last_night) == 1:
-                    self.update_witness_memories(self.victims_last_night[0])
-                else:
-                    self.update_witness_memories(" and ".join(self.victims_last_night))
-                return self.run_conversation_phase()
+                return self.finish_night()
 
             if wpn_id == "c4":
                 if self.c4_cooldown_nights > 0:
                     self.new_crime_scenes = []
-                    self.update_witness_memories(None)
-                    return self.run_conversation_phase()
+                    return self.finish_night()
                 if not self.c4_target_room:
                     self.append_output_text("You must plant the explosive first.\n")
                     self.room_buttons_widget.show(); self.weapon_action_panel.show()
@@ -2331,15 +2401,13 @@ class GameWindow(QMainWindow):
                     self._override_murder_room = target_room
                     self.trace_action("explosion_resolved", room=target_room,
                                       victims=list(self.victims_last_night))
-                    self.update_witness_memories(' and '.join(victims))
     
                 else:
                     self.record_history(f"The C4 detonates in the {target_room}, but nobody was there.\n", display=True)
                     self.new_crime_scenes = [target_room]
                     self.trace_action("explosion_resolved", room=target_room, victims=[])
-                    self.update_witness_memories(None)
                 # No witnesses for blast; go to convo
-                return self.run_conversation_phase()
+                return self.finish_night()
 
             if wpn_id == "blackmagic":
                 ctrl, tgt = self.black_magic_controller, self.black_magic_target
@@ -2355,7 +2423,7 @@ class GameWindow(QMainWindow):
                 if not target_room:
                     self.append_output_text("GAME ERROR (dev's fault): Target could not be located. No kill happened.\n")
                     self.new_crime_scenes = []
-                    return self.run_conversation_phase()
+                    return self.finish_night()
 
                 # Kill via controller in the target room but keep existing pipeline
                 self.commit_attack(tgt, target_room, attacker=ctrl, weapon_id="blackmagic")
@@ -2370,9 +2438,8 @@ class GameWindow(QMainWindow):
 
                 self.trace_action("controlled_kill_resolved", controller=ctrl, victim=tgt, room=target_room)
                 # Reuse your existing witness writer, but weapon-aware
-                self.update_witness_memories(tgt)
                 self._override_murder_room = None
-                return self.run_conversation_phase()
+                return self.finish_night()
 
         # Handle the outcome based on room occupants
         if len(occupants) == 0:
@@ -2436,6 +2503,14 @@ class GameWindow(QMainWindow):
         self.finish_primary_kill(victim, self.rooms_visited[-1])
 
     def finish_primary_kill(self, victim, room):
+        if not self.characters.get(victim, {}).get("alive"):
+            return
+        if self.bonus_action_pending:
+            self.item_rules.consume_bonus_action(self.bonus_action_id, self.round_number)
+            self.bonus_action_pending = False
+            self.commit_attack(victim, room, weapon_id="bare")
+            self.finish_night()
+            return
         self.commit_attack(victim, room)
         target = self.knife_extra_target
         if ((self.selected_weapon or {}).get("id") == "knife" and target != victim
@@ -2454,6 +2529,22 @@ class GameWindow(QMainWindow):
         self.finish_night()
 
     def finish_night(self):
+        if self.phase != "action" or self.game_over or self.pending_room_action is not None:
+            return
+        if self.item_rules.bonus_actions and any(
+                self.characters.get(name, {}).get("alive")
+                for room in self.night_rooms for name in self.room_assignments.get(room, ())):
+            if not self.bonus_action_pending:
+                self.bonus_action_id = uuid4().hex
+                self.bonus_action_pending = True
+                self.retire_weapon_editors()
+                self.weapon_action_panel.hide()
+                for room, button in self.room_buttons.items():
+                    button.setEnabled(room in self.night_rooms)
+                self.update_room_button_states()
+                self.room_buttons_widget.show()
+                self.append_output_text("Watch This Drive: choose a room for one extra basic attack.")
+            return
         self.update_witness_memories(None)
         self.run_conversation_phase()
 
@@ -2461,6 +2552,8 @@ class GameWindow(QMainWindow):
         # One authoritative pass after every attack has resolved avoids contradictory alibis.
         if self._night_memories_written:
             return
+        before = {name: (self.body_id(name), len(data["experiences"]))
+                  for name, data in self.characters.items()}
         self._night_memories_written = True
         attacked_rooms = {attack["room"] for attack in self.night_attacks}
         sleep_room = self.rooms_visited[0] if self.rooms_visited else None
@@ -2475,7 +2568,7 @@ class GameWindow(QMainWindow):
                 if attack["weapon_id"] == "blackmagic" and observer == killer:
                     self.remember(observer, "experience",
                         f"You were controlled last night! You were in a trance-like state, like a puppet in your own body, all you could hear was {self.player_name}'s voice echoing inside your head as they forced you to kill {target} against your will! {self.player_name} is the real killer, not you!")
-                elif self.stopwatch_selected:
+                elif attack["weapon_id"] == "stopwatch":
                     self.remember(observer, "experience",
                         f"You ({observer}) were in the {room} with {target} and {killer}. You remember a struggle, and then seeing {target}'s body on the ground, but everything else is a blur - something deep inside of you thinks maybe you killed {target}.")
                     self.remember(observer, "disposition",
@@ -2519,6 +2612,11 @@ class GameWindow(QMainWindow):
                     others = [o for o in occupants if o != occupant and self.characters[o]["alive"]] + [self.player_name]
                     self.remember(occupant, "experience",
                         f"You and " + ' and '.join(others) + f" shared a picturesque and beautifully intimate night in the {self.rooms_visited[-1]}. It was everything your heart yearned for, espcially due to {self.player_name}.")
+
+        self.night_memory_views = tuple(
+            NightMemoryView(body_id, self.round_number, tuple(self.characters[name]["experiences"][start:]))
+            for name, (body_id, start) in before.items() if name in self.characters
+        )
 
     def restore_conversation_decision(self, *, open_floor_blocked=False):
         if self.phase != "conversation" or self.game_over:
@@ -2826,7 +2924,14 @@ class GameWindow(QMainWindow):
     def player_reply_required(self):
         if self.phase != "conversation" or self.game_over or not self.public_dialogue:
             return False
+        anchor = self.required_reply_anchor
+        if (anchor is not None and anchor[0].round_number == self.round_number
+                and anchor[1] == self.body_id(self.player_name)):
+            return True
         latest = self.public_dialogue[-1]
+        if (self.last_speech_origin is not None and self.last_speech_origin[0] is latest
+                and self.last_speech_origin[1] != "ordinary"):
+            return False
         return (latest.round_number == self.round_number and latest.addressee == self.player_name
                 and latest.speaker != self.player_name
                 and (latest.speaker == "Detective" or latest.speaker in self.characters))
@@ -2946,7 +3051,8 @@ class GameWindow(QMainWindow):
     def can_call_vote(self):
         return (self.phase == "conversation" and not self.game_over and not self.ai_busy
                 and not self.player_reply_required()
-                and (len(self.current_conversation) >= self.minimum_to_call_vote or self.all_npcs_muffled()))
+                and self.item_rules.can_open_vote(self.item_use_context(), len(self.current_conversation),
+                                                  0 if self.all_npcs_muffled() else self.minimum_to_call_vote))
 
     def call_vote(self):
         if not self.can_call_vote():
@@ -2974,8 +3080,12 @@ class GameWindow(QMainWindow):
         self.update_inventory_button()
         self.ensure_body_ids()
         self.vote_id = uuid4().hex
-        self.vote_snapshot = self.item_rules.open_vote(self.vote_id, tuple(body for body in self.body_states() if body.alive),
-                                  self.body_ids[self.player_name], day=max(1, self.round_number))
+        self.vote_bodies = tuple(body for body in self.body_states() if body.alive)
+        self.vote_snapshot = None
+        self.vote_requests_started = False
+        self.proxy_voters = {body.label for body in self.vote_bodies
+                             if self.item_rules.proxy_voters.get(body.body_id) == self.round_number}
+        self.ballot_actor = self.player_name
         self.voting_resolved = False
         self.expected_voters = {self.player_name} | {
             char for char, data in self.characters.items() if data["alive"]
@@ -2984,9 +3094,23 @@ class GameWindow(QMainWindow):
         self.awaiting_player_vote = True
         self.append_output_text("Voting phase has begun. Choose your vote below.")
         self.display_vote_buttons()
+        self.start_vote_requests()
+
+    def start_vote_requests(self):
+        if (self.phase != "voting" or self.game_over or self.vote_requests_started
+                or not self.proxy_voters.issubset(self.votes)):
+            return
+        self.vote_snapshot = self.item_rules.open_vote(
+            self.vote_id, self.vote_bodies, self.body_id(self.player_name), day=max(1, self.round_number),
+            proxy_ballots={self.body_id(voter): self.body_id(self.votes[voter]) if self.votes[voter] != "NONE" else "NONE"
+                           for voter in self.proxy_voters})
+        self.vote_requests_started = True
         self.trace_state("voting_started")
         contexts = tuple(self.build_character_context(char) for char in self.expected_voters
-                         if char != self.player_name)
+                         if char != self.player_name and char not in self.proxy_voters)
+        if not contexts:
+            self.tally_votes()
+            return
         runtime = self.ai_runtime
         self.start_ai_request(
             lambda scope=None: parallel_requests(runtime.vote, contexts, trace_scope=scope),
@@ -2997,8 +3121,19 @@ class GameWindow(QMainWindow):
 
 
     def display_vote_buttons(self):
+        previous = getattr(self, "vote_buttons_widget", None)
+        if previous is not None:
+            previous.hide()
+            self.layout.removeWidget(previous)
+            previous.deleteLater()
         self.vote_buttons_widget = QWidget()
         vote_layout = QVBoxLayout()
+        actor, vote_id = self.ballot_actor, self.vote_id
+        if actor != self.player_name:
+            heading = QLabel(f"Cast {actor}'s ballot")
+            heading.setTextFormat(Qt.PlainText)
+            heading.setFont(readable_body_font())
+            vote_layout.addWidget(heading)
 
         screen = QGuiApplication.primaryScreen()  # Get the primary screen
         screen_size = screen.size()  # Get screen size
@@ -3006,8 +3141,8 @@ class GameWindow(QMainWindow):
         conversation_button_font_size = max(int(32 *(screen_width/2560)), 18)
 
         # Create buttons for each alive character (except the player)
-        for character in self.characters:
-            if self.characters[character]["alive"] and character != self.player_name:
+        for character in sorted(self.expected_voters):
+            if character != actor:
                 vote_button = QPushButton(f"Vote for {character}", self)
                 vote_button.setStyleSheet(f"""
                     QPushButton {{
@@ -3019,7 +3154,8 @@ class GameWindow(QMainWindow):
                         color: #808080;
                     }}
                 """)
-                vote_button.clicked.connect(lambda _, c=character: self.player_vote(c))
+                vote_button.clicked.connect(lambda _, c=character, voter=actor, token=vote_id:
+                                            self.player_vote(c, voter=voter, vote_id=token))
                 vote_layout.addWidget(vote_button)
 
         #Player can also vote to skip
@@ -3034,7 +3170,8 @@ class GameWindow(QMainWindow):
                 color: #808080;
             }}
         """)
-        vote_button.clicked.connect(lambda _, c="NONE": self.player_vote(c))
+        vote_button.clicked.connect(lambda _, c="NONE", voter=actor, token=vote_id:
+                                    self.player_vote(c, voter=voter, vote_id=token))
         vote_layout.addWidget(vote_button)
 
         self.vote_buttons_widget.setLayout(vote_layout)
@@ -3043,14 +3180,20 @@ class GameWindow(QMainWindow):
     def collect_player_vote(self, vote):
         self.player_vote(vote)
 
-    def player_vote(self, selected_character):
-        if (self.phase != "voting" or self.voting_resolved
-                or self.player_name in self.votes):
+    def player_vote(self, selected_character, *, voter=None, vote_id=None):
+        if self.phase != "voting" or self.game_over:
+            return
+        actor = self.ballot_actor
+        if (self.voting_resolved
+                or actor in self.votes or (voter is not None and voter != actor)
+                or (vote_id is not None and vote_id != self.vote_id)):
             return
         selected_character = validate_vote(
-            self.player_name, selected_character, self.characters, self.player_name
+            actor, selected_character, self.characters, self.player_name
         )
-        if selected_character != "NONE":
+        if actor != self.player_name:
+            self.record_history(f"You cast {actor}'s ballot for {selected_character}.", display=True)
+        elif selected_character != "NONE":
             self.append_output_text(f"You voted for {selected_character}.\n")
             self.record_history(f"Vote {self.round_number}", kind="section")
             self.record_history(f"You voted for {selected_character}.\n")
@@ -3058,13 +3201,19 @@ class GameWindow(QMainWindow):
             self.append_output_text(f"You voted to skip.\n")
             self.record_history(f"Vote {self.round_number}", kind="section")
             self.record_history(f"You voted to skip.\n")
-        self.votes[self.player_name] = selected_character
-        self.trace.record("ballot_received", {"voter": self.player_name, "target": selected_character,
+        self.votes[actor] = selected_character
+        self.trace.record("ballot_received", {"voter": actor, "target": selected_character,
                                              "round": self.round_number, "source": "player"})
-        self.awaiting_player_vote = False
+        remaining = sorted(self.proxy_voters - self.votes.keys())
+        self.awaiting_player_vote = bool(remaining)
 
         # Hide the voting buttons after the player has voted
         self.vote_buttons_widget.hide()
+        if remaining:
+            self.ballot_actor = remaining[0]
+            self.display_vote_buttons()
+            return
+        self.start_vote_requests()
 
         # Once player votes, tally all votes
         self.tally_votes()
@@ -3072,7 +3221,7 @@ class GameWindow(QMainWindow):
     def collect_ai_vote(self, character, vote):
         if (self.phase != "voting" or self.voting_resolved
                 or character not in self.expected_voters or character == self.player_name
-                or character in self.votes):
+                or character in self.votes or character in self.proxy_voters):
             return
         self.votes[character] = validate_vote(
             character, vote, self.characters, self.player_name
@@ -3084,6 +3233,7 @@ class GameWindow(QMainWindow):
 
     def tally_votes(self):
         if (self.phase != "voting" or self.voting_resolved
+                or self.vote_snapshot is None
                 or not self.expected_voters.issubset(self.votes)):
             return
         self.voting_resolved = True
@@ -3110,7 +3260,8 @@ class GameWindow(QMainWindow):
             self.add_public_event(f"There was a tie between {' and '.join(names)}. No one was voted out.", "Voting")
         else:
             voted_out = self.label_for_body(result.executed_body_id)
-            decision = self.resolve_death(voted_out, f"vote:{self.vote_id}")
+            decision = self.resolve_death(voted_out, f"vote:{self.vote_id}",
+                                          cause=DeathCause.EXECUTION, source_id=self.vote_id)
             if decision.killed:
                 if voted_out == self.player_name:
                     score = 5 - sum(data["alive"] for data in self.characters.values())
@@ -3123,6 +3274,8 @@ class GameWindow(QMainWindow):
                         self.queue_progress("two_innocents_executed")
         if self.player_alive and not self.game_over:
             self.queue_progress("survived_vote")
+            if self.vote_snapshot.bonus > 0:
+                self.queue_progress("survived_spare_paper_vote")
             living_ids = {body.body_id for body in self.body_states() if body.alive and body.is_npc}
             if self.witness_body_ids & living_ids:
                 self.queue_progress("survived_witnessed_vote")
@@ -3199,6 +3352,12 @@ class GameWindow(QMainWindow):
         self.phase = "game_over"
         self.cancel_dictation()
         self.update_inventory_button()
+        won = self.player_alive and sum(data["alive"] for name, data in self.characters.items()
+                                        if name != self.player_name) <= 1
+        if won and len(self.used_item_types) >= 3:
+            self.queue_progress("three_item_types_victory")
+        if won and self.guardian_intervened_this_run:
+            self.queue_progress("guardian_intervention_run_survived")
         if self.player_alive and (self.selected_weapon or {}).get("id") == "bare" and self.items_used == 0:
             self.queue_progress("bare_hands_no_item_victory")
         self.trace_action("game_ended", final_score=final_score)
@@ -3383,6 +3542,11 @@ class GameWindow(QMainWindow):
             self.round_number,
             lambda description: self.add_public_event(description, source="Photograph", display=False),
         )
+        notes, self.morning_item_notes = self.morning_item_notes, []
+        for _event_id, victim, message in notes:
+            note = message + " - Signed: " + victim
+            self.add_public_event("The Detective reveals that a note was found by the body, it reads: " + note,
+                                  display=False)
         for record in self.public_event_display_records:
             if record.round_number == self.round_number:
                 self.message_log.append_record(record)
@@ -3406,7 +3570,8 @@ class GameWindow(QMainWindow):
         if ((self.selected_weapon or {}).get("id") == "pen"
                 and self.pending_pen_note_text and self.victims_last_night):
             roll = random.random()
-            signed_name = self.player_name if roll < self.weapon_pen_backfire else self.victims_last_night[-1]
+            signed_name = (self.player_name if roll < self.weapon_pen_backfire
+                           else self.pen_last_victim_name or self.victims_last_night[-1])
             self.trace.record("random_outcome", {"kind": "pen_signature", "roll": roll,
                                                 "threshold": self.weapon_pen_backfire, "signed_name": signed_name})
             note = self.pending_pen_note_text + " - Signed: " + signed_name
