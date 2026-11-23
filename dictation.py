@@ -52,6 +52,7 @@ class DictationRecorder(QObject):
         self._capture_started_ns = None
         self._captured_bytes = 0
         self._last_state = None
+        self._ready_read_events = 0
 
     @property
     def generation(self):
@@ -101,6 +102,7 @@ class DictationRecorder(QObject):
         self._capture_started_ns = monotonic_ns()
         self._captured_bytes = 0
         self._last_state = None
+        self._ready_read_events = 0
         self._format = None
         try:
             device = self._input_device()
@@ -133,7 +135,7 @@ class DictationRecorder(QObject):
                 self._fail(generation, reason="backend_start")
                 return generation
             self._source = source
-            source.readyRead.connect(lambda: self._drain(generation))
+            source.readyRead.connect(lambda: self._ready_read(generation))
             self._timer = QTimer(self)
             self._timer.setSingleShot(True)
             self._timer.timeout.connect(lambda: self._stop_generation(generation))
@@ -168,12 +170,19 @@ class DictationRecorder(QObject):
             if audio.error() != QAudio.NoError or state == QAudio.StoppedState:
                 self._fail(generation, reason="backend_state")
 
+    def _ready_read(self, generation):
+        if self._recording and self.is_current(generation):
+            self._ready_read_events += 1
+            self._drain(generation)
+
     def _drain(self, generation, *, stop_at_limit=True):
         if not self._recording or not self.is_current(generation) or self._source is None:
             return
         try:
             remaining = self._capacity - self._buffer.size()
-            available = self._source.bytesAvailable()
+            # The audio backend owns the pending PCM. Its pull QIODevice may
+            # report zero bytesAvailable even while readyRead signals PCM.
+            available = self._audio.bytesReady()
             if remaining and available:
                 chunk = self._source.read(min(available, remaining))
                 if self._buffer.write(chunk) != len(chunk):
@@ -254,7 +263,17 @@ class DictationRecorder(QObject):
             error = None
         elapsed = ((monotonic_ns() - self._capture_started_ns) // 1_000_000
                    if self._capture_started_ns is not None else 0)
-        return {"event": event, "reason": reason, "generation": self._generation,
+        source_metadata = {}
+        for name, target, method in (("source_open", self._source, "isOpen"),
+                                     ("source_readable", self._source, "isReadable"),
+                                     ("source_bytes_available", self._source, "bytesAvailable"),
+                                     ("backend_bytes_ready", self._audio, "bytesReady")):
+            try:
+                source_metadata[name] = getattr(target, method)() if target is not None else None
+            except Exception:
+                source_metadata[name] = None
+        return {**source_metadata, "ready_read_events": self._ready_read_events,
+                "event": event, "reason": reason, "generation": self._generation,
                 "duration_ms": elapsed, "captured_bytes": self._captured_bytes,
                 "sample_rate": audio_format.sampleRate() if audio_format else None,
                 "channels": audio_format.channelCount() if audio_format else None,
