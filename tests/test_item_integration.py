@@ -1,6 +1,7 @@
 ﻿"""Offline integration checks for real room offers, item effects and progression."""
 
 import contextlib
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -1131,6 +1132,197 @@ class ItemIntegrationTests(unittest.TestCase):
             self.window.kill_victim("Hank")
         notes = [event.text for event in self.window.public_events if "A single pen note." in event.text]
         self.assertEqual(notes, ["The Detective reveals that a note was found by the body, it reads: A single pen note. - Signed: Dave"])
+
+    def resolved_item_events(self, item_id="revolver", target="Dave", activation_id="death-item"):
+        entry = self.window.inventory.grant(item_id)
+        return self.window.item_rules.use_item(
+            entry.instance_id, self.window.item_use_context(),
+            self.window.body_id(target) if target else None, activation_id=activation_id)
+
+    def test_death_item_batch_reconciles_once_without_night_attack_side_effects(self):
+        self.conversation()
+        self.window.new_crime_scenes = []
+        events = self.resolved_item_events()
+        with patch.object(self.window.item_rules, "attempt_death", side_effect=AssertionError("Already resolved")), patch.object(
+                self.window, "commit_attack", side_effect=AssertionError("Conversation death")), patch.object(
+                self.window, "finish_night", side_effect=AssertionError("Conversation death")):
+            self.assertTrue(self.window.apply_item_events(events))
+            self.assertFalse(self.window.apply_item_events(events))
+            self.assertFalse(self.window.apply_resolved_death(events[0].death_decision))
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertEqual(self.window.run_player_kills, 1)
+        self.assertEqual(self.window.items_used, 1)
+        self.assertEqual(self.window.night_attacks, [])
+        self.assertEqual(self.window.victims_last_night, [])
+        self.assertEqual(self.window.new_crime_scenes, [])
+        self.assertEqual(self.window.characters["Jerry"]["experiences"], [])
+
+    def test_cached_death_decision_can_be_first_world_application(self):
+        self.conversation()
+        target = next(body for body in self.window.body_states() if body.label == "Dave")
+        original = self.window.item_rules.attempt_death("cached-first", target, 1)
+        cached = self.window.item_rules.attempt_death("cached-first", target, 1)
+        self.assertFalse(cached.is_new)
+        self.assertFalse(cached.killed)
+        self.assertTrue(self.window.apply_resolved_death(cached))
+        self.assertFalse(self.window.apply_resolved_death(original))
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertEqual(self.window.run_player_kills, 0)
+
+    def test_cached_prevention_then_original_applies_nested_events_once(self):
+        self.conversation()
+        self.give("guardian_angel")
+        target = next(body for body in self.window.body_states() if body.label == "Alex")
+        original = self.window.item_rules.attempt_death("cached-shield", target, 1, self.window.player_owner_id)
+        cached = self.window.item_rules.attempt_death("cached-shield", target, 1, self.window.player_owner_id)
+        self.assertFalse(self.window.apply_resolved_death(cached))
+        self.assertFalse(self.window.apply_resolved_death(original))
+        self.assertFalse(self.window.apply_resolved_death(original))
+        self.assertTrue(self.window.player_alive)
+        self.assertTrue(self.window.guardian_intervened_this_run)
+        self.assertEqual(sum("Against all expectation" in event.text for event in self.window.public_events), 1)
+
+    def test_shared_adapter_preserves_already_dead_and_delayed_causes(self):
+        self.conversation()
+        for cause, label in ((game.DeathCause.TRAP, "Dave"), (game.DeathCause.CURSE, "Jerry")):
+            target = next(body for body in self.window.body_states() if body.label == label)
+            decision = self.window.item_rules.attempt_death(cause.value, target, 1, cause=cause)
+            self.assertTrue(self.window.apply_resolved_death(decision))
+            self.assertFalse(self.window.apply_resolved_death(decision))
+            already_dead = self.window.item_rules.attempt_death(cause.value + "-again", target, 1, cause=cause)
+            self.assertEqual(already_dead.outcome, "already_dead")
+            self.assertFalse(self.window.apply_resolved_death(already_dead))
+            self.assertFalse(self.window.characters[label]["alive"])
+        self.assertEqual(self.window.run_player_kills, 0)
+        self.assertEqual(self.window.innocents_executed, 0)
+
+    def test_prevented_gamble_applies_guardian_once_then_next_attempt_kills(self):
+        self.conversation()
+        self.give("guardian_angel")
+        actor = next(body for body in self.window.body_states() if body.label == "Alex")
+        with patch.object(self.window.item_rules._rng, "choice", return_value=actor):
+            events = self.resolved_item_events("lucky_coin")
+        self.assertTrue(events[0].death_decision.prevented)
+        self.assertFalse(self.window.apply_item_events(events))
+        self.assertFalse(self.window.apply_item_events(events))
+        self.assertTrue(self.window.player_alive)
+        self.assertTrue(self.window.guardian_intervened_this_run)
+        self.assertFalse(self.window.item_rules.protection_armed)
+        self.assertEqual(sum("Against all expectation" in event.text for event in self.window.public_events), 1)
+        self.assertTrue(self.window.resolve_death("Alex", "next-attempt").killed)
+        self.assertFalse(self.window.player_alive)
+        self.assertEqual(self.window.run_player_kills, 0)
+
+    def test_conversation_death_binds_note_once_without_watch_bonus(self):
+        self.conversation()
+        for item_id, target, message in (("forged_note", None, "A prepared note."),
+                                         ("watch_this_drive", "Dave", None)):
+            entry = self.window.inventory.grant(item_id)
+            events = self.window.item_rules.use_item(
+                entry.instance_id, self.window.item_use_context(),
+                self.window.body_id(target) if target else None, message=message)
+            self.window.apply_item_events(events)
+        self.window.round_number = 2
+        events = self.resolved_item_events()
+        self.assertTrue(self.window.apply_item_events(events))
+        self.assertFalse(self.window.apply_item_events(events))
+        self.assertEqual(len(self.window.morning_item_notes), 1)
+        self.assertEqual(self.window.morning_item_notes[0][1:], ("Dave", "A prepared note."))
+        self.assertEqual(self.window.item_rules.bonus_actions, 0)
+        self.assertNotIn("marked_kill_completed", self.window.profile.counters)
+
+    def test_death_batch_save_retry_preserves_kill_and_usage_receipts(self):
+        self.conversation()
+        events = self.resolved_item_events()
+        with patch.object(self.window.profile_store, "record", side_effect=ProfileError("Disk unavailable")):
+            self.window.apply_item_events(events)
+            self.window.apply_item_events(events)
+        self.assertEqual(self.window.run_player_kills, 1)
+        self.assertEqual([event.event_type for event in self.window.pending_progress], ["player_kill"])
+        self.window.retry_progress()
+        self.window.apply_item_events(events)
+        self.window.retry_progress()
+        self.assertEqual(self.window.profile.counters["player_kill"], 1)
+        self.assertEqual(self.window.items_used, 1)
+
+    def test_unknown_death_target_does_not_consume_application_receipt(self):
+        self.conversation()
+        events = self.resolved_item_events()
+        decision = events[0].death_decision
+        invalid = replace(events[0], death_decision=replace(decision, target_body_id="missing"))
+        with self.assertRaises(game.ItemRuleError):
+            self.window.apply_item_events((invalid,))
+        self.assertNotIn(invalid.event_id, self.window.applied_item_events)
+        self.assertNotIn(decision.attempt_id, self.window.applied_death_attempts)
+        self.assertTrue(self.window.apply_item_events(events))
+
+    def test_player_item_death_ends_game_without_execution_story_or_restored_input(self):
+        self.conversation()
+        entry = self.window.inventory.grant("lucky_coin")
+        actor = next(body for body in self.window.body_states() if body.label == "Alex")
+        catalogue = dict(game.ITEM_CATALOGUE)
+        catalogue["lucky_coin"] = replace(catalogue["lucky_coin"], default=True)
+        self.window.interject_input.show()
+        with patch.object(game, "ITEM_CATALOGUE", catalogue), patch.object(
+                self.window.item_rules._rng, "choice", return_value=actor), patch.object(
+                self.window, "restore_conversation_decision") as restore:
+            self.assertTrue(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
+        restore.assert_not_called()
+        self.assertFalse(self.window.player_alive)
+        self.assertTrue(self.window.game_over)
+        self.assertEqual(self.window.phase, "game_over")
+        self.assertTrue(self.window.interject_input.isHidden())
+        self.assertFalse(self.window.inventory_button.isEnabled())
+        self.assertIn("You died.", self.window.output_area.toPlainText())
+        self.assertNotIn("hanged for your crimes", self.window.output_area.toPlainText())
+        self.assertEqual(self.window.items_used, 1)
+        self.assertEqual(self.window.run_player_kills, 0)
+
+    def test_terminal_item_usage_is_counted_before_victory_achievement(self):
+        self.conversation()
+        self.give("banana", "Dave")
+        self.give("muffle", "Jerry")
+        for name in ("Hank", "Owen", "Debra"):
+            self.window.characters[name]["alive"] = False
+        entry = self.window.inventory.grant("revolver")
+        catalogue = dict(game.ITEM_CATALOGUE)
+        catalogue["revolver"] = replace(catalogue["revolver"], default=True)
+        with patch.object(game, "ITEM_CATALOGUE", catalogue):
+            self.assertTrue(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
+        self.assertTrue(self.window.game_over)
+        self.assertEqual(self.window.items_used, 3)
+        self.assertEqual(self.window.used_item_types, {"banana", "muffle", "revolver"})
+        self.assertEqual(self.window.profile.counters["three_item_types_victory"], 1)
+        self.assertEqual(self.window.profile.counters["player_kill"], 1)
+
+    def test_gamble_items_reconcile_the_engine_selected_npc(self):
+        self.conversation()
+        for item_id, label in (("lucky_coin", "Dave"), ("spin_the_dagger", "Hank")):
+            with self.subTest(item_id=item_id):
+                loser = next(body for body in self.window.body_states() if body.label == label)
+                with patch.object(self.window.item_rules._rng, "choice", return_value=loser):
+                    events = self.resolved_item_events(
+                        item_id, target="Dave" if item_id == "lucky_coin" else None, activation_id=item_id)
+                self.assertTrue(self.window.apply_item_events(events))
+                self.assertFalse(self.window.apply_item_events(events))
+                self.assertFalse(self.window.characters[label]["alive"])
+                self.assertTrue(self.window.player_alive)
+        self.assertEqual(self.window.run_player_kills, 2)
+        self.assertEqual(self.window.items_used, 2)
+
+    def test_all_death_items_stay_unavailable_before_rule_execution(self):
+        self.conversation()
+        entries = [self.window.inventory.grant(item_id)
+                   for item_id in ("revolver", "lucky_coin", "spin_the_dagger")]
+        self.window.open_inventory()
+        with patch.object(self.window.item_rules, "use_item", side_effect=AssertionError("Unavailable item")):
+            for entry in entries:
+                with self.subTest(item_id=entry.item_id):
+                    self.assertFalse(self.window.inventory_page.use_buttons[entry.instance_id].isEnabled())
+                    self.assertFalse(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
+                    self.assertIn(entry, self.window.inventory.entries)
+        self.assertTrue(all(body.alive for body in self.window.body_states()))
+        self.assertEqual(self.window.items_used, 0)
 
     def test_optional_unfinished_use_is_explicitly_blocked_without_consuming(self):
         self.conversation()
