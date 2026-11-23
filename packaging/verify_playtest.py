@@ -112,7 +112,7 @@ def check_revision(source, revision):
         raise ValueError('A full lowercase source revision is required')
     def git(*args):
         # Trust only this explicitly selected worktree, without global config edits.
-        return subprocess.run(['git', '-c', f'safe.directory={source}', '-C', str(source), *args], check=True,
+        return subprocess.run(['git', '-c', f'safe.directory={source.as_posix()}', '-C', str(source), *args], check=True,
                               capture_output=True, text=True).stdout.strip()
     if git('rev-parse', 'HEAD') != revision:
         raise ValueError('Source HEAD differs from requested revision')

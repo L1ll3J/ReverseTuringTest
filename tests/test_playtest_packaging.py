@@ -5,7 +5,7 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import runpy
 import shutil
 import subprocess
@@ -141,6 +141,19 @@ class PackagingTests(unittest.TestCase):
                     verifier.check_revision(self.source, revision)
         with self.assertRaisesRegex(ValueError, 'full lowercase'):
             verifier.check_revision(self.source, 'short')
+
+    def test_revision_uses_git_canonical_windows_trust_path(self):
+        source = PureWindowsPath('C:/demo sources/AlibAi')
+        revision = 'a' * 40
+        with patch.object(verifier.subprocess, 'run') as run:
+            run.side_effect = [SimpleNamespace(stdout=revision + '\n'),
+                               SimpleNamespace(stdout='')]
+            verifier.check_revision(source, revision)
+        prefix = ['git', '-c', 'safe.directory=C:/demo sources/AlibAi',
+                  '-C', str(source)]
+        self.assertEqual(run.call_args_list[0].args[0], prefix + ['rev-parse', 'HEAD'])
+        self.assertEqual(run.call_args_list[1].args[0],
+                         prefix + ['status', '--porcelain', '--untracked-files=all'])
 
     def test_manifest_records_only_performed_checks_and_requires_layout(self):
         package = self.root / 'package'
