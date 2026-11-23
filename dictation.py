@@ -28,7 +28,7 @@ class DictationRecorder(QObject):
     diagnostic = pyqtSignal(dict)
 
     def __init__(self, parent=None, *, max_duration_seconds=60, max_audio_bytes=12_000_000,
-                 device_provider=None, audio_factory=None):
+                 device_provider=None, audio_factory=None, device_name=""):
         super().__init__(parent)
         if (not isinstance(max_duration_seconds, (int, float))
                 or not math.isfinite(max_duration_seconds)
@@ -40,6 +40,9 @@ class DictationRecorder(QObject):
         self._max_bytes = max_audio_bytes
         self._device_provider = device_provider
         self._audio_factory = audio_factory
+        if not isinstance(device_name, str):
+            raise ValueError("Microphone device name must be a string")
+        self._device_name = device_name
         self._generation = 0
         self._closed = False
         self._recording = False
@@ -58,6 +61,35 @@ class DictationRecorder(QObject):
     def is_recording(self):
         return self._recording
 
+    @staticmethod
+    def input_devices():
+        """Return current physical input names and labels without opening them."""
+        names = dict.fromkeys(device.deviceName() for device in
+                              QAudioDeviceInfo.availableDevices(QAudio.AudioInput)
+                              if not device.isNull())
+        return [(name, name) for name in names]
+
+    @property
+    def device_name(self):
+        """An empty name follows the system default on each recording."""
+        return self._device_name
+
+    def set_device_name(self, name):
+        if self._closed or self._recording:
+            raise DictationError("Cannot change microphone while recording or closed")
+        if not isinstance(name, str):
+            raise ValueError("Microphone device name must be a string")
+        if name and name not in dict(self.input_devices()):
+            raise DictationError("The selected microphone is no longer available")
+        self._device_name = name
+
+    def _input_device(self):
+        if self._device_name:
+            return next((device for device in QAudioDeviceInfo.availableDevices(QAudio.AudioInput)
+                         if device.deviceName() == self._device_name and not device.isNull()),
+                        QAudioDeviceInfo())
+        return (self._device_provider or QAudioDeviceInfo.defaultInputDevice)()
+
     def is_current(self, generation):
         return not self._closed and generation == self._generation
 
@@ -71,7 +103,7 @@ class DictationRecorder(QObject):
         self._last_state = None
         self._format = None
         try:
-            device = (self._device_provider or QAudioDeviceInfo.defaultInputDevice)()
+            device = self._input_device()
             if device.isNull():
                 self._fail(generation, reason="missing_device",
                            message="No microphone is available. Check your input device.")

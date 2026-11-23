@@ -122,6 +122,35 @@ class DictationTests(unittest.TestCase):
         recorder.stop()
         self.assertEqual(audio.stops, 1)
 
+    def test_device_selection_enumerates_without_opening_and_resolves_at_start(self):
+        self.device.deviceName.return_value = "USB microphone"
+        with patch("dictation.QAudioDeviceInfo.availableDevices", return_value=[self.device, self.device]):
+            recorder = self.recorder()
+            self.assertEqual(recorder.input_devices(), [("USB microphone", "USB microphone")])
+            self.assertEqual(recorder.device_name, "")
+            recorder.set_device_name("USB microphone")
+            self.assertEqual(recorder.device_name, "USB microphone")
+            self.provider.assert_not_called()
+            recorder.start()
+            self.provider.assert_not_called()
+            with self.assertRaises(DictationError):
+                recorder.set_device_name("")
+            recorder.cancel()
+            recorder.set_device_name("")
+            recorder.start()
+            self.provider.assert_called_once()
+
+    def test_unavailable_selection_never_silently_uses_another_device(self):
+        recorder = self.recorder(device_name="unplugged microphone")
+        with patch("dictation.QAudioDeviceInfo.availableDevices", return_value=[]):
+            with self.assertRaises(DictationError):
+                recorder.set_device_name("unknown microphone")
+            recorder.start()
+        self.assertEqual(len(self.failed), 1)
+        self.assertEqual(self.audio, [])
+        self.provider.assert_not_called()
+        self.assertEqual(recorder.device_name, "unplugged microphone")
+
     def test_missing_and_incompatible_device_fail_without_constructing_audio(self):
         for missing in (True, False):
             self.device.isNull.return_value = missing
