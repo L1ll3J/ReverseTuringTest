@@ -309,6 +309,38 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.phase, "weapon_select")
         self.assertIsNone(self.window.selected_weapon)
 
+    def test_new_run_filters_unready_rewards_without_changing_earned_unlocks_or_preferences(self):
+        store = self.window.profile_store
+        for sequence, event_type in enumerate(("three_kills_one_run", "survived_spare_paper_vote",
+                                                "marked_kill_completed"), 1):
+            store.record(ProgressEvent("prior-run", sequence, event_type))
+        store.set_item_enabled("booby_trap", False)
+        earned = store.read()
+        self.assertIn("revolver", earned.unlocked)
+        self.assertNotIn("revolver", earned.disabled_items)
+        next_window = game.GameWindow()
+        try:
+            next_window.player_name_input.setText("Alex")
+            next_window.start_game()
+            next_window.select_weapon_and_start(next(weapon for weapon in next_window.weapons
+                                                     if weapon["id"] == "bare"))
+            self.assertNotIn("revolver", next_window.run_item_pool)
+            self.assertNotIn("booby_trap", next_window.run_item_pool)
+            self.assertIn("presidential_decree", next_window.run_item_pool)
+            self.assertEqual(next_window.item_drafts.eligible_item_ids, next_window.run_item_pool)
+            with patch.object(next_window.item_drafts._rng, "sample", side_effect=lambda population, count:
+                              sorted(population, key=lambda item: item != "presidential_decree")[:count]):
+                next_window.choose_room("Attic")
+            offer = next_window.item_drafts.pending_offer
+            self.assertIsNotNone(offer)
+            self.assertIn("presidential_decree", offer.options)
+            self.assertNotIn("revolver", offer.options)
+            self.assertEqual(store.read(), earned)
+        finally:
+            next_window.close()
+            next_window.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
     def test_room_offer_blocks_action_until_resolved_and_stale_clicks_cannot_reenter(self):
         self.night()
         windows = set(self.app.topLevelWidgets())

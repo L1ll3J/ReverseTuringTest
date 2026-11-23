@@ -2276,7 +2276,8 @@ class GameWindow(QMainWindow):
         if weapon not in self.weapons or weapon["id"] not in allowed:
             return
         self.run_weapons = allowed
-        self.run_item_pool = available_content(self.profile, "item")
+        self.run_item_pool = tuple(item_id for item_id in available_content(self.profile, "item")
+                                   if item_id not in OPTIONAL_ITEM_NARRATION_PENDING)
         self.item_drafts = DraftState(self.player_owner_id, self.run_item_pool)
         self.inventory_button.show()
         self.selected_weapon = weapon
