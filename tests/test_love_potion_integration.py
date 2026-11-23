@@ -293,6 +293,74 @@ class LovePotionIntegrationTests(unittest.TestCase):
         self.window.advance_love_histories(discussion=True)
         self.assertEqual(self.window.build_character_context("Dave").current_feelings[0].giver, "Alex")
 
+    def test_mechanical_exchange_preserves_mind_data_inventory_and_physical_effects(self):
+        self.apply("Dave")
+        self.use_card("muffle", "Dave")
+        original = self.window.body_id("Alex")
+        target = self.window.body_id("Dave")
+        mind = self.window.mind_id("Dave")
+        data = self.window.characters["Dave"]
+        self.window.remember("Dave", "experience", "A prior personal observation.")
+        history = data["love_history"]
+        observation = data["experiences"][-1]
+        self.window.night_memory_views = (game.NightMemoryView(target, 1, (observation,)),)
+        profile = tuple(data["profile"])
+        inventory = self.window.inventory
+        dialogue = tuple(self.window.public_dialogue)
+        events = tuple(self.window.public_events)
+        self.window.selected_weapon = next(w for w in self.window.weapons if w["id"] == "knife")
+        self.window.interject_input.setText("Unsent draft")
+        self.window.exchange_player_mind(target)
+        self.assertEqual(self.window.player_name, "Dave")
+        self.assertEqual(self.window.label_for_mind(mind), "Alex")
+        self.assertIs(self.window.characters["Alex"], data)
+        self.assertIs(self.window.mind_data[mind], data)
+        self.assertEqual(tuple(data["profile"]), profile)
+        self.assertEqual(data["experiences"][-1].text, "A prior personal observation.")
+        self.assertIs(data["love_history"], history)
+        self.assertEqual(history.experiences.project().current_feelings[0].giver, "Alex")
+        self.assertIs(self.window.inventory, inventory)
+        self.assertEqual(self.window.selected_weapon["id"], "bare")
+        self.assertEqual(self.window.body_weapons[original]["id"], "knife")
+        self.assertTrue(self.window.item_rules.is_muffled(target))
+        self.assertFalse(self.window.item_rules.is_muffled(original))
+        self.assertEqual(self.window.night_memory_views[0].body_id, original)
+        self.assertEqual(self.window.night_memory_views[0].experiences, (observation,))
+        self.assertEqual(tuple(self.window.public_dialogue), dialogue)
+        self.assertEqual(tuple(self.window.public_events), events)
+        self.assertEqual(self.window.interject_input.text(), "")
+
+    def test_exchange_rejects_invalid_or_stale_targets_without_side_effects(self):
+        original_name = self.window.player_name
+        original_data = dict(self.window.characters)
+        self.window.characters["Hank"]["alive"] = False
+        for target in ("missing", self.window.body_id("Alex"), self.window.body_id("Hank")):
+            with self.assertRaises(ItemRuleError):
+                self.window.exchange_player_mind(target)
+            self.assertEqual(self.window.player_name, original_name)
+            self.assertEqual(self.window.characters, original_data)
+        target = self.window.body_id("Dave")
+        self.window.exchange_player_mind(target)
+        state = self.window.identity_state
+        with self.assertRaises(ItemRuleError):
+            self.window.exchange_player_mind(target)
+        self.assertIs(self.window.identity_state, state)
+
+    def test_voodoo_retains_deceased_mind_and_its_personal_history(self):
+        self.apply("Owen")
+        data = self.window.characters["Owen"]
+        mind = self.window.mind_id("Owen")
+        self.window.remember("Owen", "experience", "An earlier observation.")
+        self.window.room_assignments = {"Cellar": ["Owen"]}
+        self.window.new_crime_scenes = []
+        self.window.selected_weapon = next(w for w in self.window.weapons if w["id"] == "voodoo")
+        self.assertTrue(self.window.commit_attack("Owen", "Cellar", weapon_id="voodoo"))
+        self.assertIs(self.window.characters["Alex"], data)
+        self.assertFalse(data["alive"])
+        self.assertIs(self.window.mind_data[mind], data)
+        self.assertEqual(data["experiences"][-1].text, "An earlier observation.")
+        self.assertEqual(self.window.selected_weapon["id"], "voodoo")
+
     def test_private_history_is_portable_with_its_experiencing_npc_data(self):
         self.apply()
         data = self.window.characters.pop("Dave")

@@ -241,7 +241,11 @@ class PlayerItemRules:
     to an independently approved narrative adapter, not this rules component.
     """
 
-    def __init__(self, owner_id: str, inventory: Inventory, rng=None):
+    def __init__(self, owner_id: str, inventory: Inventory, rng=None, *, guardian_scope="owner"):
+        if guardian_scope not in {"owner", "body"}:
+            raise ItemRuleError("Guardian protection requires owner or body scope")
+        self._guardian_scope = guardian_scope
+        self._protection_body_id = None
         if not owner_id or inventory.owner_id != owner_id:
             raise ItemRuleError("Item rules and inventory must have the same owner")
         self._owner_id = owner_id
@@ -453,6 +457,7 @@ class PlayerItemRules:
             effect = self._event("extra_ballots_added", context.day, **values)
         elif entry.item_id == "guardian_angel":
             self._protection_armed = True
+            self._protection_body_id = actor.body_id
             effect = self._event("guardian_armed", context.day, **values)
         elif entry.item_id == "lucky_match":
             drafts.add_rerolls()
@@ -730,8 +735,11 @@ class PlayerItemRules:
             outcome = "prevented"
             protection = "stay_of_execution"
             events = (self._event("execution_stayed", day, item_id=protection, target_body_id=target.body_id),)
-        elif target_owner_id == self.owner_id and self._protection_armed:
+        elif self._protection_armed and (
+                target.body_id == self._protection_body_id if self._guardian_scope == "body"
+                else target_owner_id == self.owner_id):
             self._protection_armed = False
+            self._protection_body_id = None
             outcome = "prevented"
             protection = "guardian_angel"
             events = (self._event("guardian_intervened", day, item_id="guardian_angel",

@@ -19,6 +19,7 @@ from unlock_ui import UnlockPage, unlock_presentation
 from npc_items import NPCItemState, NPC_ITEM_REGISTRY
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, DeathCause, ItemUseContext, NightMemoryView, PlayerItemRules, ItemRuleError, GUARDIAN_PUBLIC
+from identity_state import IdentityState
 from love_potion import LoveDose, LovePotionHistory
 from muffled import muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
@@ -174,6 +175,11 @@ class GameWindow(QMainWindow):
         self.run_id = uuid4().hex
         self.player_owner_id = "player"
         self.body_ids = {}
+        self.identity_state = None
+        self.mind_data = {}
+        self.body_weapons = {}
+        self.mind_weapons = {}
+        self.body_muffle_styles = {}
         self.player_alive = True
         self.inventory = Inventory(self.player_owner_id)
         self.item_rules = PlayerItemRules(self.player_owner_id, self.inventory)
@@ -270,6 +276,76 @@ class GameWindow(QMainWindow):
         for label in (*self.characters, self.player_name):
             if label:
                 self.body_id(label)
+
+    def ensure_identity_state(self):
+        self.ensure_body_ids()
+        if self.identity_state is None and self.player_name:
+            self.identity_state = IdentityState.from_bodies(
+                self.player_owner_id, self.body_id(self.player_name),
+                (self.body_id(name) for name in self.characters if name != self.player_name))
+            self.mind_data = {self.mind_id(name): data for name, data in self.characters.items()}
+            self.mind_data[self.player_owner_id] = {"profile": [], "experiences": [], "dispositions": []}
+            self.body_muffle_styles = {self.body_id(name): data.get("muffle_style", "fallback")
+                                       for name, data in self.characters.items()}
+
+    def mind_id(self, label):
+        self.ensure_identity_state()
+        return self.identity_state.mind_for_body(self.body_id(label)) if self.identity_state else None
+
+    def label_for_mind(self, mind_id):
+        self.ensure_identity_state()
+        return self.label_for_body(self.identity_state.body_for_mind(mind_id)) if self.identity_state else None
+
+    def exchange_player_mind(self, target_body_id):
+        """Mechanical exchange only; callers must provide approved embodiment narration.
+
+        Private data follows its mind. Body labels and recorded events remain literal.
+        The live Soul item stays gated until that narrative adapter is approved.
+        """
+        self.ensure_identity_state()
+        target = next((body for body in self.body_states() if body.body_id == target_body_id), None)
+        if (target is None or not target.alive or not target.is_npc or not self.player_alive
+                or self.ai_busy or self.game_over or self.phase not in {"action", "conversation"}):
+            raise ItemRuleError("An exchange requires two living, available minds")
+        old_label = self.player_name
+        old_body_id = self.body_id(old_label)
+        old_state = self.identity_state
+        new_state = old_state.exchange(target_body_id)
+        memory_views = tuple(
+            NightMemoryView(new_state.body_for_mind(old_state.mind_for_body(view.body_id)),
+                            view.night, view.experiences) for view in self.night_memory_views)
+        target_data = self.characters.pop(target.label)
+        old_style = self.body_muffle_styles.get(old_body_id, "fallback")
+        target_data["muffle_style"] = old_style
+        target_data["alive"] = True
+        self.characters[old_label] = target_data
+        self.night_memory_views = memory_views
+        self.identity_state = new_state
+        self.player_name = target.label
+        self.invalidate_prepared_turn("identity_changed", changed=True)
+        self.request_serial += 1
+        self.retry_action = None
+        self.required_reply_anchor = None
+        self.prepared_retry_snapshot = None
+        self.interject_input.clear()
+        self.retire_weapon_editors()
+        self.pending_pen_note_text = None
+        self.black_magic_controller = None
+        self.black_magic_target = None
+        self.knife_extra_target = None
+        self.c4_target_room = None
+        weapon = self.selected_weapon
+        if weapon:
+            if weapon["id"] == "voodoo":
+                self.mind_weapons[self.player_owner_id] = weapon
+            elif weapon["id"] != "bare":
+                self.body_weapons[old_body_id] = weapon
+        self.selected_weapon = (self.mind_weapons.get(self.player_owner_id)
+                                or self.body_weapons.pop(target_body_id, None)
+                                or next(weapon for weapon in self.weapons if weapon["id"] == "bare"))
+        self.stopwatch_selected = self.selected_weapon["id"] == "stopwatch"
+        self.trace_action("identity_changed", previous_body=old_label, current_body=target.label)
+        return new_state
 
     def body_states(self):
         self.ensure_body_ids()
@@ -692,16 +768,13 @@ class GameWindow(QMainWindow):
                   "corpse_label": target, "corpse_body_id": self.body_id(target)}
         if weapon_id == "voodoo":
             old_body = self.player_name
-            self.characters.pop(target)
-            self.characters[old_body] = {"alive": True, "profile": [], "experiences": [], "dispositions": []}
-            self.player_name = target
+            self.exchange_player_mind(self.body_id(target))
             self.voodoo_current_identity = target
             self.room_assignments[room].remove(target)
             self.room_assignments[room].append(old_body)
             attack.update(corpse_label=old_body, corpse_body_id=self.body_id(old_body))
             decision = self.resolve_death(old_body, attack["attack_id"], caused_by_player=True)
             self.record_history(f"You possessed the body of {target} in the {room} and left behind {old_body} as a corpse.")
-            self.trace_action("identity_changed", previous_body=old_body, current_body=target)
         else:
             decision = self.resolve_death(target, attack["attack_id"], caused_by_player=True)
         if not decision.killed:
@@ -734,7 +807,7 @@ class GameWindow(QMainWindow):
     def trace_state(self, reason):
         if not self.trace.enabled or self.trace.run_id is None:
             return
-        fields = ("player_name", "characters", "rooms", "room_assignments", "round_number", "phase",
+        fields = ("identity_state", "body_weapons", "mind_weapons", "player_name", "characters", "rooms", "room_assignments", "round_number", "phase",
                   "game_over", "show_room_allocations", "old_crime_scenes", "new_crime_scenes",
                   "rooms_visited", "night_rooms", "selected_weapon", "weapon_pen_backfire", "pending_pen_note_text",
                   "black_magic_controller", "black_magic_target", "knife_extra_target",
@@ -1827,6 +1900,7 @@ class GameWindow(QMainWindow):
         self.round_number = 0
         self.game_over = False
         self.ensure_body_ids()
+        self.ensure_identity_state()
         self.load_profile()
         self.npc_items = NPCItemState.allocate(
             name for name, data in self.characters.items() if data["alive"]
