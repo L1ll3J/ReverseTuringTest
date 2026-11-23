@@ -3,7 +3,7 @@ import random
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
-from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fingerprint
+from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fingerprint, development_mode
 from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal
 from ai_runtime import AIRuntime, AIRequestError
 from dictation import DictationRecorder, DictationError
@@ -11,7 +11,7 @@ from preferences import Preferences
 from input_bindings import BindingBadge, BindingSettingsPage, DictationBindings
 from model_config_ui import ModelConfigPanel
 from conversation_flow import DirectReplyPolicy, GroupTurnSnapshot, TurnPreparation
-from conversation_widgets import DialogueView
+from conversation_widgets import DialogueView, ConversationStage, StageParticipant, character_art_path
 from message_view import DisplayRecord, MessageLog
 from house_view import HouseView, RoomObservation, ROOM_LABELS, ARTWORK_SIZE
 from overlay_host import OverlayHost
@@ -25,12 +25,12 @@ from love_potion import LoveDose, LovePotionHistory
 from muffled import TONES, TONE_LABELS, muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
-from item_ui import InlineItemDraftPage, InventoryPage
+from item_ui import InlineItemDraftPage, InventoryPage, GameComboBox
 from item_catalogue_ui import ItemCataloguePanel
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea, QStyle, QStyleOptionButton
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
-from PyQt5.QtGui import QColor, QTextCursor, QTextCharFormat, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption
+from PyQt5.QtGui import QColor, QTextCursor, QTextCharFormat, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption, QPalette, QRegion
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 # Mechanics are integrated separately from approval of NPC-facing narration.
@@ -60,7 +60,7 @@ def load_system_prompt():
 
 
 def readable_body_font():
-    font = QFontDatabase.systemFont(QFontDatabase.GeneralFont)
+    font = QFont("Segoe UI") if sys.platform == "win32" else QFontDatabase.systemFont(QFontDatabase.GeneralFont)
     font.setPixelSize(18)
     return font
 
@@ -163,7 +163,7 @@ class GameWindow(QMainWindow):
         self.trace_callback_scope = None
         self.last_completed_trace_job_id = None
         self.ai_runtime = AIRuntime(prompt_root=os.path.dirname(resource_path("System Prompt.txt")), trace=self.trace)
-        self.dictation_recorder = DictationRecorder(self)
+        self.dictation_recorder = DictationRecorder(self, device_name=self.preferences.microphone_name())
         self.dictation_session = 0
         self.dictation_context = None
         self.dictation_worker = None
@@ -196,6 +196,7 @@ class GameWindow(QMainWindow):
         self.body_ids = {}
         self.identity_state = None
         self.presentation_aliases = PresentationAliases()
+        self.stage_body_order = []
         self.dialogue_perceptions = {}
         self.mind_data = {}
         self.body_weapons = {}
@@ -207,6 +208,7 @@ class GameWindow(QMainWindow):
         self.item_drafts = None
         self.draft_page = None
         self._draft_room_selection_visible = False
+        self._draft_message_log_visible = False
         self.inventory_page = None
         self.transcript_page = None
         self.help_page = None
@@ -224,6 +226,7 @@ class GameWindow(QMainWindow):
         self.morning_item_notes = []
         self.night_memory_views = ()
         self.guardian_intervened_this_run = False
+        self.coin_survived_this_run = False
         self.bonus_action_pending = False
         self.bonus_action_id = None
         self.run_player_kills = 0
@@ -373,6 +376,7 @@ class GameWindow(QMainWindow):
                                 or next(weapon for weapon in self.weapons if weapon["id"] == "bare"))
         self.stopwatch_selected = self.selected_weapon["id"] == "stopwatch"
         self.refresh_recipient_choices()
+        self.refresh_conversation_stage()
         self.trace_action("identity_changed", previous_body=old_label, current_body=target.label)
         return new_state
 
@@ -518,12 +522,12 @@ class GameWindow(QMainWindow):
         if tab == "items":
             self.load_profile()
             self.item_catalogue.refresh(self.profile)
-        self.menu_stack.setCurrentWidget(self.item_catalogue if tab == "items" else self.play_page)
+        self.menu_stack.setCurrentWidget(self.item_catalogue_page if tab == "items" else self.play_page)
         self.play_tab_button.setChecked(tab == "play")
         self.items_tab_button.setChecked(tab == "items")
 
     def set_menu_item_enabled(self, item_id, enabled):
-        if self.phase != "start" or self.menu_stack.currentWidget() is not self.item_catalogue:
+        if self.phase != "start" or self.menu_stack.currentWidget() is not self.item_catalogue_page:
             raise ProfileError("Change item-pool settings from the main menu's Items tab.")
         try:
             self.profile = self.profile_store.set_item_enabled(item_id, enabled)
@@ -546,9 +550,11 @@ class GameWindow(QMainWindow):
             return
         self.pending_room_action = continuation
         self._draft_room_selection_visible = not self.room_buttons_widget.isHidden()
+        self._draft_message_log_visible = not self.message_log.isHidden()
         self.trace_action("item_offer_created", offer=offer)
         self.set_room_buttons_enabled(False)
         self.room_buttons_widget.hide()
+        self.message_log.hide()
         self.weapon_action_panel.hide()
         self.show_item_offer(offer)
 
@@ -558,11 +564,15 @@ class GameWindow(QMainWindow):
             offer, ITEM_CATALOGUE, self.choose_item_offer,
             self.reroll_item_offer, self.skip_item_offer,
             reroll_count=self.item_drafts.rerolls_remaining,
-            can_reroll=bool(self.item_drafts.reroll_alternatives(offer.offer_id, self.inventory.snapshot())),
+            can_reroll={slot: bool(self.item_drafts.reroll_alternatives(
+                offer.offer_id, self.inventory.snapshot(), slot_index=slot)) for slot in range(len(offer.options))},
             picks_remaining=offer.picks_remaining,
             body_font=readable_body_font(), title_font=self.speaker_font,
         )
         self.layout.insertWidget(self.layout.indexOf(self.room_buttons_widget), self.draft_page, 1)
+        self.draft_page.setMaximumWidth(1280)
+        self.draft_page.setMaximumHeight(720)
+        self.layout.setAlignment(self.draft_page, Qt.AlignCenter)
         self.draft_page.show()
         self.layout.activate()
         self.position_corner_controls()
@@ -587,6 +597,7 @@ class GameWindow(QMainWindow):
         """Invalidate an obsolete phase's offer without accepting its room action."""
         self.pending_room_action = None
         self._draft_room_selection_visible = False
+        self._draft_message_log_visible = False
         if self.item_drafts is not None and self.item_drafts.pending_offer is not None:
             self.item_drafts.skip(self.item_drafts.pending_offer.offer_id)
         self.retire_item_offer_page()
@@ -633,13 +644,17 @@ class GameWindow(QMainWindow):
         continuation = self.pending_room_action
         self.pending_room_action = None
         restore_rooms = self._draft_room_selection_visible
+        restore_log = self._draft_message_log_visible
         self._draft_room_selection_visible = False
+        self._draft_message_log_visible = False
         self.retire_item_offer_page()
         self.update_inventory_button()
         if self.phase != "action" or self.game_over:
             return
         if restore_rooms:
             self.room_buttons_widget.show()
+        if restore_log:
+            self.message_log.show()
         self.apply_weapon_gating()
         self.position_weapon_panel()
         if continuation is not None:
@@ -652,7 +667,8 @@ class GameWindow(QMainWindow):
     def update_inventory_button(self):
         if not hasattr(self, "inventory_button"):
             return
-        self.inventory_button.setText(f"Inventory ({len(self.inventory.entries)})")
+        count = len(self.inventory.entries)
+        self.inventory_button.setText(f"Inventory  {count}" if count else "Inventory")
         self.inventory_button.setEnabled(self.can_use_items())
         if (not self.can_use_items() and self.inventory_page is not None
                 and self.overlay_host.current_page is self.inventory_page):
@@ -771,6 +787,8 @@ class GameWindow(QMainWindow):
                         and event.death_decision.target_body_id != self.body_id(self.player_name)):
                     self.queue_progress("player_kill")
                 if event.event_type == "immediate_death_resolved":
+                    if event.item_id == "lucky_coin" and self.player_alive:
+                        self.coin_survived_this_run = True
                     decision = event.death_decision
                     label = self.perceived_name(decision.target_body_id)
                     self.record_history(
@@ -915,6 +933,7 @@ class GameWindow(QMainWindow):
         self.applied_death_attempts.add(decision.attempt_id)
         self.invalidate_prepared_turn("death_resolved", changed=True)
         self.refresh_known_equipment()
+        self.refresh_conversation_stage()
         return killed
 
     def resolve_death(self, label, attempt_id, *, cause=DeathCause.ATTACK, source_id=None, caused_by_player=False):
@@ -1097,7 +1116,7 @@ class GameWindow(QMainWindow):
         self.invalidate_prepared_turn("public_event", changed=True)
         self.public_events.append(MemoryRecord(self.round_number, "public_event", text, source))
         self.trace.record("public_event", {"source": source, "round": self.round_number, "text": text})
-        record = self.record_history(text)
+        record = self.record_history(text, speaker="Detective" if source in ("Detective", "Photograph") else None)
         self.public_event_display_records.append(record)
         if display and self.phase in ("conversation", "voting"):
             self.message_log.append_record(record)
@@ -1201,6 +1220,7 @@ class GameWindow(QMainWindow):
         speaker_id = self.body_id(speaker) if speaker in self.characters or speaker == self.player_name else None
         self.record_history(speech, kind="speech", speaker=display_speaker,
                             speaker_id=speaker_id, display=True)
+        self.conversation_stage.set_active_speaker(speaker_id)
         if ordinary_npc:
             self.direct_replies.committed(self.body_id(speaker), direct=direct_reply)
         self.refresh_recipient_choices()
@@ -1375,15 +1395,24 @@ class GameWindow(QMainWindow):
         self.message_log = MessageLog(self.output_area, body_font=body_font,
                                       speaker_font=self.speaker_font, name_format=self.speaker_display_format)
         self.message_log.hide()
+        self.conversation_stage = ConversationStage(self, name_font=self.speaker_font)
+        self.conversation_stage.speaker_chosen.connect(self.choose_speaker_recipient)
+        self.conversation_stage.hide()
         self.overlay_host = OverlayHost(self, body_font=body_font, title_font=self.speaker_font,
                                         unlock_ready=self.unlock_celebrations_ready)
-        self.overlay_host.setStyleSheet("QDialog#gameOverlayHost { background: #2A2A2A; border: 3px solid white; } "
+        self.overlay_host.setStyleSheet("QDialog#gameOverlayHost { background: #090909; border: 1px solid #aaa; } "
                                        "QLabel { color: #E0E0E0; } "
                                        "QToolButton { color: white; background: #333; border: 1px solid #777; padding: 8px; } "
                                        "QToolButton:hover, QToolButton:focus { background: #444; border-color: white; }")
         self.overlay_host.page_closed.connect(self.overlay_page_closed)
         self.overlay_host.unlock_failed.connect(self.show_unlock_error)
         self.overlay_host.installEventFilter(self)
+        for control in (self.overlay_host.close_button, self.overlay_host.help_button):
+            control.setFont(self.speaker_font)
+            control.setStyleSheet(
+                f'QToolButton {{ font-family: "{font_family}"; font-size: 10px; color: #ddd; '
+                'background: transparent; border: 1px solid #555; padding: 10px; } '
+                'QToolButton:hover, QToolButton:focus { color: white; border-color: white; }')
 
 
 
@@ -1416,6 +1445,9 @@ class GameWindow(QMainWindow):
             }
         """)
         self.player_name_input.setPlaceholderText("Type here...")
+        name_palette = self.player_name_input.palette()
+        name_palette.setColor(QPalette.PlaceholderText, QColor("#888888"))
+        self.player_name_input.setPalette(name_palette)
         self.player_name_input.setText(self.entered_player_name)
         self.player_name_input.textChanged.connect(self.remember_entered_player_name)
         self.player_name_input.editingFinished.connect(self.save_player_name_preference)
@@ -1429,7 +1461,8 @@ class GameWindow(QMainWindow):
         start_buttons_font_size = max(int(50*(screen_width/2560)), 37)
 
         # Toggle button for game difficulty (Normal/Super Hard)
-        self.difficulty_button = QPushButton("Mode: Normal", self)
+        self.difficulty_button = QPushButton("Mode: Normal  >", self)
+        self.difficulty_button.setAccessibleName("Change difficulty")
         self.difficulty_button.clicked.connect(self.toggle_mode)
 
         # Button to start the game
@@ -1479,7 +1512,7 @@ class GameWindow(QMainWindow):
         button_height = int(100 * (screen_width/2560))
         # Conversation phase buttons
         self.pass_button = QPushButton('Pass')
-        self.pass_button.setFixedSize(button_width, button_height) 
+        self.pass_button.setMinimumHeight(48)
         self.pass_button.clicked.connect(self.pass_conversation)
         self.interject_button = QPushButton('Interject')
         self.interject_button.clicked.connect(self.interject_conversation)
@@ -1492,11 +1525,12 @@ class GameWindow(QMainWindow):
         button_style = f"""
             QPushButton {{
                 font-size: {conversation_button_font_size}px;
+                border: none; background: transparent; padding: 12px;
             }}
             QPushButton:disabled {{
                 color: #777;
             }}
-            QPushButton:hover {{
+            QPushButton:enabled:hover {{
                         color: #808080;
                     }}
         """
@@ -1506,15 +1540,16 @@ class GameWindow(QMainWindow):
 
         # Layouts
         self.conversation_buttons_layout = QHBoxLayout()
-        self.conversation_buttons_layout.addWidget(self.pass_button)
-        self.conversation_buttons_layout.addWidget(self.interject_button)
-        self.conversation_buttons_layout.addWidget(self.vote_button)
+        for button in (self.pass_button, self.interject_button, self.vote_button):
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.conversation_buttons_layout.addWidget(button, 1)
 
         # Input field for interjecting during conversation
         self.interject_input = QLineEdit(self)
         self.interject_input.setFont(body_font)
         self.interject_input.setPlaceholderText("Type here...")
-        self.interject_input.setAlignment(Qt.AlignCenter)
+        self.interject_input.setAlignment(Qt.AlignLeft)
+        self.interject_input.setMinimumHeight(48)
         self.interject_input.setStyleSheet(f"""
             QLineEdit {{
                 font-family: "{body_family}";
@@ -1522,16 +1557,18 @@ class GameWindow(QMainWindow):
                 padding: 5px;
                 text-align: center;
                 color: #DCDCDC;
-                border: none;
+                border: none; border-bottom: 1px solid #555;
             }}
         """)
         self.interject_input.hide()  # Hidden until needed
         self.interject_input.returnPressed.connect(self.send_interjection)
         self.interject_input.textEdited.connect(lambda _text: self.invalidate_prepared_turn("draft_edited"))
         self.say_button = QPushButton('Say')
+        self.say_button.setFixedWidth(112)
         self.say_button.setStyleSheet(f"""
             QPushButton {{
                 font-size: {conversation_button_font_size}px;
+                border: 1px solid #777; background: transparent; padding: 10px;
             }}
             QPushButton:hover {{
                 color: #808080;
@@ -1557,14 +1594,24 @@ class GameWindow(QMainWindow):
         self.recipient_controls = QWidget()
         recipient_layout = QHBoxLayout(self.recipient_controls)
         recipient_layout.setContentsMargins(0, 0, 0, 0)
-        recipient_label = QLabel("To:")
-        self.recipient_selector = QComboBox()
+        recipient_label = QLabel("Address")
+        self.recipient_selector = GameComboBox()
         self.recipient_selector.addItem("Group", None)
         self.recipient_selector.currentIndexChanged.connect(self.update_recipient_controls)
         for widget in (recipient_label, self.recipient_selector):
             widget.setFont(body_font)
             widget.setStyleSheet(f'font-family: "{body_family}"; font-size: 18px; padding: 5px;')
             recipient_layout.addWidget(widget)
+        recipient_label.setFont(self.speaker_font)
+        recipient_label.setStyleSheet('font-size: 10px; color: #999; padding: 4px;')
+        self.recipient_selector.setMinimumWidth(160)
+        self.recipient_selector.setStyleSheet(
+            f'QComboBox {{ font-family: "{body_family}"; font-size: 18px; color: #eee; '
+            'background: #111; border: 1px solid #555; padding: 8px 30px 8px 12px; } '
+            'QComboBox:hover, QComboBox:focus { border-color: #ddd; } '
+            'QComboBox::drop-down { width: 26px; border-left: 1px solid #555; } '
+            'QComboBox QAbstractItemView { background: #111; color: #eee; '
+            'selection-background-color: #333; padding: 6px; }')
         self.recipient_controls.hide()
         self.recipient_hint = QLabel()
         self.recipient_hint.setTextFormat(Qt.PlainText)
@@ -1579,11 +1626,15 @@ class GameWindow(QMainWindow):
         self.dictation_button.setCheckable(True)
         self.dictation_button.setFixedSize(64, 64)
         self.dictation_button.setIconSize(QSize(48, 48))
-        self.dictation_icons = {
-            recording: QIcon(QPixmap(resource_path(f"icons/ui/microphone-{state}.png")).scaled(
+        self.dictation_icons = {}
+        for recording, state in ((False, "idle"), (True, "recording")):
+            artwork = QPixmap(resource_path(f"icons/ui/microphone-{state}.png"))
+            if not artwork.isNull():
+                bounds = QRegion(artwork.mask()).boundingRect()
+                if not bounds.isEmpty():
+                    artwork = artwork.copy(bounds)
+            self.dictation_icons[recording] = QIcon(artwork.scaled(
                 48, 48, Qt.KeepAspectRatio, Qt.FastTransformation))
-            for recording, state in ((False, "idle"), (True, "recording"))
-        }
         self.dictation_button.clicked.connect(self.toggle_dictation)
         self.dictation_cancel_button = QPushButton("Cancel")
         self.dictation_cancel_button.clicked.connect(self.cancel_dictation)
@@ -1593,10 +1644,10 @@ class GameWindow(QMainWindow):
             dictation_layout.addWidget(button)
         self.dictation_button.setStyleSheet(
             f'QPushButton {{ font-family: "{body_family}"; font-size: 18px; padding: 4px; '
-            'background: #252525; border: 1px solid #777; } '
-            'QPushButton:hover, QPushButton:focus { background: #333; border-color: #e0e0e0; } '
-            'QPushButton:checked { background: #352d22; border: 2px solid #e2b76c; } '
-            'QPushButton:disabled { color: #777; border-color: #555; }')
+            'background: transparent; border: none; } '
+            'QPushButton:hover, QPushButton:focus { background: transparent; } '
+            'QPushButton:checked { background: transparent; } '
+            'QPushButton:disabled { color: #777; }')
         self.dictation_glow = QGraphicsDropShadowEffect(self.dictation_button)
         self.dictation_glow.setOffset(0, 0)
         self.dictation_glow.setBlurRadius(12)
@@ -1642,10 +1693,14 @@ class GameWindow(QMainWindow):
 
         # Main Layout
         self.start_layout = QVBoxLayout()
+        self.start_layout.addStretch(5)
         self.start_layout.addWidget(self.title_label)  # Add the title at the top
+        self.start_layout.addSpacing(24)
         self.start_layout.addLayout(self.player_name_layout)
+        self.start_layout.addStretch(2)
         self.start_layout.addWidget(self.difficulty_button)
         self.start_layout.addWidget(self.start_button)
+        self.start_layout.addStretch(1)
         self.start_layout.setContentsMargins(24, 16, 24, 16)
         self.start_layout.setSpacing(16)
         self.play_content = QWidget()
@@ -1654,13 +1709,11 @@ class GameWindow(QMainWindow):
         self.play_page = QWidget()
         play_layout = QVBoxLayout(self.play_page)
         play_layout.setContentsMargins(0, 0, 0, 0)
-        play_layout.addStretch()
         play_row = QHBoxLayout()
         play_row.addStretch()
         play_row.addWidget(self.play_content, 1)
         play_row.addStretch()
-        play_layout.addLayout(play_row)
-        play_layout.addStretch()
+        play_layout.addLayout(play_row, 1)
         self.menu_widget = QWidget()
         menu_layout = QVBoxLayout(self.menu_widget)
         menu_layout.setContentsMargins(0, 10, 0, 0)
@@ -1672,7 +1725,7 @@ class GameWindow(QMainWindow):
             padding: 12px 22px; color: #aaa; background: black; border: none;
             border-bottom: 2px solid transparent; }}
             QPushButton:checked {{ color: white; border-bottom-color: white; }}
-            QPushButton:hover, QPushButton:focus {{ color: white; background: #222; }}'''
+            QPushButton:hover, QPushButton:focus {{ color: white; background: black; }}'''
         for button in (self.play_tab_button, self.items_tab_button):
             button.setCheckable(True)
             button.setAutoExclusive(True)
@@ -1689,7 +1742,14 @@ class GameWindow(QMainWindow):
             ITEM_CATALOGUE, self.profile, UNLOCK_GOALS, self.set_menu_item_enabled,
             body_font, self.menu_widget, icon_root=resource_path("icons/items"),
             title_font=self.speaker_font)
-        self.menu_stack.addWidget(self.item_catalogue)
+        self.item_catalogue.setMaximumWidth(1440)
+        self.item_catalogue_page = QWidget()
+        catalogue_row = QHBoxLayout(self.item_catalogue_page)
+        catalogue_row.setContentsMargins(0, 0, 0, 0)
+        catalogue_row.addStretch(1)
+        catalogue_row.addWidget(self.item_catalogue, 100)
+        catalogue_row.addStretch(1)
+        self.menu_stack.addWidget(self.item_catalogue_page)
         menu_layout.addLayout(self.menu_stack, 1)
 
         self.layout = QVBoxLayout()
@@ -1697,14 +1757,22 @@ class GameWindow(QMainWindow):
         #self.layout.addWidget(self.top_right_widget)
         self.layout.addWidget(self.menu_widget, 1)
         self.layout.addWidget(self.room_buttons_widget, 1)
-        self.layout.addWidget(self.message_log)
+        self.layout.addWidget(self.conversation_stage)
+        self.layout.addWidget(self.message_log, 1)
+        self.conversation_stage.setMaximumWidth(1280)
+        self.message_log.setMaximumWidth(1280)
+        self.layout.setAlignment(self.conversation_stage, Qt.AlignHCenter)
+        self.layout.setAlignment(self.message_log, Qt.AlignHCenter)
         self.layout.addWidget(self.secondary_output_area)
-        self.inventory_button = QPushButton("Inventory (0)")
-        self.inventory_button.setFont(body_font)
-        self.inventory_button.setStyleSheet(f'font-family: "{body_family}"; font-size: 18px;')
+        self.inventory_button = QPushButton("Inventory")
+        self.inventory_button.setFont(self.speaker_font)
+        self.inventory_button.setStyleSheet(
+            'QPushButton { font-size: 12px; color: #ddd; background: transparent; '
+            'border: 1px solid #555; padding: 12px 16px; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color: white; border-color: #ddd; } '
+            'QPushButton:disabled { color: #666; border-color: #333; }')
         self.inventory_button.clicked.connect(self.open_inventory)
         self.inventory_button.hide()
-        self.layout.addWidget(self.inventory_button)
         self.progress_notice = QLabel()
         self.progress_notice.setFont(body_font)
         self.progress_notice.setStyleSheet(f'font-family: "{body_family}"; font-size: 18px;')
@@ -1734,12 +1802,13 @@ class GameWindow(QMainWindow):
         input_row.addWidget(self.recipient_controls)
         input_row.addWidget(self.interject_input, 1)
         input_row.addWidget(self.dictation_controls)
+        input_row.addWidget(self.say_button)
         interject_layout.addLayout(input_row)
         interject_layout.addWidget(self.muffled_player_controls)
         interject_layout.addWidget(self.recipient_hint)
         interject_layout.addWidget(self.dictation_status)
-        interject_layout.addWidget(self.say_button)
         self.layout.addLayout(interject_layout)
+        self.layout.addWidget(self.inventory_button, 0, Qt.AlignRight)
 
         container = QWidget()
         container.setLayout(self.layout)
@@ -1754,7 +1823,7 @@ class GameWindow(QMainWindow):
         self.how_to_play_button.setStyleSheet(f"""
             QPushButton{{
             font-size: 14px; padding: 10px; color: white;
-            background-color: rgba(0, 0, 0, 0);
+            background-color: transparent; border: none;
             }}
             QPushButton:hover {{
                 color: #808080;
@@ -1778,6 +1847,10 @@ class GameWindow(QMainWindow):
             }}
             """)
         self.transcript_button.clicked.connect(self.show_transcript)
+        self.transcript_button.setStyleSheet(
+            'QPushButton { font-size: 12px; color: #ddd; background: black; '
+            'border: 1px solid #666; padding: 10px; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color: white; border-color: white; }')
         self.transcript_button.hide()  # Initially hidden
 
         # Position the "How to Play" button in the top-right corner
@@ -1795,10 +1868,20 @@ class GameWindow(QMainWindow):
         self.transcript_button.hide()
 
         self.mute_button = QPushButton(self)
+        self.mute_button.setStyleSheet('QPushButton { background: transparent; border: none; }')
         self.update_mute_button_icon()
         self.mute_button.clicked.connect(self.toggle_mute)
         self.mute_button.setGeometry(0, button_y, button_width // 2, button_height)
         self.mute_button.show()
+        self.game_menu_button = QPushButton("Menu [Esc]", self)
+        self.game_menu_button.setFont(self.speaker_font)
+        self.game_menu_button.setAccessibleName("Open game menu (Escape)")
+        self.game_menu_button.setStyleSheet(
+            'QPushButton { font-size: 10px; color: #aaa; background: black; '
+            'border: 1px solid #444; padding: 10px; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color: white; border-color: #ddd; }')
+        self.game_menu_button.clicked.connect(self.open_escape_menu)
+        self.game_menu_button.hide()
 
         self.showFullScreen()  # Make the window fullscreen
 
@@ -1837,20 +1920,34 @@ class GameWindow(QMainWindow):
         self.position_corner_controls()
 
     def set_action_output_mode(self, compact):
+        if hasattr(self, "conversation_stage"):
+            self.conversation_stage.setVisible(not compact and self.phase == "conversation" and not self.game_over)
         self.message_log.setMaximumHeight(128 if compact else 16777215)
-        background = "black" if compact else "#1E1E1E"
+        background = "black"
         self.output_area.setStyleSheet(
             f'background-color: {background}; color: #E0E0E0; border: none; '
             f'font-family: "{readable_body_font().family()}"; font-size: 18px; '
             'padding-left: 16px; padding-right: 24px;')
 
+    def refresh_conversation_stage(self):
+        if not hasattr(self, "conversation_stage"):
+            return
+        visible = self.phase == "conversation" and not self.game_over
+        self.conversation_stage.setVisible(visible)
+        if visible:
+            participants = [StageParticipant(self.body_id(name), self.display_actor(name),
+                                             character_art_path(self.perceived_actor(name)))
+                            for name, data in self.characters.items() if data["alive"]]
+            additions = [participant.body_id for participant in participants
+                         if participant.body_id not in self.stage_body_order]
+            random.Random().shuffle(additions)
+            self.stage_body_order.extend(additions)
+            participants.sort(key=lambda participant: self.stage_body_order.index(participant.body_id))
+            self.conversation_stage.set_participants(participants)
+
     def refresh_known_equipment(self):
-        living = {name for name, data in self.characters.items()
-                  if data["alive"] and name != self.player_name}
-        holders = [f"{self.perceived_actor(owner)}: {NPC_ITEM_REGISTRY[item_id].name}"
-                   for owner, item_id in self.npc_items.equipment.items() if owner in living]
-        self.npc_equipment_label.setText("Known equipment\n" + "\n".join(holders) if holders else "")
-        self.npc_equipment_label.setVisible(self.phase == "action" and not self.game_over and bool(holders))
+        self.npc_equipment_label.clear()
+        self.npc_equipment_label.hide()
 
     def resize_menu_content(self):
         if not hasattr(self, "play_content"):
@@ -1861,12 +1958,12 @@ class GameWindow(QMainWindow):
             f'font-family: "{self.pixel_font_family}"; font-size: {title_size}px; color: white; padding-bottom: 2px;')
         control_size = max(16, min(32, int(available_width * 0.026), int(self.height() * 0.045)))
         control_height = max(50, min(84, int(self.height() * 0.08)))
-        mode_color = "#8CFF9E" if self.show_room_allocations else "#EF5350"
+        mode_color = "#d0c8bb" if self.show_room_allocations else "#c58e87"
         for button, color in ((self.difficulty_button, mode_color), (self.start_button, "white")):
             button.setFixedHeight(control_height)
             button.setStyleSheet(
                 f'QPushButton {{ font-size: {control_size}px; padding: 10px; color: {color}; border: none; }} '
-                'QPushButton:hover, QPushButton:focus { background: #222; }')
+                'QPushButton:enabled:hover, QPushButton:focus { color: #aaa; background: transparent; }')
 
     def position_corner_controls(self):
         if not hasattr(self, "how_to_play_button") or not hasattr(self, "mute_button"):
@@ -1878,6 +1975,9 @@ class GameWindow(QMainWindow):
         for button in (self.how_to_play_button, self.transcript_button):
             button.setGeometry(self.width() - width - 10, 10, width, height)
         self.mute_button.setGeometry(0, 10, width // 2, height)
+        self.game_menu_button.setGeometry(12, 10, self.game_menu_button.sizeHint().width(), height)
+        self.game_menu_button.setVisible(self.phase not in ("start", "closed", "restarting"))
+        self.game_menu_button.raise_()
         mute_option = QStyleOptionButton()
         self.mute_button.initStyleOption(mute_option)
         mute_contents = self.mute_button.style().subElementRect(
@@ -1891,7 +1991,7 @@ class GameWindow(QMainWindow):
             top = max(10, self.menu_widget.mapFrom(self, QPoint(0, bottom + 12)).y())
             self.menu_widget.layout().setContentsMargins(0, top, 0, 0)
         if hasattr(self, "layout"):
-            top = height + 20 if self.phase == "action" else 11
+            top = height + 20 if self.phase in ("action", "conversation", "voting") else 11
             self.layout.setContentsMargins(11, top, 11, 11)
         if self.draft_page is not None:
             controls = (self.how_to_play_button, self.transcript_button, self.mute_button)
@@ -1983,8 +2083,7 @@ class GameWindow(QMainWindow):
         self.dictation_button.setText("" if not icon.isNull() else ("STOP" if recording else "REC"))
         self.dictation_button.setChecked(recording)
         self.dictation_button.setAccessibleName(action)
-        self.dictation_button.setToolTip(action + ". " + ("Transcribe into your editable draft." if recording
-                                                       else "Stop when ready to add text to your editable draft."))
+        self.dictation_button.setToolTip("")
         self.dictation_glow.setEnabled(recording)
         self.dictation_button.setEnabled(self.can_toggle_dictation())
         self.dictation_cancel_button.setVisible(self.dictation_context is not None)
@@ -2134,10 +2233,10 @@ class GameWindow(QMainWindow):
     def toggle_mode(self):
         # Toggle between Normal and Super Hard modes
         if self.show_room_allocations:
-            self.difficulty_button.setText("Mode: Super Hard")
+            self.difficulty_button.setText("Mode: Super Hard  >")
             self.show_room_allocations = False
         else:
-            self.difficulty_button.setText("Mode: Coward")
+            self.difficulty_button.setText("Mode: Coward  >")
             self.show_room_allocations = True
         self.resize_menu_content()
 
@@ -2187,9 +2286,6 @@ class GameWindow(QMainWindow):
         self.npc_items = NPCItemState.allocate(
             name for name, data in self.characters.items() if data["alive"]
         )
-        equipment_description = self.npc_items.equipment_description(
-            appearance_names={name: self.perceived_actor(name) for name in self.body_ids})
-        self.add_public_event(equipment_description, source="Visible equipment", display=False)
 
         # Start the first action phase
         self.start_development_trace()
@@ -2223,22 +2319,24 @@ class GameWindow(QMainWindow):
         for i, wpn in enumerate(self.weapons):
             row = i // columns
             col = i % columns
+            unlocked = wpn["id"] in available_content(self.profile, "weapon")
 
             card = QFrame(self.weapon_picker_widget)
             card.setFixedSize(QSize(card_w, card_h))
             card.setCursor(Qt.PointingHandCursor)
             card.setFocusPolicy(Qt.NoFocus)
+            card.setObjectName("weaponCard")
             card.setStyleSheet("""
-                QFrame {
+                QFrame#weaponCard {
                     border: 1px solid #555;
-                    border-radius: 16px;
-                    background-color: rgba(255,255,255,0.04);
+                    background-color: #090909;
                 }
-                QFrame:hover {
-                    background-color: rgba(255,255,255,0.10);
-                    border-color: #777;
+            """ + ("""
+                QFrame#weaponCard:hover {
+                    background-color: #151515;
+                    border-color: #ddd;
                 }
-            """)
+            """ if unlocked else ""))
 
             v = QVBoxLayout(card)
             v.setContentsMargins(10, 10, 10, 10)
@@ -2261,12 +2359,11 @@ class GameWindow(QMainWindow):
             name = QLabel(wpn["name"], card)
             name.setAlignment(Qt.AlignHCenter)
             name.setFocusPolicy(Qt.NoFocus)
-            name.setStyleSheet("font-size: 18px; font-weight: 600; color: white; border: none; background: transparent;")
+            name.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {'white' if unlocked else '#888'}; border: none; background: transparent;")
             name.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             v.addWidget(name)
 
             # --- Description (smaller, grey, wrapped) ---
-            unlocked = wpn["id"] in available_content(self.profile, "weapon")
             description = wpn["desc"]
             if not unlocked:
                 description += "\n\nLocked: " + UNLOCK_GOALS[wpn["id"]]
@@ -2602,8 +2699,7 @@ class GameWindow(QMainWindow):
         if self.resolve_action_curses():
             return
         self.update_inventory_button()
-        self.append_output_text(f"Action Phase {self.round_number} begins!\n")
-        self.record_history(f"Night {self.round_number}", kind="section")
+        self.record_history(f"Night {self.round_number}", kind="section", display=True)
 
         # Room assignments for each character
         self.room_assignments = {room: [] for room in self.rooms}
@@ -2640,8 +2736,6 @@ class GameWindow(QMainWindow):
             appearance_names={name: self.perceived_actor(name) for name in self.body_ids},
             body_ids=self.body_ids,
         )
-        self.record_history(self.npc_items.equipment_description(
-            living_npcs, appearance_names={name: self.perceived_actor(name) for name in self.body_ids}))
         self.refresh_known_equipment()
         self.trace_action("night_rooms_assigned", assignments=self.room_assignments)
 
@@ -3784,8 +3878,8 @@ class GameWindow(QMainWindow):
                                         if name != self.player_name) <= 1
         if won and len(self.used_item_types) >= 3:
             self.queue_progress("three_item_types_victory")
-        if won and self.guardian_intervened_this_run:
-            self.queue_progress("guardian_intervention_run_survived")
+        if won and self.coin_survived_this_run:
+            self.queue_progress("coin_survived_run_alive")
         if self.player_alive and (self.selected_weapon or {}).get("id") == "bare" and self.items_used == 0:
             self.queue_progress("bare_hands_no_item_victory")
         self.trace_action("game_ended", final_score=final_score)
@@ -3953,6 +4047,7 @@ class GameWindow(QMainWindow):
         self.direct_replies.begin_discussion(self.round_number)
         self.refresh_recipient_choices()
         self.phase = "conversation"
+        self.refresh_conversation_stage()
         self.npc_equipment_label.hide()
         self.set_action_output_mode(False)
         self.position_corner_controls()
@@ -3971,6 +4066,7 @@ class GameWindow(QMainWindow):
         self.transcript_button.show()
         self.transcript_button.raise_()
         self.message_log.clear()
+        self.message_log.append_record(self.make_display_record(f"Morning {self.round_number}", kind="section"))
         self.publish_item_bodies()
         self.npc_items.present_morning(
             self.round_number,
@@ -3987,7 +4083,6 @@ class GameWindow(QMainWindow):
         if self.check_victory():
             return
         self.advance_love_histories(discussion=True)
-        self.append_output_text(f"Conversation Phase {self.round_number} begins!\n")
         self.current_conversation = []
         self.most_recent_messageS = []
         self.alive_characters = list(self.public_state().alive)
@@ -4391,7 +4486,7 @@ class GameWindow(QMainWindow):
         editor_night = self.round_number
         w = QWidget(self); w.setWindowFlags(Qt.FramelessWindowHint)
         w.setAttribute(Qt.WA_StyledBackground, True)
-        w.setStyleSheet("background-color:#2A2A2A;")
+        w.setStyleSheet("background-color:#090909; color:#eee;")
         self._weapon_windows["knife"] = w
         w.installEventFilter(self)
         w.destroyed.connect(lambda: self.forget_weapon_editor("knife", w))
@@ -4399,12 +4494,14 @@ class GameWindow(QMainWindow):
 
         # Header
         header = QWidget()
-        header.setStyleSheet("background-color:#2E2E2E; padding:5px; border:3px solid white;")
+        header.setStyleSheet("background:transparent; padding:8px; border-bottom:1px solid #666;")
         hl = QHBoxLayout(header); hl.setContentsMargins(8,4,8,4)
-        title = QLabel("Knife — Extra victim")
-        title.setStyleSheet("color:white; font-size:20px;")
-        close_btn = QPushButton("X"); close_btn.setFixedSize(30,30)
-        close_btn.setStyleSheet("QPushButton{background:#E74C3C;color:white;font-size:16px;border-radius:5px;} QPushButton:hover{background:#C0392B;}")
+        title = QLabel("Knife")
+        title.setFont(self.speaker_font)
+        title.setStyleSheet("color:white; font-size:14px;")
+        close_btn = QPushButton("Close"); close_btn.setFixedSize(84,38)
+        close_btn.setFont(readable_body_font())
+        close_btn.setStyleSheet("QPushButton{background:transparent;color:#bbb;font-size:16px;border:none;} QPushButton:hover{color:white;}")
         close_btn.clicked.connect(w.close)
         hl.addWidget(title); hl.addStretch(1); hl.addWidget(close_btn)
         outer.addWidget(header)
@@ -4412,27 +4509,31 @@ class GameWindow(QMainWindow):
         # Content (outlined)
         content = QFrame(); content.setObjectName("knifeContent")
         content.setAttribute(Qt.WA_StyledBackground, True)
-        content.setStyleSheet("#knifeContent{background:#2A2A2A; border:3px solid white; border-top:0;}")
+        content.setStyleSheet("#knifeContent{background:#090909; border:1px solid #666; border-top:0;}")
         bl = QVBoxLayout(content); bl.setContentsMargins(16,16,16,16); bl.setSpacing(12)
 
         row = QHBoxLayout(); row.setSpacing(12)
         lbl = QLabel("Extra victim:")
-        lbl.setStyleSheet("color:#E0E0E0; font-size:16px;")
+        lbl.setFont(readable_body_font())
+        lbl.setStyleSheet("color:#E0E0E0; font-size:18px;")
         lbl.setMinimumHeight(28)   
         row.addWidget(lbl, 0, Qt.AlignVCenter)
-        victim = QComboBox(); victim.addItem("(none)")  # allow “no extra kill”
+        victim = GameComboBox(); victim.addItem("(none)")  # allow “no extra kill”
         self.populate_body_choices(victim, alive, self.knife_extra_target)
-        victim.setMinimumHeight(38)
-        victim.setStyleSheet("QComboBox{font-size:16px; padding:6px 10px; min-width:220px;} QAbstractItemView{font-size:16px;}")
+        victim.setFont(readable_body_font())
+        victim.setMinimumHeight(44)
+        victim.setStyleSheet("QComboBox{background:#111;border:1px solid #666;font-size:18px;padding:8px 12px;min-width:200px;} QComboBox::drop-down{width:28px;border-left:1px solid #666;} QAbstractItemView{background:#111;color:white;selection-background-color:#333;font-size:18px;}")
         row.addWidget(victim); row.addStretch(1)
         bl.addLayout(row)
 
         hint = QLabel("You may kill a second target tonight. Detective may notice you’re covered in blood.")
-        hint.setWordWrap(True); hint.setStyleSheet("color:#BDBDBD; font-size:15px;")
+        hint.setFont(readable_body_font())
+        hint.setWordWrap(True); hint.setStyleSheet("color:#aaa; font-size:18px;")
         bl.addWidget(hint)
 
-        save = QPushButton("Save")
-        save.setStyleSheet("background:#2e7d32;color:white;padding:8px 16px;border-radius:8px; font-size:16px;")
+        save = QPushButton("Confirm")
+        save.setFont(self.speaker_font)
+        save.setStyleSheet("QPushButton{background:transparent;color:white;padding:12px 20px;border:1px solid #999;font-size:12px;} QPushButton:hover{border-color:white;background:#191919;}")
         def do_save():
             if not self.can_configure_weapon("knife", w, editor_night):
                 return
@@ -4589,11 +4690,12 @@ class GameWindow(QMainWindow):
         button.setAccessibleName(text)
         button.setFont(self.speaker_font)
         button.setCursor(Qt.PointingHandCursor)
+        button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button.setStyleSheet(
-            'QPushButton { color: white; background: #333; border: 1px solid #777; '
-            'padding: 12px 16px; min-height: 24px; font-size: 12px; } '
-            'QPushButton:hover, QPushButton:focus { background: #444; border-color: white; } '
-            'QPushButton:pressed { background: #555; }')
+            'QPushButton { color: #ddd; background: transparent; border: none; border-bottom: 1px solid #242424; '
+            'padding: 12px 16px; min-height: 24px; font-size: 12px; text-align: left; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color: white; background: #191919; } '
+            'QPushButton:pressed { color: #aaa; }')
         button.clicked.connect(callback)
         return button
 
@@ -4605,11 +4707,12 @@ class GameWindow(QMainWindow):
         page = QWidget()
         page.setObjectName("pauseMenuPage")
         layout = QVBoxLayout(page)
-        layout.setSpacing(12)
+        layout.setContentsMargins(22, 12, 22, 12)
+        layout.setSpacing(8)
         actions = (
             ("Resume", "pauseResume", self.close_escape_menu),
             ("Controls", "pauseControls", self.show_voice_controls),
-            ("Model configuration", "pauseModels", self.show_model_configuration),
+            ("Microphone", "pauseMicrophone", self.show_microphone_settings),
             ("Restart", "pauseRestart", self._esc_restart_click),
         )
         for text, name, callback in actions:
@@ -4618,6 +4721,11 @@ class GameWindow(QMainWindow):
                                        "pauseSound", self.toggle_pause_sound)
         layout.addWidget(sound)
         layout.addWidget(self.pause_menu_button("Exit", "pauseExit", self._esc_quit_click))
+        if development_mode():
+            diagnostics = self.pause_menu_button("Developer diagnostics", "pauseModels", self.show_model_configuration)
+            diagnostics.setStyleSheet(diagnostics.styleSheet() + 'QPushButton { color: #888; font-size: 10px; }')
+            layout.addWidget(diagnostics)
+        layout.addStretch(1)
         if current is None:
             opened = self.open_overlay_page(page, "Menu")
         else:
@@ -4627,6 +4735,7 @@ class GameWindow(QMainWindow):
         if opened:
             self._esc_overlay = page
             self._esc_sound_btn = sound
+            fit_window_to_screen(self.overlay_host, 520, 520 if development_mode() else 460)
 
     def toggle_pause_sound(self):
         self.toggle_mute()
@@ -4642,8 +4751,10 @@ class GameWindow(QMainWindow):
         page = QWidget()
         page.setProperty("pauseMenuChild", True)
         layout = QVBoxLayout(page)
-        layout.addWidget(content, 1)
+        layout.addWidget(content, 1 if title == "Model configuration" else 0)
         layout.addWidget(self.pause_menu_button("Back to menu", "settingsBack", self.show_pause_menu_page))
+        if title != "Model configuration":
+            layout.addStretch(1)
         if current is None:
             opened = self.open_overlay_page(page, title)
         else:
@@ -4659,7 +4770,59 @@ class GameWindow(QMainWindow):
                                    body_font=readable_body_font(), heading_font=self.speaker_font)
         self.show_pause_settings_page(page, "Controls")
 
+    def show_microphone_settings(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(16)
+        heading = QLabel("Microphone input")
+        heading.setFont(self.speaker_font)
+        heading.setStyleSheet('font-size: 12px; color: white;')
+        layout.addWidget(heading)
+        selector = GameComboBox()
+        selector.setObjectName("microphoneDeviceSelector")
+        selector.setAccessibleName("Microphone input device")
+        selector.setFont(readable_body_font())
+        selector.setStyleSheet(
+            f'QComboBox {{ font-family: "{readable_body_font().family()}"; font-size: 18px; '
+            'background: #111; color: white; border: 1px solid #777; padding: 12px; } '
+            'QComboBox::drop-down { width: 28px; border-left: 1px solid #777; } '
+            'QComboBox QAbstractItemView { background: #111; color: white; selection-background-color: #333; }')
+        selector.addItem("System default microphone", "")
+        for name, label in self.dictation_recorder.input_devices():
+            selector.addItem(label, name)
+        selected = self.dictation_recorder.device_name
+        index = selector.findData(selected)
+        if index < 0:
+            selector.addItem("Unavailable: " + selected, selected)
+            index = selector.count() - 1
+        selector.setCurrentIndex(index)
+        selector.setEnabled(not self.dictation_recorder.is_recording)
+        layout.addWidget(selector)
+        status = QLabel("Uses your Windows input setting unless you choose a microphone here.")
+        status.setTextFormat(Qt.PlainText)
+        status.setWordWrap(True)
+        status.setFont(readable_body_font())
+        status.setStyleSheet(f'font-family: "{readable_body_font().family()}"; font-size: 18px; color: #aaa;')
+        layout.addWidget(status)
+
+        def choose_device():
+            try:
+                self.dictation_recorder.set_device_name(selector.currentData())
+            except DictationError as error:
+                status.setText(str(error))
+                return
+            if not self.preferences.save_microphone_name(selector.currentData()):
+                status.setText("Microphone selected for this session. The setting could not be saved for next time.")
+                return
+            status.setText("Microphone selected. Record from the conversation screen when you are ready.")
+
+        selector.activated.connect(lambda _index: choose_device())
+        self.show_pause_settings_page(page, "Microphone")
+        fit_window_to_screen(self.overlay_host, 720, 340)
+
     def show_model_configuration(self):
+        if not development_mode():
+            return
         page = ModelConfigPanel(self.ai_runtime.config, body_font=readable_body_font(), heading_font=self.speaker_font)
         self.show_pause_settings_page(page, "Model configuration")
 

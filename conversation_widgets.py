@@ -138,6 +138,9 @@ class ConversationStage(QWidget):
     def active_speaker(self):
         return self._active_speaker
 
+    def sizeHint(self):
+        return QSize(1280, 192)
+
     def set_participants(self, participants):
         participants = tuple(participants)
         if any(not isinstance(p, StageParticipant) for p in participants):

@@ -7,7 +7,7 @@ existing QTextEdit subclass keeps its input and anchor handling unchanged.
 from dataclasses import dataclass
 from typing import Callable, Iterable, Literal
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, pyqtSignal
 from PyQt5.QtGui import QFont, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PyQt5.QtWidgets import QHBoxLayout, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
@@ -49,6 +49,9 @@ class MessageLog(QWidget):
 
     unread_changed = pyqtSignal(int)
     follow_tail_changed = pyqtSignal(bool)
+
+    def sizeHint(self):
+        return QSize(1280, super().sizeHint().height())
 
     def __init__(self, editor: QTextEdit, *, body_font=None, speaker_font=None,
                  name_format: Callable[[DisplayRecord], QTextCharFormat] | None = None,

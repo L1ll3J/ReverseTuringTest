@@ -79,7 +79,7 @@ class ItemCataloguePanel(QWidget):
         self.grids = []
         for default, heading in ((True, "Default items"), (False, "Optional items")):
             rows.addWidget(self._label(heading, self._title_font))
-            grid = ResponsiveItemGrid(195)
+            grid = ResponsiveItemGrid(180)
             self.grids.append(grid)
             for item_id, definition in self._definitions.items():
                 if definition.default != default:
