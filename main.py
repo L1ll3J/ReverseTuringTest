@@ -20,6 +20,7 @@ from npc_items import NPCItemState, NPC_ITEM_REGISTRY
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, DeathCause, ItemUseContext, NightMemoryView, PlayerItemRules, ItemRuleError, GUARDIAN_PUBLIC
 from identity_state import IdentityState
+from presentation_aliases import PresentationAliases
 from love_potion import LoveDose, LovePotionHistory
 from muffled import TONES, TONE_LABELS, muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
@@ -45,6 +46,7 @@ class ItemDeathRecord:
     day: int
     cause: DeathCause
     room_id: str | None
+    observed_name: str | None = None
 
 
 def resource_path(relative_path):
@@ -193,6 +195,8 @@ class GameWindow(QMainWindow):
         self.player_owner_id = "player"
         self.body_ids = {}
         self.identity_state = None
+        self.presentation_aliases = PresentationAliases()
+        self.dialogue_perceptions = {}
         self.mind_data = {}
         self.body_weapons = {}
         self.mind_weapons = {}
@@ -301,7 +305,8 @@ class GameWindow(QMainWindow):
         if self.identity_state is None and self.player_name:
             self.identity_state = IdentityState.from_bodies(
                 self.player_owner_id, self.body_id(self.player_name),
-                (self.body_id(name) for name in self.characters if name != self.player_name))
+                (self.body_id(name) for name in self.characters if name != self.player_name),
+                appearance_names={self.body_id(name): name for name in (*self.characters, self.player_name)})
             self.mind_data = {self.mind_id(name): data for name, data in self.characters.items()}
             self.mind_data[self.player_owner_id] = {"profile": [], "experiences": [], "dispositions": []}
             self.body_muffle_styles = {self.body_id(name): data.get("muffle_style", "fallback")
@@ -368,14 +373,44 @@ class GameWindow(QMainWindow):
         self.trace_action("identity_changed", previous_body=old_label, current_body=target.label)
         return new_state
 
+    def perceived_name(self, body_id):
+        self.ensure_identity_state()
+        return ((self.identity_state.appearance_name(body_id) if self.identity_state else None)
+                or self.label_for_body(body_id))
+
+    def perceived_actor(self, handle):
+        return self.perceived_name(self.body_ids[handle]) if handle in self.body_ids else handle
+
+    def display_label(self, body_id):
+        name = self.perceived_name(body_id)
+        if self.phase not in {"conversation", "voting"}:
+            return name
+        present = tuple(body.body_id for body in self.body_states() if body.alive)
+        if body_id not in present:
+            return name
+        snapshot = self.presentation_aliases.for_presence(
+            f"{self.run_id}:{self.round_number}:discussion", self.identity_state, present)
+        return snapshot.label_for_body(body_id)
+
+    def display_actor(self, handle):
+        return self.display_label(self.body_ids[handle]) if handle in self.body_ids else handle
+
+    def populate_body_choices(self, combo, handles, selected=None):
+        for handle in handles:
+            combo.addItem(self.perceived_actor(handle), self.body_id(handle))
+        if selected in handles:
+            combo.setCurrentIndex(combo.findData(self.body_id(selected)))
+
     def body_states(self):
         self.ensure_body_ids()
         states = [BodyState(self.body_ids[name], name, bool(data["alive"]), True,
-                            mind_id=self.mind_id(name) if hasattr(self, "identity_state") else self.body_ids[name])
+                            mind_id=self.mind_id(name) if hasattr(self, "identity_state") else self.body_ids[name],
+                            appearance_name=self.perceived_name(self.body_ids[name]))
                   for name, data in self.characters.items() if name != self.player_name]
         if self.player_name:
             states.append(BodyState(self.body_ids[self.player_name], self.player_name, self.player_alive, False,
-                                    mind_id=self.player_owner_id))
+                                    mind_id=self.player_owner_id,
+                                    appearance_name=self.perceived_name(self.body_ids[self.player_name])))
         return tuple(states)
 
     def label_for_body(self, body_id):
@@ -617,10 +652,10 @@ class GameWindow(QMainWindow):
                 or self.separate_surface_open()):
             return
         bodies = self.body_states()
-        targets = [(body.body_id, body.label) for body in bodies if body.alive and body.is_npc]
+        targets = [(body.body_id, self.display_label(body.body_id)) for body in bodies if body.alive and body.is_npc]
         options = {
-            "living_body": [(body.body_id, body.label) for body in bodies if body.alive],
-            "dead_body": [(body.body_id, body.label) for body in bodies if not body.alive],
+            "living_body": [(body.body_id, self.display_label(body.body_id)) for body in bodies if body.alive],
+            "dead_body": [(body.body_id, self.display_label(body.body_id)) for body in bodies if not body.alive],
             "room": [(room, room) for room in self.night_rooms if room not in self.old_crime_scenes],
         }
         unavailable = {item_id: "Not available in this development build yet."
@@ -687,7 +722,7 @@ class GameWindow(QMainWindow):
             return True
         if self.inventory_page is not None:
             self.open_inventory()
-            messages = [f"Listening Glass: {self.label_for_body(event.target_body_id)}, night {event.observed_day}\n{event.message}"
+            messages = [f"Listening Glass: {self.display_label(event.target_body_id)}, night {event.observed_day}\n{event.message}"
                         for event in events if event.event_type == "private_memory_revealed"]
             if messages and self.inventory_page is not None:
                 self.inventory_page.show_feedback("\n\n".join(messages))
@@ -708,12 +743,13 @@ class GameWindow(QMainWindow):
                     self.queue_progress("player_kill")
                 if event.event_type == "immediate_death_resolved":
                     decision = event.death_decision
-                    label = self.label_for_body(decision.target_body_id)
+                    label = self.perceived_name(decision.target_body_id)
                     self.record_history(
                         f"{ITEM_CATALOGUE[event.item_id].name}: {label}, {decision.outcome}.", display=True)
                     if killed:
                         self.item_deaths[decision.attempt_id] = ItemDeathRecord(
-                            decision.attempt_id, decision.target_body_id, decision.day, decision.cause, None)
+                            decision.attempt_id, decision.target_body_id, decision.day, decision.cause, None,
+                            self.perceived_name(decision.target_body_id))
             self.applied_item_events.add(event.event_id)
             self.trace.record("item_effect", {"event": event})
             recipient = self.label_for_body(event.target_body_id)
@@ -738,9 +774,9 @@ class GameWindow(QMainWindow):
             elif event.event_type == "apparent_speech" and event.origin == "projected_voice":
                 self.append_speech(recipient, event.message, origin=event.origin)
             elif event.event_type == "private_memory_revealed":
-                self.record_history(f"Listening Glass: {recipient}, night {event.observed_day}\n{event.message}", display=True)
+                self.record_history(f"Listening Glass: {self.display_actor(recipient)}, night {event.observed_day}\n{event.message}", display=True)
             elif event.event_type == "prepared_note_bound":
-                self.morning_item_notes.append((event.event_id, recipient, event.message))
+                self.morning_item_notes.append((event.event_id, self.perceived_name(event.target_body_id), event.message))
             elif event.event_type == "reserved_room_kill":
                 self.queue_progress("reserved_room_kill")
             elif event.event_type == "extra_action_earned":
@@ -748,7 +784,7 @@ class GameWindow(QMainWindow):
             elif event.event_type == "vote_skipped":
                 self.record_history("Presidential Decree: the next vote was skipped.", display=True)
             elif event.event_type == "execution_stayed":
-                self.add_public_event(GUARDIAN_PUBLIC.format(target=recipient))
+                self.add_public_event(GUARDIAN_PUBLIC.format(target=self.perceived_name(event.target_body_id)))
             elif event.event_type == "guardian_intervened" and recipient == self.player_name:
                 self.guardian_intervened_this_run = True
             elif event.event_type == "item_used":
@@ -758,7 +794,7 @@ class GameWindow(QMainWindow):
                 if distinct_before < 5 <= len(self.used_item_types):
                     self.queue_progress("five_item_types_used")
                 item_name = ITEM_CATALOGUE[event.item_id].name
-                target = f" on {recipient}" if recipient is not None and recipient != self.player_name else ""
+                target = f" on {self.display_actor(recipient)}" if recipient is not None and recipient != self.player_name else ""
                 self.record_history(f"You used {item_name}{target}.")
 
         self.update_muffled_player_controls()
@@ -778,8 +814,9 @@ class GameWindow(QMainWindow):
                 continue
             killed_any = True
             self.item_deaths[decision.attempt_id] = ItemDeathRecord(
-                decision.attempt_id, decision.target_body_id, decision.day, decision.cause, room_id)
-            label = self.label_for_body(decision.target_body_id)
+                decision.attempt_id, decision.target_body_id, decision.day, decision.cause, room_id,
+                self.perceived_name(decision.target_body_id))
+            label = self.perceived_name(decision.target_body_id)
             self.record_history(f"{decision.cause.value}: {label} died.", display=True)
             if decision.target_body_id != self.body_id(self.player_name):
                 self.queue_progress("player_kill")
@@ -825,7 +862,7 @@ class GameWindow(QMainWindow):
                     or record.attempt_id in self.published_item_deaths
                     or record.body_id == self.body_id(self.player_name)):
                 continue
-            label = self.label_for_body(record.body_id)
+            label = record.observed_name or self.label_for_body(record.body_id)
             self.add_public_event(
                 f"In the morning the Detective reveals {label}'s body was found in the {record.room_id}.")
             self.published_item_deaths.add(record.attempt_id)
@@ -872,14 +909,19 @@ class GameWindow(QMainWindow):
                   "attacker_label": attacker, "attacker_body_id": self.body_id(attacker),
                   "player_attack": attacker == self.player_name,
                   "target_label": target, "target_body_id": self.body_id(target),
-                  "corpse_label": target, "corpse_body_id": self.body_id(target)}
+                  "corpse_label": target, "corpse_body_id": self.body_id(target),
+                  "attacker_name": self.perceived_actor(attacker), "target_name": self.perceived_actor(target),
+                  "corpse_name": self.perceived_actor(target), "player_name": self.perceived_actor(self.player_name),
+                  "observed_names": {self.body_id(name): self.perceived_actor(name)
+                                     for name in (*self.room_assignments.get(room, ()), attacker, target)}}
         if weapon_id == "voodoo":
             old_body = self.player_name
             self.exchange_player_mind(self.body_id(target))
             self.voodoo_current_identity = target
             self.room_assignments[room].remove(target)
             self.room_assignments[room].append(old_body)
-            attack.update(corpse_label=old_body, corpse_body_id=self.body_id(old_body))
+            attack.update(corpse_label=old_body, corpse_body_id=self.body_id(old_body),
+                          corpse_name=self.perceived_actor(old_body))
             decision = self.resolve_death(old_body, attack["attack_id"], caused_by_player=True)
             self.record_history(f"You possessed the body of {target} in the {room} and left behind {old_body} as a corpse.")
         else:
@@ -997,8 +1039,9 @@ class GameWindow(QMainWindow):
 
     def speaker_display_format(self, record):
         result = QTextCharFormat()
-        if (record.speaker_id is not None and record.speaker != self.player_name
-                and self.characters.get(record.speaker, {}).get("alive", False)):
+        handle = self.label_for_body(record.speaker_id) if record.speaker_id is not None else None
+        if (handle is not None and handle != self.player_name
+                and self.characters.get(handle, {}).get("alive", False)):
             result.setAnchor(True)
             result.setAnchorHref("npc:" + record.speaker_id)
             result.setForeground(Qt.lightGray)
@@ -1036,8 +1079,12 @@ class GameWindow(QMainWindow):
     def recalled_public_events(self):
         return tuple(self.public_events[self.npc_recall_public_event_start:])
 
-    def recalled_dialogue(self):
+    def recalled_routing_dialogue(self):
         return tuple(self.public_dialogue[self.npc_recall_dialogue_start:])
+
+    def recalled_dialogue(self):
+        return tuple(self.dialogue_perceptions.get(id(line), (line, line))[1]
+                     for line in self.recalled_routing_dialogue())
 
     def clear_npc_recollections(self):
         self.ensure_identity_state()
@@ -1099,6 +1146,9 @@ class GameWindow(QMainWindow):
         self.request_serial += 1
         line = DialogueLine(self.round_number, speaker, speech, addressee)
         self.public_dialogue.append(line)
+        perception = DialogueLine(self.round_number, self.perceived_actor(speaker), speech,
+                                  self.perceived_actor(addressee))
+        self.dialogue_perceptions[id(line)] = (line, perception)
         self.last_speech_origin = (line, origin)
         if origin == "ordinary":
             self.required_reply_anchor = ((line, self.body_id(self.player_name))
@@ -1107,11 +1157,12 @@ class GameWindow(QMainWindow):
                                               "speech": speech, "addressee": addressee,
                                               "origin": origin, "direct_reply": direct_reply},
                           scope=self.trace_callback_scope)
-        message = f"{speaker}: {speech}"
+        message = f"{self.perceived_actor(speaker)}: {speech}"
         self.current_conversation.append(message)
         self.most_recent_messageS.append(message)
         speaker_id = self.body_id(speaker) if speaker in self.characters or speaker == self.player_name else None
-        self.record_history(speech, kind="speech", speaker=speaker, speaker_id=speaker_id, display=True)
+        self.record_history(speech, kind="speech", speaker=self.display_actor(speaker),
+                            speaker_id=speaker_id, display=True)
         if ordinary_npc:
             self.direct_replies.committed(self.body_id(speaker), direct=direct_reply)
         self.refresh_recipient_choices()
@@ -1758,7 +1809,7 @@ class GameWindow(QMainWindow):
     def refresh_known_equipment(self):
         living = {name for name, data in self.characters.items()
                   if data["alive"] and name != self.player_name}
-        holders = [f"{owner}: {NPC_ITEM_REGISTRY[item_id].name}"
+        holders = [f"{self.perceived_actor(owner)}: {NPC_ITEM_REGISTRY[item_id].name}"
                    for owner, item_id in self.npc_items.equipment.items() if owner in living]
         self.npc_equipment_label.setText("Known equipment\n" + "\n".join(holders) if holders else "")
         self.npc_equipment_label.setVisible(self.phase == "action" and not self.game_over and bool(holders))
@@ -2098,7 +2149,8 @@ class GameWindow(QMainWindow):
         self.npc_items = NPCItemState.allocate(
             name for name, data in self.characters.items() if data["alive"]
         )
-        equipment_description = self.npc_items.equipment_description()
+        equipment_description = self.npc_items.equipment_description(
+            appearance_names={name: self.perceived_actor(name) for name in self.body_ids})
         self.add_public_event(equipment_description, source="Visible equipment", display=False)
 
         # Start the first action phase
@@ -2343,7 +2395,7 @@ class GameWindow(QMainWindow):
             desc_text = "Choose victims."
         elif wpn["id"] == "knife":
             if self.knife_extra_target:
-                desc_text = f"\nACTIVE \n({self.knife_extra_target})"
+                desc_text = f"\nACTIVE \n({self.perceived_actor(self.knife_extra_target)})"
             else:
                 desc_text = "Choose extra victim. \n (optional)"
         elif wpn["id"] == "c4":
@@ -2546,8 +2598,11 @@ class GameWindow(QMainWindow):
             self.round_number,
             self.room_assignments,
             living_npcs,
+            appearance_names={name: self.perceived_actor(name) for name in self.body_ids},
+            body_ids=self.body_ids,
         )
-        self.record_history(self.npc_items.equipment_description(living_npcs))
+        self.record_history(self.npc_items.equipment_description(
+            living_npcs, appearance_names={name: self.perceived_actor(name) for name in self.body_ids}))
         self.refresh_known_equipment()
         self.trace_action("night_rooms_assigned", assignments=self.room_assignments)
 
@@ -2556,7 +2611,8 @@ class GameWindow(QMainWindow):
             formatted_assignments = []
             for room, occupants in self.room_assignments.items():
                 if occupants:
-                    occupants_str = ", ".join(occupants[:-1]) + (f" and {occupants[-1]}" if len(occupants) > 1 else occupants[0])
+                    observed_occupants = [self.perceived_actor(name) for name in occupants]
+                    occupants_str = ", ".join(observed_occupants[:-1]) + (f" and {observed_occupants[-1]}" if len(observed_occupants) > 1 else observed_occupants[0])
                     formatted_assignments.append(f"{room}: {occupants_str}")
 
                 elif room not in self.old_crime_scenes:
@@ -2567,7 +2623,7 @@ class GameWindow(QMainWindow):
 
         self.house_view.reset_observations(tuple(
             RoomObservation(room_id,
-                            known_names=tuple(self.room_assignments[label]) if self.show_room_allocations else (),
+                            known_names=tuple(self.perceived_actor(name) for name in self.room_assignments[label]) if self.show_room_allocations else (),
                             unknown_remainder=not self.show_room_allocations)
             for room_id, label in ROOM_LABELS.items()))
 
@@ -2632,11 +2688,11 @@ class GameWindow(QMainWindow):
                         if self.characters.get(occ, {}).get("alive"):
                             # timeless key-takeaway; strong, positive
                             if len(occupants) == 1:
-                                self.remember(occ, "disposition", f"You and {self.player_name} shared a wonderful, intimate night in the {selected_room} on a previous night. It was a beautiful dance of passion and devotion and you're eager to spend more time with them. You VOUCH for {self.player_name}.")
+                                self.remember(occ, "disposition", f"You and {self.perceived_actor(self.player_name)} shared a wonderful, intimate night in the {selected_room} on a previous night. It was a beautiful dance of passion and devotion and you're eager to spend more time with them. You VOUCH for {self.perceived_actor(self.player_name)}.")
                             else: 
-                                others = [o for o in occupants if o != occ and self.characters[o]["alive"]]
+                                others = [self.perceived_actor(o) for o in occupants if o != occ and self.characters[o]["alive"]]
                                 others.append(self.player_name)
-                                self.remember(occ, "disposition", f"You and " + " and ".join(others) + f" shared a wonderful, intimate night in the {selected_room} on a previous night. It was a beautiful dance of passion and devotion, espcially due to {self.player_name}, and you're eager to spend more time with them. You VOUCH for " + " and ".join(others) +".")
+                                self.remember(occ, "disposition", f"You and " + " and ".join(others) + f" shared a wonderful, intimate night in the {selected_room} on a previous night. It was a beautiful dance of passion and devotion, espcially due to {self.perceived_actor(self.player_name)}, and you're eager to spend more time with them. You VOUCH for " + " and ".join(others) +".")
 
                 # No crime scenes; straight to convo
                 self.new_crime_scenes = []
@@ -2693,7 +2749,7 @@ class GameWindow(QMainWindow):
                 self.commit_attack(tgt, target_room, attacker=ctrl, weapon_id="blackmagic")
                 self.new_crime_scenes = [target_room]
                 self._override_murder_room = target_room  # let update_witness_memories use the right room
-                self.record_history(f"{ctrl} (under your control) kills {tgt} in the {target_room}.\n", display=True)
+                self.record_history(f"{self.perceived_actor(ctrl)} (under your control) kills {self.perceived_actor(tgt)} in the {target_room}.\n", display=True)
 
                 # Adjust room assignments to handle mind control
                 controlled_current_room = next((rm for rm, occs in self.room_assignments.items() if ctrl in occs), None)
@@ -2736,7 +2792,7 @@ class GameWindow(QMainWindow):
             self.finish_primary_kill(living[0], player_room)
         elif living:
             self.observe_house_room(player_room, living)
-            self.record_history(f"The {player_room} is occupied by {', '.join(living)}.", display=True)
+            self.record_history(f"The {player_room} is occupied by {', '.join(self.perceived_actor(name) for name in living)}.", display=True)
             self.append_output_text("Choose who to kill.")
             self.display_victim_selection(living)
 
@@ -2751,7 +2807,8 @@ class GameWindow(QMainWindow):
         conversation_button_font_size = max(int(32 *(screen_width/2560)), 18)
 
         for occupant in occupants:
-            victim_button = QPushButton(f"Kill {occupant}", self)
+            victim_button = QPushButton(f"Kill {self.perceived_actor(occupant)}", self)
+            victim_button.setProperty("target_body_id", self.body_id(occupant))
             victim_button.setStyleSheet(f"""
                 QPushButton {{
                     font-size: {int(conversation_button_font_size)}px;
@@ -2835,46 +2892,50 @@ class GameWindow(QMainWindow):
                               if record.day == self.round_number and record.room_id is not None)
         sleep_room = self.rooms_visited[0] if self.rooms_visited else None
         for attack in self.night_attacks:
-            room, target, killer = attack["room"], attack["target_label"], attack["attacker_label"]
+            room = attack["room"]
+            target = attack.get("target_name", attack["target_label"])
+            killer = attack.get("attacker_name", attack["attacker_label"])
+            observed_names = attack.get("observed_names", {})
+            observed_name = lambda handle: observed_names.get(self.body_id(handle), handle)
             for observer in self.room_assignments.get(room, ()):
                 if observer == self.player_name or not self.characters.get(observer, {}).get("alive"):
                     continue
                 body_id = self.body_ids[observer]
                 if attack["player_attack"]:
                     self.witness_body_ids.add(body_id)
-                if attack["weapon_id"] == "blackmagic" and observer == killer:
+                if attack["weapon_id"] == "blackmagic" and observer == attack["attacker_label"]:
                     self.remember(observer, "experience",
-                        f"You were controlled last night! You were in a trance-like state, like a puppet in your own body, all you could hear was {self.player_name}'s voice echoing inside your head as they forced you to kill {target} against your will! {self.player_name} is the real killer, not you!")
+                        f"You were controlled last night! You were in a trance-like state, like a puppet in your own body, all you could hear was {attack.get('player_name', self.player_name)}'s voice echoing inside your head as they forced you to kill {target} against your will! {attack.get('player_name', self.player_name)} is the real killer, not you!")
                 elif attack["weapon_id"] == "stopwatch":
                     self.remember(observer, "experience",
-                        f"You ({observer}) were in the {room} with {target} and {killer}. You remember a struggle, and then seeing {target}'s body on the ground, but everything else is a blur - something deep inside of you thinks maybe you killed {target}.")
+                        f"You ({observed_name(observer)}) were in the {room} with {target} and {killer}. You remember a struggle, and then seeing {target}'s body on the ground, but everything else is a blur - something deep inside of you thinks maybe you killed {target}.")
                     self.remember(observer, "disposition",
                         f"You VOUCH for {killer}. Something about the timing felt exactly right.Despite the chaos, you feel compelled to vouch for {killer}. {killer} is an honest and good individual, you are certain of it.")
                 elif attack["weapon_id"] == "voodoo":
                     self.remember(observer, "experience",
-                        f"You ({observer}) were in the {room}. You saw {killer} stab {target}. Afterwards, {attack['corpse_label']}'s body was lying dead there, and {target} was alive.")
+                        f"You ({observed_name(observer)}) were in the {room}. You saw {killer} stab {target}. Afterwards, {attack.get('corpse_name', attack['corpse_label'])}'s body was lying dead there, and {target} was alive.")
                 else:
-                    others = [name for name in self.room_assignments.get(room, ())
+                    others = [observed_name(name) for name in self.room_assignments.get(room, ())
                               if name != observer and self.characters.get(name, {}).get("alive")]
                     if killer not in others:
                         others.append(killer)
                     self.remember(observer, "experience",
-                        f"You ({observer}) were in the {room} with {target} and " + ' and '.join(others) + '. '
+                        f"You ({observed_name(observer)}) were in the {room} with {target} and " + ' and '.join(others) + '. '
                         f"You witnessed {killer} kill {target} in the {room}. ")
-            self.add_public_event(f"In the morning the Detective reveals {attack['corpse_label']}'s body was found in the {room}.")
+            self.add_public_event(f"In the morning the Detective reveals {attack.get('corpse_name', attack['corpse_label'])}'s body was found in the {room}.")
         for room, occupants in self.room_assignments.items():
             if room in attacked_rooms or (room == sleep_room and (self.selected_weapon or {}).get("id") == "love"):
                 continue
             for observer in occupants:
                 if not self.characters.get(observer, {}).get("alive"):
                     continue
-                others = [name for name in occupants if name != observer and self.characters.get(name, {}).get("alive")]
+                others = [self.perceived_actor(name) for name in occupants if name != observer and self.characters.get(name, {}).get("alive")]
                 if room == sleep_room:
-                    others.append(self.player_name)
+                    others.append(self.perceived_actor(self.player_name))
                 if others:
-                    self.remember(observer, "experience", f"You ({observer}) spent the night in the {room} with {' and '.join(others)}.")
+                    self.remember(observer, "experience", f"You ({self.perceived_actor(observer)}) spent the night in the {room} with {' and '.join(others)}.")
                 else:
-                    self.remember(observer, "experience", f"You ({observer}) spent the night alone in the {room}.")
+                    self.remember(observer, "experience", f"You ({self.perceived_actor(observer)}) spent the night alone in the {room}.")
 
         if (self.selected_weapon or {}).get("id") == "love":
             self.record_history(f"You brewed a storm of passion in the {self.rooms_visited[-1]}.")
@@ -2884,11 +2945,11 @@ class GameWindow(QMainWindow):
                     continue
                 if len(occupants) == 1:
                     self.remember(occupant, "experience",
-                        f"You and {self.player_name} shared a picturesque and beautifully intimate night in the {self.rooms_visited[-1]}.")
+                        f"You and {self.perceived_actor(self.player_name)} shared a picturesque and beautifully intimate night in the {self.rooms_visited[-1]}.")
                 else:
-                    others = [o for o in occupants if o != occupant and self.characters[o]["alive"]] + [self.player_name]
+                    others = [self.perceived_actor(o) for o in occupants if o != occupant and self.characters[o]["alive"]] + [self.perceived_actor(self.player_name)]
                     self.remember(occupant, "experience",
-                        f"You and " + ' and '.join(others) + f" shared a picturesque and beautifully intimate night in the {self.rooms_visited[-1]}. It was everything your heart yearned for, espcially due to {self.player_name}.")
+                        f"You and " + ' and '.join(others) + f" shared a picturesque and beautifully intimate night in the {self.rooms_visited[-1]}. It was everything your heart yearned for, espcially due to {self.perceived_actor(self.player_name)}.")
 
         self.night_memory_views = tuple(
             NightMemoryView(body_id, self.round_number, tuple(self.characters[name]["experiences"][start:]))
@@ -2925,7 +2986,7 @@ class GameWindow(QMainWindow):
         self.recipient_selector.addItem("Group", None)
         for name, data in self.characters.items():
             if data["alive"] and name != self.player_name:
-                self.recipient_selector.addItem(name, self.body_id(name))
+                self.recipient_selector.addItem(self.display_actor(name), self.body_id(name))
         index = self.recipient_selector.findData(selected)
         self.recipient_selector.setCurrentIndex(max(0, index))
         self.recipient_selector.blockSignals(False)
@@ -3009,10 +3070,10 @@ class GameWindow(QMainWindow):
     def can_prepare_next_turn(self):
         if (self.phase != "conversation" or self.game_over or self.ai_busy
                 or self.player_reply_required() or self.retry_action is not None
-                or not self.interject_input.isHidden() or not self.recalled_dialogue()
+                or not self.interject_input.isHidden() or not self.recalled_routing_dialogue()
                 or self.addressed_muffled_npc() is not None):
             return False
-        latest = self.recalled_dialogue()[-1]
+        latest = self.recalled_routing_dialogue()[-1]
         return (latest.round_number == self.round_number and latest.speaker != self.player_name
                 and self.characters.get(latest.speaker, {}).get("alive", False))
 
@@ -3221,7 +3282,7 @@ class GameWindow(QMainWindow):
             return
         self.secondary_output_area.clear()
         self.vote_button.setEnabled(self.can_call_vote())
-        latest = self.recalled_dialogue()[-1] if self.recalled_dialogue() else None
+        latest = self.recalled_routing_dialogue()[-1] if self.recalled_routing_dialogue() else None
         self.trace.record("conversation_routed", {
             "round": self.round_number,
             "addressee": latest.addressee if latest is not None else None,
@@ -3322,9 +3383,9 @@ class GameWindow(QMainWindow):
             self.run_conversation_loop()
 
     def addressed_muffled_npc(self):
-        if self.phase != "conversation" or self.game_over or not self.recalled_dialogue():
+        if self.phase != "conversation" or self.game_over or not self.recalled_routing_dialogue():
             return None
-        latest = self.recalled_dialogue()[-1]
+        latest = self.recalled_routing_dialogue()[-1]
         target = latest.addressee
         if (latest.round_number == self.round_number and target != self.player_name
                 and self.characters.get(target, {}).get("alive", False)
@@ -3435,7 +3496,7 @@ class GameWindow(QMainWindow):
         vote_layout = QVBoxLayout()
         actor, vote_id = self.ballot_actor, self.vote_id
         if actor != self.player_name:
-            heading = QLabel(f"Cast {actor}'s ballot")
+            heading = QLabel(f"Cast {self.display_actor(actor)}'s ballot")
             heading.setTextFormat(Qt.PlainText)
             heading.setFont(readable_body_font())
             vote_layout.addWidget(heading)
@@ -3448,7 +3509,8 @@ class GameWindow(QMainWindow):
         # Create buttons for each alive character (except the player)
         for character in sorted(self.expected_voters):
             if character != actor:
-                vote_button = QPushButton(f"Vote for {character}", self)
+                vote_button = QPushButton(f"Vote for {self.display_actor(character)}", self)
+                vote_button.setProperty("target_body_id", self.body_id(character))
                 vote_button.setStyleSheet(f"""
                     QPushButton {{
                         font-size: {int(conversation_button_font_size)}px;
@@ -3497,11 +3559,11 @@ class GameWindow(QMainWindow):
             actor, selected_character, self.characters, self.player_name
         )
         if actor != self.player_name:
-            self.record_history(f"You cast {actor}'s ballot for {selected_character}.", display=True)
+            self.record_history(f"You cast {self.display_actor(actor)}'s ballot for {self.display_actor(selected_character)}.", display=True)
         elif selected_character != "NONE":
-            self.append_output_text(f"You voted for {selected_character}.\n")
+            self.append_output_text(f"You voted for {self.display_actor(selected_character)}.\n")
             self.record_history(f"Vote {self.round_number}", kind="section")
-            self.record_history(f"You voted for {selected_character}.\n")
+            self.record_history(f"You voted for {self.display_actor(selected_character)}.\n")
         else:
             self.append_output_text(f"You voted to skip.\n")
             self.record_history(f"Vote {self.round_number}", kind="section")
@@ -3547,9 +3609,9 @@ class GameWindow(QMainWindow):
 
         for character in sorted(self.expected_voters):
             if self.votes[character] == "NONE":
-                message = f"{character} voted to skip.\n"
+                message = f"{self.perceived_actor(character)} voted to skip.\n"
             else:
-                message = f"{character} voted for {self.votes[character]}.\n"
+                message = f"{self.perceived_actor(character)} voted for {self.perceived_actor(self.votes[character])}.\n"
             self.add_public_event(message, "Voting")
 
         result = self.item_rules.resolve_vote(self.vote_id, {
@@ -3560,7 +3622,7 @@ class GameWindow(QMainWindow):
         if result.outcome == "skip":
             self.add_public_event("The group decided not to rush to conclusions and no one was voted out.", "Voting")
         elif result.outcome == "tie":
-            names = [self.label_for_body(body_id) if body_id != "NONE" else "NONE"
+            names = [self.perceived_name(body_id) if body_id != "NONE" else "NONE"
                      for body_id in result.tied_targets]
             self.add_public_event(f"There was a tie between {' and '.join(names)}. No one was voted out.", "Voting")
         elif result.outcome == "execution":
@@ -3572,7 +3634,7 @@ class GameWindow(QMainWindow):
                     score = 5 - sum(data["alive"] for data in self.characters.values())
                     self.end_game_screen(score)
                 else:
-                    self.add_public_event(f"{voted_out} was voted out! They were hanged for their crimes.", "Voting")
+                    self.add_public_event(f"{self.perceived_actor(voted_out)} was voted out! They were hanged for their crimes.", "Voting")
                     self.append_key_takeaways_hang(voted_out)
                     self.innocents_executed += 1
                     if self.innocents_executed == 2:
@@ -3913,7 +3975,7 @@ class GameWindow(QMainWindow):
                 or mentioned not in self.characters or not self.characters[mentioned]["alive"]):
             return
         body_id = self.body_id(mentioned)
-        latest = self.recalled_dialogue()[-1] if self.recalled_dialogue() else None
+        latest = self.recalled_routing_dialogue()[-1] if self.recalled_routing_dialogue() else None
         pending = self.pending_direct_reply
         direct_reply = direct_reply or (pending is not None and pending[0] is latest and pending[1] == body_id)
         if direct_reply and not self.direct_replies.can_direct(body_id):
@@ -4187,8 +4249,8 @@ class GameWindow(QMainWindow):
         lbl1.setStyleSheet("color:#E0E0E0; font-size:16px;")
         row.addWidget(lbl1)
 
-        ctrl = QComboBox(); ctrl.addItems(alive)
-        if self.black_magic_controller in alive: ctrl.setCurrentText(self.black_magic_controller)
+        ctrl = QComboBox()
+        self.populate_body_choices(ctrl, alive, self.black_magic_controller)
         ctrl.setMinimumHeight(38)
         ctrl.setStyleSheet(
             "QComboBox{font-size:16px; padding:6px 10px; min-width:180px;}"
@@ -4200,8 +4262,8 @@ class GameWindow(QMainWindow):
         lbl2.setStyleSheet("color:#E0E0E0; font-size:16px;")
         row.addWidget(lbl2)
 
-        tgt = QComboBox(); tgt.addItems(alive)
-        if self.black_magic_target in alive: tgt.setCurrentText(self.black_magic_target)
+        tgt = QComboBox()
+        self.populate_body_choices(tgt, alive, self.black_magic_target)
         tgt.setMinimumHeight(38)
         tgt.setStyleSheet(
             "QComboBox{font-size:16px; padding:6px 10px; min-width:180px;}"
@@ -4223,10 +4285,12 @@ class GameWindow(QMainWindow):
         def do_save():
             if not self.can_configure_weapon("blackmagic", w, editor_night):
                 return
-            c, t = ctrl.currentText(), tgt.currentText()
-            if c and t and c != t:
+            c, t = self.label_for_body(ctrl.currentData()), self.label_for_body(tgt.currentData())
+            if (c and t and c != t and c != self.player_name and t != self.player_name
+                    and self.characters.get(c, {}).get("alive")
+                    and self.characters.get(t, {}).get("alive")):
                 self.black_magic_controller, self.black_magic_target = c, t
-                self.record_history(f"You planned to compel {c} to attack {t}.")
+                self.record_history(f"You planned to compel {self.perceived_actor(c)} to attack {self.perceived_actor(t)}.")
                 self.trace_action("weapon_configured", weapon_id="blackmagic", controller=c, target=t)
                 self.apply_weapon_gating()
                 w.close()
@@ -4300,9 +4364,7 @@ class GameWindow(QMainWindow):
         lbl.setMinimumHeight(28)   
         row.addWidget(lbl, 0, Qt.AlignVCenter)
         victim = QComboBox(); victim.addItem("(none)")  # allow “no extra kill”
-        victim.addItems(alive)
-        if self.knife_extra_target and self.knife_extra_target in alive:
-            victim.setCurrentText(self.knife_extra_target)
+        self.populate_body_choices(victim, alive, self.knife_extra_target)
         victim.setMinimumHeight(38)
         victim.setStyleSheet("QComboBox{font-size:16px; padding:6px 10px; min-width:220px;} QAbstractItemView{font-size:16px;}")
         row.addWidget(victim); row.addStretch(1)
@@ -4317,15 +4379,18 @@ class GameWindow(QMainWindow):
         def do_save():
             if not self.can_configure_weapon("knife", w, editor_night):
                 return
-            choice = victim.currentText()
-            if choice == "(none)":
+            body_id = victim.currentData()
+            choice = self.label_for_body(body_id) if body_id is not None else None
+            if body_id is not None and (choice == self.player_name or not self.characters.get(choice, {}).get("alive")):
+                return
+            if choice is None:
                 self.knife_extra_target = None
                 self.knife_used_bloodlust = False
             else:
                 self.knife_extra_target = choice
                 self.knife_used_bloodlust = True
             self.trace_action("weapon_configured", weapon_id="knife", target=self.knife_extra_target)
-            self.record_history(f"You prepared a second attack against {self.knife_extra_target}."
+            self.record_history(f"You prepared a second attack against {self.perceived_actor(self.knife_extra_target)}."
                                 if self.knife_extra_target else "You decided against a second attack.")
             w.close()
             self.build_weapon_action_panel()

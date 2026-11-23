@@ -67,6 +67,11 @@ class BodyState:
     is_npc: bool
     subject_pronoun: Literal["he", "she", "they"] = "they"
     mind_id: str | None = None
+    appearance_name: str | None = None
+
+    @property
+    def perceived_name(self) -> str:
+        return self.appearance_name if self.appearance_name is not None else self.label
 
     @property
     def mind_identity(self) -> str:
@@ -77,6 +82,8 @@ class BodyState:
             raise ItemRuleError("Each body requires an identifier and a label")
         if self.mind_id is not None and (not isinstance(self.mind_id, str) or not self.mind_id):
             raise ItemRuleError("A mind identifier must be a nonempty string")
+        if self.appearance_name is not None and (not isinstance(self.appearance_name, str) or not self.appearance_name):
+            raise ItemRuleError("An appearance name must be nonempty text")
         if self.subject_pronoun not in ("he", "she", "they"):
             raise ItemRuleError("A body subject pronoun must be he, she or they")
 
@@ -485,11 +492,11 @@ class PlayerItemRules:
                   "target_body_id": target.body_id if target is not None else None}
         consequences = ()
         if entry.item_id == "banana":
-            disposition = BANANA_DISPOSITION.format(giver=actor.label, day=context.day)
+            disposition = BANANA_DISPOSITION.format(giver=actor.perceived_name, day=context.day)
             self._affinities.append(AffinityEffect(context.day, target.body_id, actor.body_id, disposition))
             effect = self._event("banana_given", context.day, **values,
                                  subject_body_id=actor.body_id,
-                                 public_text=BANANA_PUBLIC.format(giver=actor.label, recipient=target.label),
+                                 public_text=BANANA_PUBLIC.format(giver=actor.perceived_name, recipient=target.perceived_name),
                                  disposition_text=disposition)
         elif entry.item_id == "muffle":
             self._muffles[target.body_id] = MuffleEffect(target.body_id, context.day, context.day + 1)
@@ -498,7 +505,7 @@ class PlayerItemRules:
             effect = self._event("npc_recollections_cleared", context.day, **values)
         elif entry.item_id == "love_potion":
             effect = self._event("love_potion_applied", context.day, **values,
-                                 subject_body_id=actor.body_id, giver_label=actor.label)
+                                 subject_body_id=actor.body_id, giver_label=actor.perceived_name)
         elif entry.item_id == "spare_paper":
             self._pending_ballot_bonus += 2
             effect = self._event("extra_ballots_added", context.day, **values)
@@ -558,7 +565,7 @@ class PlayerItemRules:
                 observation["private_text"] = DIVINE_REVELATION_PRIVATE.format(message=message)
             else:
                 observation["public_text"] = DARK_WHISPER_PUBLIC.format(
-                    apparent_speaker=target.label, subject_pronoun=target.subject_pronoun,
+                    apparent_speaker=target.perceived_name, subject_pronoun=target.subject_pronoun,
                     speak_verb="speak" if target.subject_pronoun == "they" else "speaks", message=message)
             effect = self._event(kind, context.day, **values, message=message, origin=origin, **observation)
         elif entry.item_id == "listening_glass":
@@ -828,7 +835,7 @@ class PlayerItemRules:
             protection = "guardian_angel"
             events = (self._event("guardian_intervened", day, item_id="guardian_angel",
                                   target_body_id=target.body_id,
-                                  public_text=GUARDIAN_PUBLIC.format(target=target.label)),)
+                                  public_text=GUARDIAN_PUBLIC.format(target=target.perceived_name)),)
         else:
             outcome = "killed"
             self._known_dead.add(target.body_id)
@@ -892,7 +899,7 @@ class PlayerItemRules:
         snapshot = self._votes.get(vote_id)
         if snapshot is None:
             raise ItemRuleError("This vote has not opened")
-        labels = {body.body_id: body.label for body in snapshot.voter_bodies}
+        labels = {body.body_id: body.perceived_name for body in snapshot.voter_bodies}
         ballots = dict(ballots)
         if snapshot.skipped:
             if ballots:

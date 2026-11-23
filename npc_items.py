@@ -27,8 +27,8 @@ ROOM_DETAILS = MappingProxyType({
 })
 
 OWNER_DETAILS = MappingProxyType({
-    "Hank": "Hank has a plate of steak and avocado with a garnish of parsley.",
-    "Debra": "Debra holds an elaborate yoga pose.",
+    "Hank": "{owner} has a plate of steak and avocado with a garnish of parsley.",
+    "Debra": "{owner} holds an elaborate yoga pose.",
 })
 
 
@@ -40,10 +40,13 @@ class CameraSnapshot:
     occupants: tuple[str, ...]
     flavour: tuple[str, ...]
     capture_stage: str = field(default="before_player_action", init=False)
+    owner_body_id: str | None = None
+    occupant_body_ids: tuple[str, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "occupants", tuple(self.occupants))
         object.__setattr__(self, "flavour", tuple(self.flavour))
+        object.__setattr__(self, "occupant_body_ids", tuple(self.occupant_body_ids))
 
     def public_description(self) -> str:
         people = " and ".join(self.occupants)
@@ -96,10 +99,11 @@ class NPCItemState:
                 equipment[owner] = definition.item_id
         return cls(equipment)
 
-    def equipment_description(self, living_npcs: Iterable[str] | None = None) -> str:
+    def equipment_description(self, living_npcs: Iterable[str] | None = None, *,
+                              appearance_names: Mapping[str, str] | None = None) -> str:
         living = set(living_npcs) if living_npcs is not None else None
         descriptions = [
-            f"{owner} is carrying a {NPC_ITEM_REGISTRY[item_id].name}."
+            f"{(appearance_names or {}).get(owner, owner)} is carrying a {NPC_ITEM_REGISTRY[item_id].name}."
             for owner, item_id in self.equipment.items()
             if living is None or owner in living
         ]
@@ -112,10 +116,15 @@ class NPCItemState:
         round_number: int,
         room_assignments: Mapping[str, Iterable[str]],
         living_npcs: Iterable[str],
+        *,
+        appearance_names: Mapping[str, str] | None = None,
+        body_ids: Mapping[str, str] | None = None,
     ) -> tuple[CameraSnapshot, ...]:
         if round_number in self._photos_by_night:
             return self._photos_by_night[round_number]
         living = set(living_npcs)
+        names = dict(appearance_names or {})
+        identifiers = dict(body_ids or {})
         rooms = {room: tuple(occupants) for room, occupants in room_assignments.items()}
         photos = []
         for owner, item_id in self.equipment.items():
@@ -126,8 +135,14 @@ class NPCItemState:
                 raise ValueError("A living camera holder must occupy exactly one room")
             room = locations[0]
             occupants = tuple(sorted(set(rooms[room]) & living))
-            flavour = tuple(detail for detail in (ROOM_DETAILS.get(room), OWNER_DETAILS.get(owner)) if detail)
-            photos.append(CameraSnapshot(round_number, owner, room, occupants, flavour))
+            canonical_owner = names.get(owner, owner)
+            owner_detail = OWNER_DETAILS.get(owner)
+            flavour = tuple(detail for detail in (
+                ROOM_DETAILS.get(room), owner_detail.format(owner=canonical_owner) if owner_detail else None) if detail)
+            photos.append(CameraSnapshot(
+                round_number, canonical_owner, room, tuple(names.get(person, person) for person in occupants), flavour,
+                owner_body_id=identifiers.get(owner),
+                occupant_body_ids=tuple(identifiers[person] for person in occupants) if identifiers else ()))
         result = tuple(photos)
         self._photos_by_night[round_number] = result
         return result
@@ -135,7 +150,7 @@ class NPCItemState:
     def present_morning(self, round_number: int, publish: Callable[[str], None]) -> tuple[CameraSnapshot, ...]:
         published = []
         for photo in self._photos_by_night.get(round_number, ()):
-            identity = (photo.round_number, photo.owner)
+            identity = (photo.round_number, photo.owner_body_id or photo.owner)
             if identity in self._presented:
                 continue
             publish(photo.public_description())
