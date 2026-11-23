@@ -186,7 +186,8 @@ class InlineRewardsTests(unittest.TestCase):
     def test_flavour_is_separate_literal_text_and_does_not_replace_effects(self):
         definition = ItemDefinition("banana", "Banana", "Actual effect.", "self", True,
                                     flavour="A <b>literal</b> flavour & aside.")
-        page = self.page(definitions=dict(ITEM_CATALOGUE, banana=definition))
+        without_flavour = ItemDefinition("muffle", "Muffle", "Effect without flavour.", "living_npc", True)
+        page = self.page(definitions=dict(ITEM_CATALOGUE, banana=definition, muffle=without_flavour))
         self.assertEqual(page.findChild(QLabel, "inlineItemDescription_0").text(), "Actual effect.")
         flavour = page.findChild(QLabel, "inlineItemFlavour_0")
         self.assertEqual(flavour.text(), definition.flavour)
