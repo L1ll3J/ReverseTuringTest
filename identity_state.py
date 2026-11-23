@@ -5,11 +5,16 @@ from dataclasses import dataclass, replace
 
 @dataclass(frozen=True)
 class IdentityState:
+    """Authoritative mutations advance revision, including visually identical copies."""
+
     player_mind_id: str
     occupants: tuple[tuple[str, str], ...]
     appearances: tuple[tuple[str, str], ...] = ()
+    revision: int = 0
 
     def __post_init__(self):
+        if type(self.revision) is not int or self.revision < 0:
+            raise ValueError("An identity revision must be a nonnegative integer")
         pairs = tuple(tuple(pair) for pair in self.occupants)
         if (not self.player_mind_id or not pairs
                 or any(len(pair) != 2 or any(not isinstance(value, str) or not value.strip()
@@ -43,7 +48,7 @@ class IdentityState:
             raise ValueError("Appearance cloning requires distinct known bodies and a named target")
         appearances = dict(self.appearances)
         appearances[actor_body_id] = name
-        return replace(self, appearances=tuple(appearances.items()))
+        return replace(self, appearances=tuple(appearances.items()), revision=self.revision + 1)
 
     def body_for_mind(self, mind_id):
         return next((body for body, mind in self.occupants if mind == mind_id), None)
@@ -60,6 +65,6 @@ class IdentityState:
         if target_mind is None or target_mind == self.player_mind_id:
             raise ValueError("An exchange requires another occupied body")
         old_body = self.player_body_id
-        return replace(self, occupants=tuple(
+        return replace(self, revision=self.revision + 1, occupants=tuple(
             (body, target_mind if body == old_body else self.player_mind_id
              if body == target_body_id else mind) for body, mind in self.occupants))

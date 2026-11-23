@@ -63,6 +63,112 @@ class VoodooMirrorTests(unittest.TestCase):
         with self.assertRaises(ItemRuleError):
             self.resolve(identity=later, target="h")
 
+    def test_cached_first_mirror_application_recovers_identity_and_stable_protection_events(self):
+        self.arm("d")
+        original = self.resolve()
+        cached = self.resolve(identity=self.identity)
+        self.assertFalse(cached.is_new)
+        self.assertTrue(cached.identity_application_required)
+        self.assertEqual(cached.application_state, "pending")
+        self.assertEqual(cached.identity, original.identity)
+        self.assertEqual(cached.identity.appearance_name("p"), "Debra")
+        self.assertFalse(cached.protection.is_new)
+        self.assertEqual(cached.protection.events, original.protection.events)
+        self.assertEqual(self.rules.guardian_body_ids, ())
+        applied_events = set()
+        published = []
+        for payload in (cached, self.resolve(identity=cached.identity)):
+            for event in payload.protection.events:
+                if event.event_id not in applied_events:
+                    published.append(event.public_text)
+                    applied_events.add(event.event_id)
+        self.assertEqual(published, ["Against all expectation, Debra survives."])
+        current = self.resolve(identity=cached.identity)
+        self.assertEqual(current.application_state, "current")
+        self.assertFalse(current.identity_application_required)
+        self.assertEqual(self.rules.guardian_body_ids, ())
+
+    def test_cached_first_exchange_application_never_discards_current_player_body(self):
+        original = self.resolve()
+        cached = self.resolve(identity=self.identity)
+        self.assertFalse(cached.is_new)
+        self.assertTrue(cached.identity_application_required)
+        self.assertEqual(cached.identity, original.identity)
+        current = cached.identity
+        self.assertEqual(current.player_body_id, "d")
+        self.assertEqual(cached.discarded_body_id, "p")
+        self.assertNotEqual(cached.discarded_body_id, current.player_body_id)
+        death = self.rules.attempt_death("corpse:" + cached.attempt_id, self.bodies[0], 1)
+        self.assertTrue(death.killed)
+        replay = self.resolve(identity=current)
+        self.assertEqual(replay.application_state, "current")
+        repeated = self.rules.attempt_death("corpse:" + replay.attempt_id, self.bodies[0], 1)
+        self.assertFalse(repeated.is_new)
+        self.assertEqual(repeated.target_body_id, "p")
+        self.assertFalse(repeated.killed)
+        self.assertNotEqual(replay.discarded_body_id, replay.identity.player_body_id)
+
+    def test_identity_application_before_corpse_failure_keeps_pending_death_recoverable(self):
+        original = self.resolve()
+        current = original.identity
+        retry = self.resolve(identity=current)
+        self.assertFalse(retry.is_new)
+        self.assertEqual(retry.application_state, "current")
+        self.assertFalse(retry.identity_application_required)
+        self.assertEqual(retry.discarded_body_id, "p")
+        self.assertNotEqual(retry.discarded_body_id, current.player_body_id)
+        self.assertTrue(self.rules.attempt_death("corpse:" + retry.attempt_id, self.bodies[0], 1).killed)
+
+    def test_exchange_cycle_back_to_original_occupancy_suppresses_stale_corpse(self):
+        original = self.resolve()
+        cycled = original.identity.exchange("p")
+        self.assertEqual(cycled.occupants, self.identity.occupants)
+        self.assertGreater(cycled.revision, original.identity.revision)
+        retry = self.resolve(identity=cycled)
+        self.assertEqual(retry.application_state, "superseded")
+        self.assertIs(retry.identity, cycled)
+        self.assertEqual(retry.identity.player_body_id, "p")
+        self.assertIsNone(retry.discarded_body_id)
+        self.assertFalse(retry.identity_application_required)
+
+    def test_mirror_cycle_to_original_appearance_does_not_reapply_old_transformation(self):
+        before = self.identity.clone_appearance("h", "p")
+        self.arm("d")
+        original = self.resolve(identity=before)
+        cycled = original.identity.clone_appearance("p", "h")
+        self.assertEqual(cycled.occupants, before.occupants)
+        self.assertEqual(cycled.appearances, before.appearances)
+        self.assertGreater(cycled.revision, before.revision)
+        self.arm("d")
+        retry = self.resolve(identity=cycled)
+        self.assertEqual(retry.application_state, "superseded")
+        self.assertIs(retry.identity, cycled)
+        self.assertEqual(retry.identity.appearance_name("p"), "Alex")
+        self.assertEqual(retry.protection.events, ())
+        self.assertTrue(self.rules.guardian_protects("d"))
+
+    def test_copying_same_appearance_still_identifies_pending_current_and_later_states(self):
+        before = self.identity.clone_appearance("p", "d")
+        self.arm("d")
+        original = self.resolve(identity=before)
+        self.assertEqual(original.identity.appearances, before.appearances)
+        self.assertEqual(original.identity.revision, before.revision + 1)
+        self.assertEqual(self.resolve(identity=before).application_state, "pending")
+        self.assertEqual(self.resolve(identity=original.identity).application_state, "current")
+        later = original.identity.clone_appearance("p", "d")
+        self.assertEqual(later.appearances, before.appearances)
+        self.assertEqual(self.resolve(identity=later).application_state, "superseded")
+
+    def test_same_revision_divergence_rejects_without_spending_a_rearmed_guardian(self):
+        self.arm("d")
+        original = self.resolve()
+        self.arm("d")
+        for snapshot in (self.identity, original.identity):
+            divergent = replace(snapshot, appearances=(("p", "Hank"), ("d", "Debra"), ("h", "Hank")))
+            with self.subTest(revision=divergent.revision), self.assertRaisesRegex(ItemRuleError, "revision diverges"):
+                self.resolve(identity=divergent)
+            self.assertTrue(self.rules.guardian_protects("d"))
+
     def test_unprotected_target_exchanges_and_returns_original_body_for_existing_death_adapter(self):
         self.arm("p")
         result = self.resolve()

@@ -20,6 +20,21 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 changed.exchange(invalid)
 
+    def test_revisions_distinguish_cycles_and_reject_invalid_values(self):
+        initial = IdentityState.from_bodies("player", "original", ("dave",),
+                                           appearance_names={"original": "Alex", "dave": "Dave"})
+        cycled = initial.exchange("dave").exchange("original")
+        self.assertEqual(initial.occupants, cycled.occupants)
+        self.assertEqual((initial.revision, cycled.revision), (0, 2))
+        self.assertNotEqual(initial, cycled)
+        copied = initial.clone_appearance("original", "dave")
+        repeated = copied.clone_appearance("original", "dave")
+        self.assertEqual(copied.appearances, repeated.appearances)
+        self.assertEqual((copied.revision, repeated.revision), (1, 2))
+        for revision in (-1, True, 1.5, "1"):
+            with self.subTest(revision=revision), self.assertRaises(ValueError):
+                replace(initial, revision=revision)
+
     def test_occupancy_rejects_duplicates_and_missing_player(self):
         for pairs in ((("a", "player"), ("a", "npc")),
                       (("a", "player"), ("b", "player")), (("a", "npc"),)):
