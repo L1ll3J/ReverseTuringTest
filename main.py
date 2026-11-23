@@ -191,6 +191,7 @@ class GameWindow(QMainWindow):
         self.items_used = 0
         self.used_item_types = set()
         self.applied_item_events = set()
+        self.applied_death_attempts = set()
         self.morning_item_notes = []
         self.night_memory_views = ()
         self.guardian_intervened_this_run = False
@@ -567,9 +568,21 @@ class GameWindow(QMainWindow):
         self.request_serial += 1
         self.retry_action = None
         self.retry_button.hide()
-        self.apply_item_events(events)
-        self.restore_conversation_decision()
+        death_applied = self.apply_item_events(events)
         self.trace_action("inventory_item_used", events=events)
+        if death_applied:
+            if not self.player_alive:
+                cause = next(event.death_decision.cause for event in events
+                             if event.death_decision is not None
+                             and event.death_decision.target_body_id == self.body_id(self.player_name)
+                             and event.death_decision.outcome == "killed")
+                score = 5 - sum(data["alive"] for data in self.characters.values())
+                self.end_game_screen(score, death_cause=cause)
+            else:
+                self.check_victory()
+        if self.game_over:
+            return True
+        self.restore_conversation_decision()
         if any(event.event_type == "early_vote_requested" for event in events):
             self.overlay_host.close_page()
             self.call_vote()
@@ -584,9 +597,17 @@ class GameWindow(QMainWindow):
         return True
 
     def apply_item_events(self, events):
+        death_applied = False
         for event in events:
             if event.event_id in self.applied_item_events:
                 continue
+            if event.death_decision is not None:
+                killed = self.apply_resolved_death(event.death_decision)
+                death_applied = killed or death_applied
+                if (killed and event.event_type == "immediate_death_resolved"
+                        and event.owner_id == self.player_owner_id
+                        and event.death_decision.target_body_id != self.body_id(self.player_name)):
+                    self.queue_progress("player_kill")
             self.applied_item_events.add(event.event_id)
             self.trace.record("item_effect", {"event": event})
             recipient = self.label_for_body(event.target_body_id)
@@ -625,6 +646,26 @@ class GameWindow(QMainWindow):
                 target = f" on {recipient}" if recipient is not None and recipient != self.player_name else ""
                 self.record_history(f"You used {item_name}{target}.")
 
+        return death_applied
+
+    def apply_resolved_death(self, decision):
+        target = next((body for body in self.body_states()
+                       if body.body_id == decision.target_body_id), None)
+        if target is None or not decision.attempt_id or decision.outcome not in {"killed", "prevented", "already_dead"}:
+            raise ItemRuleError("A resolved death requires a known body, attempt and outcome")
+        self.apply_item_events(decision.events)
+        if decision.attempt_id in self.applied_death_attempts:
+            return False
+        killed = decision.outcome == "killed" and target.alive
+        if killed:
+            if target.is_npc:
+                self.characters[target.label]["alive"] = False
+            else:
+                self.player_alive = False
+        self.applied_death_attempts.add(decision.attempt_id)
+        self.invalidate_prepared_turn("death_resolved", changed=True)
+        return killed
+
     def resolve_death(self, label, attempt_id, *, cause=DeathCause.ATTACK, source_id=None, caused_by_player=False):
         target = next(body for body in self.body_states() if body.label == label)
         owner = self.player_owner_id if label == self.player_name else None
@@ -632,14 +673,7 @@ class GameWindow(QMainWindow):
             attempt_id, target, max(1, self.round_number), owner, cause=cause, source_id=source_id,
             caused_by_owner_id=self.player_owner_id if caused_by_player else None,
             phase=self.phase if caused_by_player else None)
-        if decision.is_new:
-            self.invalidate_prepared_turn("death_resolved", changed=True)
-        self.apply_item_events(decision.events)
-        if decision.killed:
-            if label == self.player_name:
-                self.player_alive = False
-            else:
-                self.characters[label]["alive"] = False
+        self.apply_resolved_death(decision)
         self.trace_action("death_resolved", attempt_id=attempt_id, target=target, outcome=decision.outcome,
                           is_new=decision.is_new)
         return decision
@@ -3287,7 +3321,7 @@ class GameWindow(QMainWindow):
 
         return False
         
-    def end_game_screen(self, final_score):
+    def end_game_screen(self, final_score, *, death_cause=DeathCause.EXECUTION):
         """Displays the game over screen with the final message."""
         if self.game_over:
             return
@@ -3321,6 +3355,8 @@ class GameWindow(QMainWindow):
         elif final_score == 4 and self.player_alive:
             alive_npcs = [char for char in self.characters if self.characters[char]["alive"] and char != self.player_name]
             message = f"You win! However, {alive_npcs[0]} figured out you must be the killer and decided to run before they ended up as your next victim.\n"
+        elif death_cause != DeathCause.EXECUTION:
+            message = "You died.\nBetter luck next time.\n\n"
         else:
             message = "You were voted out! You were hanged for your crimes. \nBetter luck next time.\n\n"
 
