@@ -32,6 +32,14 @@ def item_sprite(item_id, parent=None, *, icon_root=None, size=64):
 
 RARITY_COLORS = {"green": "#91bc91", "blue": "#9dbfe5", "purple": "#c5a5dc", "gold": "#dfc383"}
 
+ITEM_SCROLLBAR_STYLE = '''
+    QScrollBar:vertical { background: #090909; width: 8px; margin: 0; }
+    QScrollBar::handle:vertical { background: #555; min-height: 36px; border: none; }
+    QScrollBar::handle:vertical:hover { background: #888; }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+'''
+
 
 class ItemCardButton(QPushButton):
     """Native keyboard activation with a clickable illustrated surface."""
@@ -234,6 +242,7 @@ class InventoryPage(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setStyleSheet(ITEM_SCROLLBAR_STYLE)
         content = QWidget()
         content.setObjectName("inventoryContents")
         rows = QVBoxLayout(content)
@@ -380,6 +389,7 @@ class InlineItemDraftPage(QWidget):
         if not all(callable(callback) for callback in (on_take, on_reroll, on_leave)):
             raise TypeError("Room rewards require take, reroll and leave callbacks")
         self.setObjectName("inlineItemDraftPage")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAccessibleName(f"Items found in {offer.room_id}")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self._body_font = QFont(body_font if body_font is not None else
@@ -414,11 +424,13 @@ class InlineItemDraftPage(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet(ITEM_SCROLLBAR_STYLE)
         content = QWidget()
         content.setObjectName("inlineItemContents")
         rows = QVBoxLayout(content)
         rows.setContentsMargins(0, 0, 0, 0)
         rows.setSpacing(12)
+        rows.addStretch()
         heading = QHBoxLayout()
         title = self._label(f"Found in the {offer.room_id}", self._title_font)
         title.setObjectName("inlineItemHeading")
@@ -453,16 +465,16 @@ class InlineItemDraftPage(QWidget):
             take.setObjectName(f"inlineItemTake_{slot}")
             take.setAccessibleName(f"Take {definition.name}")
             take.setAccessibleDescription(definition.description + " " + definition.flavour)
-            take.setMinimumHeight(380)
+            take.setMinimumHeight(480)
             color = RARITY_COLORS.get(getattr(definition, "rarity", "green"), RARITY_COLORS["green"])
             selector = f"QPushButton#{take.objectName()}"
-            take.setStyleSheet(selector + " { " + take.styleSheet() + f" padding: 0; background: #0b0b0b; border: 1px solid #333; border-top: 2px solid {color}; }}"
+            take.setStyleSheet(selector + " { " + take.styleSheet() + f" padding: 0; min-height: 480px; background: #0b0b0b; border: 1px solid #333; border-top: 2px solid {color}; }}"
                                + selector + ":hover, " + selector + ":focus { border: 2px solid white; background: #161616; }"
                                + selector + ":pressed { background: #202020; }")
             contents = QVBoxLayout(take)
             contents.setContentsMargins(24, 24, 24, 20)
             contents.setSpacing(12)
-            sprite = item_sprite(item_id, size=128)
+            sprite = item_sprite(item_id, size=160)
             sprite.setAttribute(Qt.WA_TransparentForMouseEvents)
             sprite.setAccessibleName(definition.name)
             contents.addWidget(sprite, 0, Qt.AlignHCenter)
@@ -514,8 +526,8 @@ class InlineItemDraftPage(QWidget):
         layout.addWidget(self.scroll)
 
     def sizeHint(self):
-        natural = super().sizeHint()
-        return QSize(1280, natural.height())
+        # A scroll area's small natural hint must not collapse the whole reward.
+        return QSize(1440, 720)
 
     def _label(self, text, font):
         label = QLabel(text)

@@ -87,6 +87,8 @@ def capture(output):
             window.interject_input.show()
             window.say_button.show()
             window.update_recipient_controls()
+            save(window, "conversation-mid-reveal")
+            window.message_log.finish_reveal()
             for width, height in ((1280, 800), (1920, 1080), (2560, 1440)):
                 window.resize(width, height)
                 save(window, f"conversation-{width}")

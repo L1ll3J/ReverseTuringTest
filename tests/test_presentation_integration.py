@@ -164,8 +164,10 @@ class PresentationIntegrationTests(unittest.TestCase):
     def test_nightly_equipment_and_empty_room_result_survive_clearing_the_live_view(self):
         self.window.npc_items = game.NPCItemState({"Dave": "camera"})
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
-        self.window.run_action_phase()
-        empty = next(room for room, occupants in self.window.room_assignments.items() if not occupants)
+        with patch.object(game.random, "choice", side_effect=lambda rooms: rooms[0]):
+            self.window.run_action_phase()
+        empty = "Cellar"
+        self.assertNotIn(empty, self.window.night_arrivals.destinations.values())
         self.window.choose_room(empty)
         self.assertIn(empty, self.window.new_crime_scenes)
         self.window.message_log.clear()
@@ -228,9 +230,11 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.window.npc_items = game.NPCItemState({"Dave": "camera"})
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.item_drafts = DraftState(self.window.player_owner_id, ("banana", "muffle", "spare_paper"))
-        self.window.run_action_phase()
+        with patch.object(game.random, "choice", side_effect=lambda rooms: rooms[0]):
+            self.window.run_action_phase()
         self.assertTrue(self.window.npc_equipment_label.isHidden())
-        empty = next(room for room, occupants in self.window.room_assignments.items() if not occupants)
+        empty = "Cellar"
+        self.assertNotIn(empty, self.window.night_arrivals.destinations.values())
         self.window.choose_room(empty)
         self.assertFalse(self.window.npc_equipment_label.isVisible())
         self.window.draft_page.leave_button.click()

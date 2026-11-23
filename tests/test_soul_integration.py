@@ -3,6 +3,7 @@
 from dataclasses import replace
 from xml.etree import ElementTree as ET
 import unittest
+from unittest.mock import patch
 
 import test_runtime_regressions as runtime
 from ai_context import MemoryRecord, render_character_context
@@ -19,6 +20,7 @@ class SoulIntegrationTests(unittest.TestCase):
         self.window.round_number = 1
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.ensure_identity_state()
+        self.patches.enter_context(patch.object(self.window, "run_single_response"))
 
     def transfer(self, target="Dave", activation="transfer"):
         entry = self.window.inventory.grant("soul")

@@ -30,7 +30,7 @@ from love_potion import LoveDose, LovePotionHistory
 from muffled import TONES, TONE_LABELS, muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
-from item_ui import InlineItemDraftPage, InventoryPage, GameComboBox
+from item_ui import InlineItemDraftPage, InventoryPage, GameComboBox, ITEM_SCROLLBAR_STYLE
 from item_catalogue_ui import ItemCataloguePanel
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea, QStyle, QStyleOptionButton
@@ -377,9 +377,11 @@ class GameWindow(QMainWindow):
         self.request_serial += 1
         self.retry_action = None
         self.required_reply_anchor = None
+        self.pending_direct_reply = None
         self.prepared_retry_snapshot = None
         self.cancel_dictation()
-        self.interject_input.clear()
+        self.interject_input.hide()
+        self.say_button.hide()
         self.retire_weapon_editors()
         self.pending_pen_note_text = None
         self.black_magic_controller = None
@@ -616,9 +618,9 @@ class GameWindow(QMainWindow):
             body_font=readable_body_font(), title_font=self.speaker_font,
         )
         self.layout.insertWidget(self.layout.indexOf(self.room_buttons_widget), self.draft_page, 1)
-        self.draft_page.setMaximumWidth(1280)
-        self.draft_page.setMaximumHeight(720)
-        self.layout.setAlignment(self.draft_page, Qt.AlignCenter)
+        self.draft_page.setMaximumWidth(1440)
+        self.draft_page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.layout.setAlignment(self.draft_page, Qt.AlignHCenter)
         self.draft_page.show()
         self.layout.activate()
         self.position_corner_controls()
@@ -788,6 +790,9 @@ class GameWindow(QMainWindow):
         self.request_serial += 1
         self.retry_action = None
         self.retry_button.hide()
+        soul_recipient = next((event.recipient_mind_id for event in events
+                               if event.event_type == "soul_exchange_requested"
+                               and event.event_id not in self.applied_item_events), None)
         death_applied = self.apply_item_events(events)
         self.trace_action("inventory_item_used", events=events)
         if death_applied:
@@ -803,6 +808,13 @@ class GameWindow(QMainWindow):
         if self.game_over:
             return True
         self.restore_conversation_decision()
+        if soul_recipient is not None:
+            self.overlay_host.close_page()
+            recipient = self.label_for_mind(soul_recipient)
+            if (self.characters.get(recipient, {}).get("alive", False)
+                    and not self.item_rules.is_muffled(self.body_id(recipient))):
+                self.run_single_response(recipient)
+            return True
         if any(event.event_type == "early_vote_requested" for event in events):
             self.overlay_host.close_page()
             self.call_vote()
@@ -1523,8 +1535,9 @@ class GameWindow(QMainWindow):
         self.speaker_font.setPixelSize(12)
         self.message_log = MessageLog(self.output_area, body_font=body_font,
                                       speaker_font=self.speaker_font, name_format=self.speaker_display_format)
+        self.message_log.set_reveal_enabled(True)
         self.message_log.hide()
-        self.conversation_stage = ConversationStage(self, name_font=self.speaker_font)
+        self.conversation_stage = ConversationStage(self, name_font=self.speaker_font, body_font=body_font)
         self.conversation_stage.speaker_chosen.connect(self.choose_speaker_recipient)
         self.conversation_stage.hide()
         self.overlay_host = OverlayHost(self, body_font=body_font, title_font=self.speaker_font,
@@ -1590,7 +1603,7 @@ class GameWindow(QMainWindow):
         start_buttons_font_size = max(int(50*(screen_width/2560)), 37)
 
         # Toggle button for game difficulty (Normal/Super Hard)
-        self.difficulty_button = QPushButton("Mode: Normal  >", self)
+        self.difficulty_button = QPushButton("Mode: Coward", self)
         self.difficulty_button.setAccessibleName("Change difficulty")
         self.difficulty_button.clicked.connect(self.toggle_mode)
 
@@ -1702,7 +1715,7 @@ class GameWindow(QMainWindow):
         self.interject_input = QLineEdit(self)
         self.interject_input.setFont(body_font)
         self.interject_input.setPlaceholderText("Type here...")
-        self.interject_input.setAlignment(Qt.AlignLeft)
+        self.interject_input.setAlignment(Qt.AlignCenter)
         self.interject_input.setMinimumHeight(48)
         self.interject_input.setStyleSheet(f"""
             QLineEdit {{
@@ -1711,18 +1724,22 @@ class GameWindow(QMainWindow):
                 padding: 5px;
                 text-align: center;
                 color: #DCDCDC;
-                border: none; border-bottom: 1px solid #555;
+                border: none;
             }}
         """)
         self.interject_input.hide()  # Hidden until needed
         self.interject_input.returnPressed.connect(self.send_interjection)
         self.interject_input.textEdited.connect(lambda _text: self.invalidate_prepared_turn("draft_edited"))
         self.say_button = QPushButton('Say')
-        self.say_button.setFixedWidth(112)
+        say_font = QFont(font_family)
+        say_font.setPixelSize(20)
+        self.say_button.setFont(say_font)
+        self.say_button.setMinimumWidth(self.say_button.fontMetrics().horizontalAdvance("Say") + 32)
+        self.say_button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.say_button.setStyleSheet(f"""
             QPushButton {{
-                font-size: {conversation_button_font_size}px;
-                border: 1px solid #777; background: transparent; padding: 10px;
+                font-family: "{font_family}"; font-size: 20px;
+                border: none; background: transparent; padding: 12px 16px;
             }}
             QPushButton:hover {{
                 color: #808080;
@@ -1792,7 +1809,10 @@ class GameWindow(QMainWindow):
         self.dictation_button.clicked.connect(self.toggle_dictation)
         self.dictation_cancel_button = QPushButton("Cancel")
         self.dictation_cancel_button.clicked.connect(self.cancel_dictation)
-        for button in (self.dictation_button, self.dictation_cancel_button):
+        cancel_policy = self.dictation_cancel_button.sizePolicy()
+        cancel_policy.setRetainSizeWhenHidden(True)
+        self.dictation_cancel_button.setSizePolicy(cancel_policy)
+        for button in (self.dictation_cancel_button, self.dictation_button):
             button.setFont(body_font)
             button.setStyleSheet(f'QPushButton {{ font-family: "{body_family}"; font-size: 18px; padding: 6px; }} QPushButton:disabled {{ color: #777; }}')
             dictation_layout.addWidget(button)
@@ -1813,6 +1833,7 @@ class GameWindow(QMainWindow):
         self.dictation_status = QLabel()
         self.dictation_status.setTextFormat(Qt.PlainText)
         self.dictation_status.setWordWrap(True)
+        self.dictation_status.setFixedHeight(48)
         self.dictation_status.setFont(body_font)
         self.dictation_status.setStyleSheet(f'font-family: "{body_family}"; font-size: 18px; color: #B8B8B8;')
         self.dictation_status.hide()
@@ -1821,7 +1842,10 @@ class GameWindow(QMainWindow):
             can_trigger=self.can_toggle_dictation, conflict_reason=self.dictation_binding_conflict)
         self.dictation_bindings.activation_failed.connect(self.show_dictation_binding_failure)
         self.dictation_binding_badge = BindingBadge(self.dictation_bindings, font=body_font)
-        dictation_layout.addWidget(self.dictation_binding_badge)
+        badge_policy = self.dictation_binding_badge.sizePolicy()
+        badge_policy.setRetainSizeWhenHidden(True)
+        self.dictation_binding_badge.setSizePolicy(badge_policy)
+        dictation_layout.insertWidget(1, self.dictation_binding_badge)
         self.update_dictation_controls()
         self.interject_input.installEventFilter(self)
 
@@ -1849,7 +1873,7 @@ class GameWindow(QMainWindow):
         self.start_layout = QVBoxLayout()
         self.start_layout.addStretch(5)
         self.start_layout.addWidget(self.title_label)  # Add the title at the top
-        self.start_layout.addSpacing(24)
+        self.start_layout.addStretch(1)
         self.start_layout.addLayout(self.player_name_layout)
         self.start_layout.addStretch(2)
         self.start_layout.addWidget(self.difficulty_button)
@@ -1913,18 +1937,16 @@ class GameWindow(QMainWindow):
         self.layout.addWidget(self.room_buttons_widget, 1)
         self.layout.addWidget(self.conversation_stage)
         self.layout.addWidget(self.message_log, 1)
-        self.conversation_stage.setMaximumWidth(1280)
         self.message_log.setMaximumWidth(1280)
-        self.layout.setAlignment(self.conversation_stage, Qt.AlignHCenter)
         self.layout.setAlignment(self.message_log, Qt.AlignHCenter)
         self.layout.addWidget(self.secondary_output_area)
         self.inventory_button = QPushButton("Inventory")
         self.inventory_button.setFont(self.speaker_font)
         self.inventory_button.setStyleSheet(
-            'QPushButton { font-size: 12px; color: #ddd; background: transparent; '
-            'border: 1px solid #555; padding: 12px 16px; } '
-            'QPushButton:enabled:hover, QPushButton:focus { color: white; border-color: #ddd; } '
-            'QPushButton:disabled { color: #666; border-color: #333; }')
+            f'QPushButton {{ font-family: "{font_family}"; font-size: 12px; color: #ddd; background: transparent; '
+            'border: none; padding: 12px 16px; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color: white; } '
+            'QPushButton:disabled { color: #666; }')
         self.inventory_button.clicked.connect(self.open_inventory)
         self.inventory_button.hide()
         self.progress_notice = QLabel()
@@ -2031,9 +2053,9 @@ class GameWindow(QMainWindow):
         self.game_menu_button.setFont(self.speaker_font)
         self.game_menu_button.setAccessibleName("Open game menu (Escape)")
         self.game_menu_button.setStyleSheet(
-            'QPushButton { font-size: 10px; color: #aaa; background: black; '
-            'border: 1px solid #444; padding: 10px; } '
-            'QPushButton:enabled:hover, QPushButton:focus { color: white; border-color: #ddd; }')
+            f'QPushButton {{ font-family: "{font_family}"; font-size: 12px; color: #aaa; background: black; '
+            'border: none; padding: 12px; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color: white; }')
         self.game_menu_button.clicked.connect(self.open_escape_menu)
         self.game_menu_button.hide()
 
@@ -2112,7 +2134,7 @@ class GameWindow(QMainWindow):
             f'font-family: "{self.pixel_font_family}"; font-size: {title_size}px; color: white; padding-bottom: 2px;')
         control_size = max(16, min(32, int(available_width * 0.026), int(self.height() * 0.045)))
         control_height = max(50, min(84, int(self.height() * 0.08)))
-        mode_color = "#d0c8bb" if self.show_room_allocations else "#c58e87"
+        mode_color = "#71ed8d" if self.show_room_allocations else "#ef7777"
         for button, color in ((self.difficulty_button, mode_color), (self.start_button, "white")):
             button.setFixedHeight(control_height)
             button.setStyleSheet(
@@ -2231,6 +2253,10 @@ class GameWindow(QMainWindow):
             return
         self.dictation_controls.setVisible(self.can_dictate() or self.dictation_recorder.is_recording)
         recording = self.dictation_recorder.is_recording
+        status_policy = self.dictation_status.sizePolicy()
+        status_policy.setRetainSizeWhenHidden(
+            self.can_dictate() or recording or self.dictation_context is not None)
+        self.dictation_status.setSizePolicy(status_policy)
         action = "Stop recording" if recording else "Record voice"
         icon = self.dictation_icons[recording]
         self.dictation_button.setIcon(icon)
@@ -2389,10 +2415,10 @@ class GameWindow(QMainWindow):
     def toggle_mode(self):
         # Toggle between Normal and Super Hard modes
         if self.show_room_allocations:
-            self.difficulty_button.setText("Mode: Super Hard  >")
+            self.difficulty_button.setText("Mode: Super Hard")
             self.show_room_allocations = False
         else:
-            self.difficulty_button.setText("Mode: Coward  >")
+            self.difficulty_button.setText("Mode: Coward")
             self.show_room_allocations = True
         self.resize_menu_content()
 
@@ -2466,19 +2492,14 @@ class GameWindow(QMainWindow):
             if w:
                 w.deleteLater()
 
-        available_width = max(240, self.centralWidget().width() - 60)
-        columns = max(1, min(4, available_width // 300))
-        card_w = min(320, (available_width - 16 * (columns - 1)) // columns)
-        card_h = 420
-        icon_sz = min(200, card_w - 32)
+        self.weapon_cards = []
+        icon_sz = 180
 
-        for i, wpn in enumerate(self.weapons):
-            row = i // columns
-            col = i % columns
+        for wpn in self.weapons:
             unlocked = wpn["id"] in available_content(self.profile, "weapon")
 
             card = QFrame(self.weapon_picker_widget)
-            card.setFixedSize(QSize(card_w, card_h))
+            card.setProperty("weapon_id", wpn["id"])
             card.setCursor(Qt.PointingHandCursor)
             card.setFocusPolicy(Qt.NoFocus)
             card.setObjectName("weaponCard")
@@ -2495,11 +2516,12 @@ class GameWindow(QMainWindow):
             """ if unlocked else ""))
 
             v = QVBoxLayout(card)
-            v.setContentsMargins(10, 10, 10, 10)
-            v.setSpacing(8)
+            v.setContentsMargins(16, 16, 16, 16)
+            v.setSpacing(12)
 
             # --- Image ---
             img = QLabel(card)
+            img.setObjectName(f"weaponIcon_{wpn['id']}")
             img.setAlignment(Qt.AlignCenter)
             img.setFocusPolicy(Qt.NoFocus)
             img.setStyleSheet("border: none; background: transparent;")  # no outline
@@ -2507,12 +2529,16 @@ class GameWindow(QMainWindow):
             if pix.isNull():
                 ph = QPixmap(icon_sz, icon_sz); ph.fill(Qt.transparent); pix = ph
             img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.FastTransformation))
+            card.weapon_pixmap = pix
             # Make child transparent to mouse so the FRAME gets hover/click even over the image
             img.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             v.addWidget(img, alignment=Qt.AlignHCenter)
 
             # --- Name ---
             name = QLabel(wpn["name"], card)
+            name.setObjectName(f"weaponName_{wpn['id']}")
+            name.setWordWrap(True)
+            name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             name.setAlignment(Qt.AlignHCenter)
             name.setFocusPolicy(Qt.NoFocus)
             name.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {'white' if unlocked else '#888'}; border: none; background: transparent;")
@@ -2524,6 +2550,7 @@ class GameWindow(QMainWindow):
             if not unlocked:
                 description += "\n\nLocked: " + UNLOCK_GOALS[wpn["id"]]
             desc = QLabel(description, card)
+            desc.setObjectName(f"weaponDescription_{wpn['id']}")
             desc.setWordWrap(True)
             desc.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
             desc.setFocusPolicy(Qt.NoFocus)
@@ -2540,9 +2567,41 @@ class GameWindow(QMainWindow):
                 card.setCursor(Qt.ArrowCursor)
             card.mousePressEvent = _click_handler
 
-            self.weapon_grid.addWidget(card, row, col)
+            self.weapon_cards.append(card)
 
         self.weapon_scroll.show()
+        self.weapon_scroll.setStyleSheet(ITEM_SCROLLBAR_STYLE)
+        self.resize_weapon_cards()
+
+    def resize_weapon_cards(self):
+        """Fit every wrapped field before assigning a common row height."""
+        cards = getattr(self, "weapon_cards", ())
+        if self.phase != "weapon_select" or not cards:
+            return
+        available_width = max(220, self.centralWidget().width() - 60)
+        columns = max(1, min(4, available_width // 300))
+        spacing = self.weapon_grid.spacing()
+        card_width = min(340, (available_width - spacing * (columns - 1)) // columns)
+        icon_size = min(180, card_width - 48)
+        heights = []
+        for card in cards:
+            card.ensurePolished()
+            icon = card.findChild(QLabel, f"weaponIcon_{card.property('weapon_id')}")
+            icon.setPixmap(card.weapon_pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.FastTransformation))
+            layout = card.layout()
+            margins = layout.contentsMargins()
+            text_width = card_width - margins.left() - margins.right() - 2
+            fields = [layout.itemAt(index).widget() for index in range(layout.count())]
+            height = sum(field.heightForWidth(text_width) if field.hasHeightForWidth()
+                         else field.sizeHint().height() for field in fields)
+            heights.append(height + margins.top() + margins.bottom()
+                           + layout.spacing() * (len(fields) - 1) + 4)
+        card_height = max(400, *heights)
+        while self.weapon_grid.count():
+            self.weapon_grid.takeAt(0)
+        for index, card in enumerate(cards):
+            card.setFixedSize(card_width, card_height)
+            self.weapon_grid.addWidget(card, index // columns, index % columns)
 
 
     def select_weapon_and_start(self, weapon):
@@ -2751,6 +2810,7 @@ class GameWindow(QMainWindow):
         super().resizeEvent(event)
         self.resize_menu_content()
         self.position_corner_controls()
+        self.resize_weapon_cards()
         self.position_weapon_panel()
 
     # Weapon-gating logic
@@ -3606,6 +3666,9 @@ class GameWindow(QMainWindow):
         self.update_recipient_controls()
 
     def update_recipient_controls(self, *_args):
+        if hasattr(self, "conversation_stage"):
+            name = self.display_actor(self.player_name) if self.player_reply_required() else None
+            self.conversation_stage.set_required_reply(name)
         if not hasattr(self, "recipient_controls"):
             return
         visible = (self.phase == "conversation" and not self.game_over
@@ -3889,8 +3952,8 @@ class GameWindow(QMainWindow):
                 and anchor[1] == self.body_id(self.player_name)):
             return True
         latest = self.public_dialogue[-1]
-        if (self.last_speech_origin is not None and self.last_speech_origin[0] is latest
-                and self.last_speech_origin[1] != "ordinary"):
+        # Known speech uses the reply obligation captured before any later body exchange.
+        if self.last_speech_origin is not None and self.last_speech_origin[0] is latest:
             return False
         return (latest.round_number == self.round_number and latest.addressee == self.player_name
                 and latest.speaker != self.player_name
@@ -3958,7 +4021,6 @@ class GameWindow(QMainWindow):
         self.retry_button.hide()
         self.retry_action = None
         self.secondary_output_area.clear()
-        self.interject_input.clear()
         self.interject_input.show()
         self.say_button.show()
         self.pass_button.setEnabled(False)
@@ -5197,10 +5259,11 @@ class GameWindow(QMainWindow):
         button.setFont(self.speaker_font)
         button.setCursor(Qt.PointingHandCursor)
         button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        color = {"pauseResume": "#8bc99b", "pauseRestart": "#d8ac72", "pauseExit": "#d78383"}.get(name, "#ddd")
         button.setStyleSheet(
-            'QPushButton { color: #ddd; background: transparent; border: none; border-bottom: 1px solid #242424; '
-            'padding: 12px 16px; min-height: 24px; font-size: 12px; text-align: left; } '
-            'QPushButton:enabled:hover, QPushButton:focus { color: white; background: #191919; } '
+            f'QPushButton {{ font-family: "{self.pixel_font_family}"; color: {color}; background: transparent; border: none; '
+            'padding: 14px 16px; min-height: 24px; font-size: 12px; text-align: left; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color: white; background: #151515; } '
             'QPushButton:pressed { color: #aaa; }')
         button.clicked.connect(callback)
         return button
@@ -5219,7 +5282,7 @@ class GameWindow(QMainWindow):
             ("Resume", "pauseResume", self.close_escape_menu),
             ("Controls", "pauseControls", self.show_voice_controls),
             ("Microphone", "pauseMicrophone", self.show_microphone_settings),
-            ("Restart", "pauseRestart", self._esc_restart_click),
+            ("Main menu", "pauseRestart", self._esc_restart_click),
         )
         for text, name, callback in actions:
             layout.addWidget(self.pause_menu_button(text, name, callback))

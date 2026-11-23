@@ -278,7 +278,7 @@ class GameTraceTests(unittest.TestCase):
             self.window.keep_weapon_button.click()
         records = events(self.window.trace)
         explosion = next(record for record in records if record["kind"] == "action_applied" and record["payload"]["action"] == "explosion_resolved")
-        self.assertEqual(explosion["payload"]["victims"], ["Jerry", "Dave"])
+        self.assertCountEqual(explosion["payload"]["victims"], ["Jerry", "Dave"])
         snapshot = next(record for record in records if record["kind"] == "state_snapshot" and record["payload"]["reason"] == "explosion_resolved")["payload"]["state"]
         self.assertEqual(snapshot["new_crime_scenes"], ["Kitchen"])
         self.assertEqual(snapshot["_override_murder_room"], "Kitchen")

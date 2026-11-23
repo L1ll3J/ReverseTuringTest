@@ -6,6 +6,8 @@ import sys
 import unittest
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+if sys.platform == "win32":
+    os.environ.setdefault("QT_QPA_FONTDIR", "C:/Windows/Fonts")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PyQt5.QtCore import QCoreApplication, QEvent, Qt
@@ -218,6 +220,57 @@ class MessageViewTests(unittest.TestCase):
         self.assertEqual(self.view.unread_count, 0)
         self.assertTrue(self.view.latest_button.isHidden())
         self.assertEqual(self.editor.verticalScrollBar().value(), self.editor.verticalScrollBar().maximum())
+
+    def test_live_reveal_keeps_canonical_text_complete_and_finishes_quickly(self):
+        self.view.set_reveal_enabled(True)
+        text = "A new account, with punctuation & <literal text>. " * 4
+        record = DisplayRecord("reveal", "speech", text, speaker="Dave")
+        started = QSignalSpy(self.view.reveal_started)
+        finished = QSignalSpy(self.view.reveal_finished)
+        self.view.append_record(record)
+        self.assertEqual(self.view.records, (record,))
+        self.assertEqual(self.editor.toPlainText(), "Dave\n" + text)
+        self.assertEqual(self.view.revealing_record_id, "reveal")
+        self.assertEqual(list(started), [["reveal"]])
+        self.assertTrue(self.editor.extraSelections())
+        initial = self.editor.viewport().grab().toImage()
+        QTest.qWait(800)
+        self.assertIsNone(self.view.revealing_record_id)
+        self.assertEqual(list(finished), [["reveal"]])
+        self.assertEqual(self.editor.extraSelections(), [])
+        self.assertNotEqual(initial, self.editor.viewport().grab().toImage())
+        self.assertEqual(self.view.unread_count, 0)
+
+    def test_reveal_uses_grapheme_boundaries_and_preserves_existing_selection_formats(self):
+        self.view.set_reveal_enabled(True)
+        self.view.append_record(DisplayRecord("unicode", "speech", "A\U0001f600e\u0301Z", speaker="Dave"))
+        positions = self.view._reveal_positions
+        self.assertEqual([b - a for a, b in zip(positions, positions[1:])], [1, 2, 2, 1])
+        cursor = self.editor.document().find("Dave")
+        self.editor.setTextCursor(cursor)
+        self.assertIsNone(self.view.revealing_record_id)
+        self.assertEqual(self.editor.textCursor().selectedText(), "Dave")
+        self.assertEqual(self.editor.toPlainText(), "Dave\nA\U0001f600e\u0301Z")
+
+    def test_append_clear_snapshot_and_scrolled_reading_cancel_or_skip_reveal(self):
+        self.view.set_reveal_enabled(True)
+        self.view.append_record(DisplayRecord("first", "speech", "First spoken line.", speaker="Dave"))
+        self.view.append_record(DisplayRecord("next", "speech", "Next spoken line.", speaker="Hank"))
+        self.assertEqual(self.view.revealing_record_id, "next")
+        self.assertIn("First spoken line.", self.editor.toPlainText())
+        self.view.clear()
+        self.assertIsNone(self.view.revealing_record_id)
+        QTest.qWait(40)
+        self.assertEqual(self.editor.toPlainText(), "")
+        self.fill()
+        self.editor.verticalScrollBar().setValue(0)
+        self.view.append_record(DisplayRecord("below", "speech", "New speech below.", speaker="Dave"))
+        self.assertIsNone(self.view.revealing_record_id)
+        self.assertEqual(self.editor.verticalScrollBar().value(), 0)
+        self.assertEqual(self.view.unread_count, 1)
+        self.view.set_records([DisplayRecord("snapshot", "speech", "Full transcript.", speaker="Dave")])
+        self.assertIsNone(self.view.revealing_record_id)
+        self.assertEqual(self.editor.toPlainText(), "Dave\nFull transcript.")
 
 
 if __name__ == "__main__":

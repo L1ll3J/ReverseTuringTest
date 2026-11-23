@@ -4,7 +4,7 @@ from PyQt5.QtCore import QRect, QSize, Qt
 from PyQt5.QtGui import QFont, QFontMetrics, QImage, QPainter, QPixmap
 from PyQt5.QtWidgets import QFrame, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
-from item_ui import InventoryPage, ItemCardButton, RARITY_COLORS, ResponsiveItemGrid, item_sprite
+from item_ui import InventoryPage, ItemCardButton, ITEM_SCROLLBAR_STYLE, RARITY_COLORS, ResponsiveItemGrid, item_sprite
 from progression import ProfileError
 
 
@@ -70,6 +70,7 @@ class ItemCataloguePanel(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet(ITEM_SCROLLBAR_STYLE)
         layout.addWidget(self.scroll, 1)
         content = QWidget()
         content.setObjectName("itemCatalogueContents")
