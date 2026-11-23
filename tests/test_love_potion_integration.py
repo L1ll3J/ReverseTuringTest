@@ -9,6 +9,7 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+from time import monotonic
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +19,7 @@ if sys.platform == "win32":
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PyQt5.QtCore import QCoreApplication, QEvent
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
 import main as game
@@ -92,6 +94,109 @@ class LovePotionIntegrationTests(unittest.TestCase):
     def apply(self, name="Dave"):
         entry = self.window.inventory.grant("love_potion")
         self.assertTrue(self.window.use_inventory_item(entry.instance_id, self.window.body_id(name)))
+
+    def use_card(self, item_id, target=None, *, message=None):
+        entry = self.window.inventory.grant(item_id)
+        self.window.open_inventory()
+        page = self.window.inventory_page
+        self.assertTrue(page.use_buttons[entry.instance_id].isEnabled())
+        if target is not None:
+            box = page.target_boxes[entry.instance_id]
+            index = box.findData(self.window.body_id(target))
+            self.assertGreaterEqual(index, 0)
+            box.setCurrentIndex(index)
+        if message is not None:
+            page.message_boxes[entry.instance_id].setPlainText(message)
+        page.use_buttons[entry.instance_id].click()
+        self.assertNotIn(entry, self.window.inventory.entries)
+        return entry
+
+    def test_love_inventory_and_forged_voice_preserve_required_reply_and_direct_cap(self):
+        self.window.append_speech("Dave", "An account.", direct_reply=True)
+        self.window.append_speech("Dave", "Another account.", direct_reply=True)
+        self.window.append_speech("Detective", "Alex, where were you?", "Alex")
+        revision = self.window.conversation_revision
+        self.use_card("love_potion", "Dave")
+        self.assertGreater(self.window.conversation_revision, revision)
+        self.assertIn("love_potion", self.window.used_item_types)
+        self.use_card("throw_voice", "Hank", message="Dave, I was alone.")
+        self.assertEqual(self.window.build_character_context("Dave").current_feelings[0].kind,
+                         FeelingKind.INFATUATION)
+        self.assertEqual(self.window.direct_replies.count_for(self.window.body_id("Dave")), 2)
+        self.assertEqual(self.window.public_dialogue[-1].speaker, "Hank")
+        self.assertIsNone(self.window.public_dialogue[-1].addressee)
+        self.assertTrue(self.window.player_reply_required())
+        self.assertFalse(self.window.pass_button.isEnabled())
+        self.assertFalse(self.window.can_call_vote())
+        self.window.append_speech("Alex", "Here is my account.")
+        self.assertFalse(self.window.player_reply_required())
+
+    def test_muffled_direct_reply_retains_active_love_context_and_enforced_sound(self):
+        self.use_card("love_potion", "Dave")
+        self.use_card("muffle", "Dave")
+        self.window.overlay_host.close_page()
+        self.window.append_speech("Alex", "Dave, what do you think?", "Dave")
+        with patch.object(self.window.ai_runtime, "muffled_tone", return_value=-2) as tone:
+            self.window.run_single_response("Dave", direct_reply=True)
+            deadline = monotonic() + 3
+            while self.window.active_workers and monotonic() < deadline:
+                QTest.qWait(5)
+            self.assertFalse(self.window.active_workers)
+            tone.assert_called_once()
+            context = tone.call_args.args[0]
+            self.assertEqual(context.current_feelings[0].kind, FeelingKind.INFATUATION)
+        self.assertEqual(self.window.public_dialogue[-1].text, game.muffled_sound("Dave", -2))
+        self.assertIsNone(self.window.public_dialogue[-1].addressee)
+        self.assertEqual(self.window.direct_replies.count_for(self.window.body_id("Dave")), 1)
+
+    def test_listening_glass_excludes_archived_love_from_authoritative_night_evidence(self):
+        self.use_card("love_potion", "Dave")
+        self.window.overlay_host.close_page()
+        self.window.run_action_phase()
+        self.window.finish_night()
+        view = next(view for view in self.window.night_memory_views
+                    if view.body_id == self.window.body_id("Dave"))
+        self.assertTrue(view.experiences)
+        self.assertTrue(all(record.round_number == 2 for record in view.experiences))
+        self.assertFalse(any(record.text == PAST_INFATUATION.format(giver="Alex")
+                             for record in view.experiences))
+        self.assertIn(PAST_INFATUATION.format(giver="Alex"),
+                      [record.text for record in self.window.build_character_context("Dave").experiences])
+        before = tuple(self.window.public_events)
+        self.use_card("listening_glass", "Dave")
+        self.assertEqual(tuple(self.window.public_events), before)
+        feedback = self.window.inventory_page.feedback_label.text()
+        self.assertIn(view.experiences[-1].text, feedback)
+        self.assertNotIn(PAST_INFATUATION.format(giver="Alex"), feedback)
+
+    def test_watch_bonus_finishes_before_love_hangover_begins(self):
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.use_card("love_potion", "Jerry")
+        self.use_card("watch_this_drive", "Dave")
+        self.window.overlay_host.close_page()
+        self.window.run_action_phase()
+        self.window.item_drafts = None
+        self.window.room_assignments = {
+            "Attic": ["Dave", "Jerry"], "Kitchen": ["Hank", "Owen"],
+            "Library": ["Debra"], "Basement": [], "Cellar": [],
+        }
+        self.window.choose_room("Attic")
+        self.window.kill_victim("Dave")
+        self.assertTrue(self.window.bonus_action_pending)
+        self.assertEqual(self.window.phase, "action")
+        before_morning = self.window.build_character_context("Jerry")
+        self.assertEqual(before_morning.current_feelings, ())
+        self.assertEqual([record.text for record in before_morning.experiences],
+                         [PAST_INFATUATION.format(giver="Alex")])
+        self.assertFalse(self.window._night_memories_written)
+        self.window.choose_room("Kitchen")
+        self.window.kill_victim("Hank")
+        self.assertEqual(self.window.phase, "conversation")
+        self.assertFalse(self.window.bonus_action_pending)
+        self.assertTrue(self.window._night_memories_written)
+        after_morning = self.window.build_character_context("Jerry")
+        self.assertEqual(after_morning.current_feelings[0].kind, FeelingKind.BITTERNESS)
+        self.assertEqual(len(self.window.characters["Jerry"]["love_history"].experiences.stages), 2)
 
     def test_use_changes_snapshot_without_altering_testimony_or_public_knowledge(self):
         self.window.remember("Dave", "experience", "You witnessed Alex kill Jerry.")
