@@ -60,7 +60,7 @@ class ItemIntegrationTests(unittest.TestCase):
         if sys.platform == "win32" and cls.app.platformName() == "offscreen":
             QFont.insertSubstitution("Helvetica", "Segoe UI")
 
-    def setUp(self):
+    def setUp(self, *, keep_weapons=True):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.stack = contextlib.ExitStack()
@@ -81,8 +81,9 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.start_game()
         self.window.rooms_visited = []
         self.stack.enter_context(patch.object(self.window, "run_conversation_loop"))
-        self.stack.enter_context(patch.object(self.window, "finish_night", side_effect=
-            keep_completed_night_weapon(self.window, self.window.finish_night)))
+        if keep_weapons:
+            self.stack.enter_context(patch.object(self.window, "finish_night", side_effect=
+                keep_completed_night_weapon(self.window, self.window.finish_night)))
         self.planned_rooms = {
             "Attic": ["Dave", "Jerry"], "Kitchen": ["Hank", "Owen"],
             "Library": ["Debra"], "Basement": [], "Cellar": [],

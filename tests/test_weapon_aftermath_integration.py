@@ -9,9 +9,11 @@ from weapon_aftermath import OBJECT_DESCRIPTIONS, OBJECT_NAMES, PUBLIC_FINDING, 
 
 class WeaponAftermathIntegrationTests(unittest.TestCase):
     setUpClass = fixtures.ItemIntegrationTests.__dict__["setUpClass"]
-    setUp = fixtures.ItemIntegrationTests.setUp
     tearDown = fixtures.ItemIntegrationTests.tearDown
     weapon = fixtures.ItemIntegrationTests.weapon
+
+    def setUp(self):
+        fixtures.ItemIntegrationTests.setUp(self, keep_weapons=False)
 
     def settled_action(self, weapon="knife"):
         w = self.window

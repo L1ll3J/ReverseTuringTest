@@ -55,6 +55,7 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.window.characters = {name: {"alive": True, "profile": [], "experiences": [], "dispositions": []}
                                   for name in ("Dave", "Hank", "Jerry")}
         self.window.round_number = 1
+        self.window.rooms_visited = []
         self.window.phase = "conversation"
         self.window.menu_widget.hide()
         self.window.message_log.show()
