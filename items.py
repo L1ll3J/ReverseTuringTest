@@ -51,6 +51,11 @@ ITEM_CATALOGUE = MappingProxyType({
         "dark_whisper", "Dark Whisper", "Send one apparent message from a dead character's voice.",
         "dead_body", True, requires_message=True,
     ),
+    "love_potion": ItemDefinition(
+        "love_potion", "Love Potion",
+        "Make a living suspect adore you for this discussion. Their devotion becomes bitterness next discussion.",
+        "living_npc", True,
+    ),
     "forged_note": ItemDefinition(
         "forged_note", "Forged Note", "Prepare a signed note for the body of your next victim.",
         "self", True, requires_message=True,

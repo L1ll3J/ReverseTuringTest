@@ -10,6 +10,7 @@ from time import monotonic_ns
 from uuid import uuid4
 from typing import Annotated, Literal, Mapping
 from xml.etree import ElementTree
+from xml.sax.saxutils import escape
 import wave
 
 from openai import (
@@ -29,6 +30,7 @@ from muffled import TONES, TONE_LABELS, response_bank
 
 from ai_context import (
     CharacterContext,
+    FeelingKind,
     DialogueLine,
     MemoryRecord,
     PublicState,
@@ -142,7 +144,7 @@ class AIRuntime:
         )
         result = self._request(
             self.config.speech_model,
-            self._character_instructions("speech"),
+            self._character_instructions("speech", context),
             render_character_context(context),
             output_schema,
             trace_scope=trace_scope, task="speech", actor=context.character,
@@ -158,7 +160,7 @@ class AIRuntime:
         for tone, label, sound in zip(TONES, TONE_LABELS, response_bank(style)):
             ElementTree.SubElement(bank, "response", {"tone": str(tone), "feeling": label}).text = sound
         result = self._request(
-            self.config.speech_model, self._character_instructions("muffled"),
+            self.config.speech_model, self._character_instructions("muffled", context),
             ElementTree.tostring(root, encoding="unicode"), output_schema,
             trace_scope=trace_scope, task="muffled_tone", actor=context.character,
         )
@@ -169,7 +171,7 @@ class AIRuntime:
         output_schema = _schema("CharacterVote", target=(_literal((*eligible, "NONE")), ...))
         result = self._request(
             self.config.vote_model,
-            self._character_instructions("vote"),
+            self._character_instructions("vote", context),
             render_character_context(context),
             output_schema,
             trace_scope=trace_scope, task="vote", actor=context.character,
@@ -213,10 +215,16 @@ class AIRuntime:
         except (OSError, UnicodeError, ElementTree.ParseError):
             raise AIRequestError("Required game instructions are missing or unreadable. Please check the installation.") from None
 
-    def _character_instructions(self, task):
+    def _character_instructions(self, task, context):
         shared = self._load_prompt("System Prompt.txt")
         specific = self._load_prompt(f"prompts/{task}.xml")
-        return f"<instructions>\n{shared}\n{specific}\n</instructions>"
+        templates = {
+            FeelingKind.INFATUATION: "prompts/current_infatuation.xml",
+            FeelingKind.BITTERNESS: "prompts/current_bitterness.xml",
+        }
+        feelings = "".join("\n" + self._load_prompt(templates[feeling.kind]).format(giver=escape(feeling.giver))
+                           for feeling in context.current_feelings)
+        return f"<instructions>\n{shared}\n{specific}{feelings}\n</instructions>"
 
     def _get_client(self):
         if self._client is None:

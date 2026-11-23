@@ -327,7 +327,7 @@ class ItemIntegrationTests(unittest.TestCase):
 
     def test_room_acceptance_retires_editor_when_room_has_no_new_reward(self):
         self.night("knife")
-        previous = self.window.item_drafts.enter_room("Basement")
+        previous = self.window.item_drafts.enter_room("Basement", self.window.inventory.snapshot())
         self.window.item_drafts.skip(previous.offer_id)
         self.window.open_knife_dialog()
         editor = self.window._weapon_windows["knife"]
@@ -542,8 +542,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.offer_room_item("Basement", continuation)
         offer = self.window.item_drafts.pending_offer
         self.assertEqual(offer.options, ("spare_paper",))
-        buttons = [button for button in self.window.draft_dialog.findChildren(QPushButton)
-                   if button.text() == "Reroll"]
+        buttons = list(self.window.draft_page.reroll_buttons.values())
         self.assertTrue(buttons)
         self.assertTrue(all(not button.isEnabled() for button in buttons))
         self.window.choose_item_offer(offer.offer_id, 0)
@@ -553,7 +552,7 @@ class ItemIntegrationTests(unittest.TestCase):
         exhausted.assert_called_once_with()
         self.assertIsNone(self.window.pending_room_action)
         self.assertIsNone(self.window.item_drafts.pending_offer)
-        self.assertIsNone(self.window.draft_dialog)
+        self.assertIsNone(self.window.draft_page)
 
     def test_inventory_preserves_composing_draft_when_used(self):
         self.night()

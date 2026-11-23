@@ -17,6 +17,7 @@ from overlay_host import OverlayHost
 from npc_items import NPCItemState
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, ItemUseContext, PlayerItemRules, ItemRuleError
+from love_potion import LoveDose, LovePotionHistory
 from muffled import muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
@@ -184,6 +185,7 @@ class GameWindow(QMainWindow):
         self.progress_sequence = 0
         self.pending_progress = []
         self.items_used = 0
+        self.applied_item_event_ids = set()
         self.run_player_kills = 0
         self.innocents_executed = 0
         self.witness_body_ids = set()
@@ -515,6 +517,8 @@ class GameWindow(QMainWindow):
 
     def apply_item_events(self, events):
         for event in events:
+            if event.event_id in self.applied_item_event_ids:
+                continue
             self.trace.record("item_effect", {"event": event})
             recipient = self.label_for_body(event.target_body_id)
             if event.public_text:
@@ -524,6 +528,13 @@ class GameWindow(QMainWindow):
                     self.remember(recipient, "experience", event.private_text)
                 if event.disposition_text:
                     self.remember(recipient, "disposition", event.disposition_text)
+            if event.event_type == "love_potion_applied" and recipient in self.characters:
+                data = self.characters[recipient]
+                history = data.get("love_history", LovePotionHistory())
+                updated = history.apply(LoveDose(event.event_id, event.day, event.subject_body_id, event.giver_label))
+                if updated is not history:
+                    data["love_history"] = updated
+                    self.invalidate_prepared_turn("current_feelings_changed", changed=True)
             if event.event_type == "banana_given":
                 self.queue_progress("banana_given")
             elif event.event_type == "item_used":
@@ -531,6 +542,7 @@ class GameWindow(QMainWindow):
                 item_name = ITEM_CATALOGUE[event.item_id].name
                 target = f" on {recipient}" if recipient is not None and recipient != self.player_name else ""
                 self.record_history(f"You used {item_name}{target}.")
+            self.applied_item_event_ids.add(event.event_id)
 
     def resolve_death(self, label, attempt_id):
         target = next(body for body in self.body_states() if body.label == label)
@@ -720,9 +732,24 @@ class GameWindow(QMainWindow):
 
     def build_character_context(self, character):
         data = self.characters[character]
+        private = data.get("love_history", LovePotionHistory()).experiences.project()
         return CharacterContext(character, tuple(data["profile"]), self.public_state(),
-                                tuple(data["experiences"]), tuple(data["dispositions"]),
-                                tuple(self.public_events), tuple(self.public_dialogue))
+                                (*data["experiences"], *private.experiences), tuple(data["dispositions"]),
+                                tuple(self.public_events), tuple(self.public_dialogue), private.current_feelings)
+
+    def advance_love_histories(self, *, discussion):
+        changed = False
+        for data in self.characters.values():
+            history = data.get("love_history")
+            if history is None:
+                continue
+            updated = (history.begin_discussion(self.round_number, alive=data["alive"]) if discussion
+                       else history.begin_night(self.round_number))
+            if updated is not history:
+                data["love_history"] = updated
+                changed = True
+        if changed:
+            self.invalidate_prepared_turn("private_experiences_changed", changed=True)
 
     def append_speech(self, speaker, speech, addressee=None, *, origin="ordinary", direct_reply=False):
         if self.phase == "conversation":
@@ -2181,6 +2208,7 @@ class GameWindow(QMainWindow):
         self.play_sound_effect("sounds/start_button.mp3")
         self.message_log.clear()
         self.round_number += 1
+        self.advance_love_histories(discussion=False)
         self.night_attacks = []
         self._night_memories_written = False
         self.apply_item_events(self.item_rules.begin_night(self.round_number, self.body_states()))
@@ -3388,6 +3416,7 @@ class GameWindow(QMainWindow):
                 self.message_log.append_record(record)
         if self.check_victory():
             return
+        self.advance_love_histories(discussion=True)
         self.append_output_text(f"Conversation Phase {self.round_number} begins!\n")
         self.current_conversation = []
         self.most_recent_messageS = []

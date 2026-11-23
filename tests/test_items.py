@@ -9,7 +9,7 @@ from items import DraftState, Inventory, InventoryError, InventorySnapshot, elig
 
 class InventoryTests(unittest.TestCase):
     def test_default_pool_cannot_be_disabled_and_unlocks_require_permission(self):
-        defaults = ("banana", "muffle", "spare_paper", "throw_voice", "dark_whisper", "forged_note",
+        defaults = ("banana", "muffle", "spare_paper", "throw_voice", "dark_whisper", "love_potion", "forged_note",
                     "divine_revelation", "mail_in_ballot", "watch_this_drive", "lucky_match", "deep_pockets",
                     "pocket_gavel", "listening_glass", "stay_of_execution")
         with_guardian = (*defaults[:3], "guardian_angel", *defaults[3:])
