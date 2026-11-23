@@ -26,7 +26,7 @@ import main as game
 from content import CONTENT_CATALOGUE
 from dev_trace import TraceRun
 from game_rules import MUFFLED_SPEECH, MUFFLE_EXPIRED, BANANA_DISPOSITION
-from items import DraftState
+from items import DraftState, eligible_item_pool
 from progression import ProfileError, ProfileStore, ProgressEvent
 
 
@@ -74,6 +74,8 @@ class ItemIntegrationTests(unittest.TestCase):
     def night(self, weapon_id="bare", assignments=None):
         self.window.select_weapon_and_start(self.weapon())
         self.window.selected_weapon = self.weapon(weapon_id)
+        # Keep effect-specific room offers deterministic; production pool is checked separately.
+        self.window.item_drafts = DraftState(self.window.player_owner_id, ("banana", "muffle", "spare_paper"))
         self.window.room_assignments = assignments or {
             "Attic": ["Dave", "Jerry"], "Kitchen": ["Hank", "Owen"],
             "Library": ["Debra"], "Basement": [], "Cellar": [],
@@ -161,7 +163,7 @@ class ItemIntegrationTests(unittest.TestCase):
 
     def test_production_catalogue_uses_approved_unlocks_and_bare_is_initial_weapon(self):
         self.assertEqual(self.window.profile_store.available_weapons(), ("bare",))
-        self.assertEqual(self.window.profile_store.item_pool(), ("banana", "muffle", "spare_paper"))
+        self.assertEqual(self.window.profile_store.item_pool(), eligible_item_pool())
         goals = {content.content_id: content.unlock_rule for content in CONTENT_CATALOGUE}
         self.assertEqual(goals["knife"], game.CONTENT_CATALOGUE[1].unlock_rule)
         self.window.select_weapon_and_start(self.weapon("knife"))
@@ -213,7 +215,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.window.item_drafts.pending_offer)
         self.assertIsNone(self.window.draft_page)
         self.assertEqual(self.window.rooms_visited, ["Basement"])
-        self.assertIsNone(self.window.item_drafts.enter_room("Basement"))
+        self.assertIsNone(self.window.item_drafts.enter_room("Basement", self.window.inventory.snapshot()))
         self.assertFalse(self.window.inventory.entries)
         self.assertFalse(self.window.room_buttons_widget.isHidden())
         self.assertFalse(self.window.weapon_action_panel.isHidden())
@@ -532,6 +534,27 @@ class ItemIntegrationTests(unittest.TestCase):
                 del self.app._main_window
             self.app.setQuitOnLastWindowClosed(previous_quit)
 
+    def test_real_room_offer_excludes_owned_types_and_exhaustion_continues_action(self):
+        self.night()
+        self.window.inventory.grant("banana")
+        self.window.inventory.grant("muffle")
+        continuation = Mock()
+        self.window.offer_room_item("Basement", continuation)
+        offer = self.window.item_drafts.pending_offer
+        self.assertEqual(offer.options, ("spare_paper",))
+        buttons = [button for button in self.window.draft_dialog.findChildren(QPushButton)
+                   if button.text() == "Reroll"]
+        self.assertTrue(buttons)
+        self.assertTrue(all(not button.isEnabled() for button in buttons))
+        self.window.choose_item_offer(offer.offer_id, 0)
+        continuation.assert_called_once_with()
+        exhausted = Mock()
+        self.window.offer_room_item("Cellar", exhausted)
+        exhausted.assert_called_once_with()
+        self.assertIsNone(self.window.pending_room_action)
+        self.assertIsNone(self.window.item_drafts.pending_offer)
+        self.assertIsNone(self.window.draft_dialog)
+
     def test_inventory_preserves_composing_draft_when_used(self):
         self.night()
         self.window.choose_room("Library")
@@ -775,7 +798,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.run_action_phase()
         self.assertIn(entry, self.window.inventory.entries)
         self.assertEqual(self.window.round_number, 2)
-        self.assertIsNone(self.window.item_drafts.enter_room("Library"))
+        self.assertIsNone(self.window.item_drafts.enter_room("Library", self.window.inventory.snapshot()))
 
     def test_dead_witness_does_not_unlock_stopwatch(self):
         self.night()

@@ -356,7 +356,7 @@ class GameWindow(QMainWindow):
         # Only an explicit item choice or Leave resumes the accepted room action.
         if self.phase != "action" or self.game_over or self.pending_room_action is not None:
             return
-        offer = self.item_drafts.enter_room(room) if self.item_drafts else None
+        offer = self.item_drafts.enter_room(room, self.inventory.snapshot()) if self.item_drafts else None
         self.retire_weapon_editors()
         if offer is None:
             continuation()
@@ -375,7 +375,7 @@ class GameWindow(QMainWindow):
             offer, ITEM_CATALOGUE, self.choose_item_offer,
             self.reroll_item_offer, self.skip_item_offer,
             reroll_count=self.item_drafts.rerolls_remaining,
-            can_reroll=bool(set(self.item_drafts.eligible_item_ids) - set(offer.options)),
+            can_reroll=bool(self.item_drafts.reroll_alternatives(offer.offer_id, self.inventory.snapshot())),
             body_font=readable_body_font(), title_font=self.speaker_font,
         )
         self.layout.insertWidget(self.layout.indexOf(self.room_buttons_widget), self.draft_page, 1)
@@ -433,7 +433,7 @@ class GameWindow(QMainWindow):
         if not self.item_offer_is_current(offer_id):
             return
         try:
-            offer = self.item_drafts.reroll(offer_id, slot)
+            offer = self.item_drafts.reroll(offer_id, slot, self.inventory.snapshot())
         except InventoryError:
             return
         self.trace_action("item_offer_rerolled", offer=offer, slot=slot)

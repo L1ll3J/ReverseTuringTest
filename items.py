@@ -125,6 +125,23 @@ class InventoryEntry:
     item_id: str
 
 
+@dataclass(frozen=True)
+class InventorySnapshot:
+    """Immutable current holdings supplied explicitly to room-offer operations."""
+
+    owner_id: str
+    item_ids: frozenset[str]
+
+    def __post_init__(self):
+        if not isinstance(self.owner_id, str) or not self.owner_id.strip():
+            raise InventoryError("An inventory snapshot requires an owner")
+        if not isinstance(self.item_ids, (tuple, list, set, frozenset)):
+            raise InventoryError("Inventory item types must be a collection")
+        if any(not isinstance(item_id, str) or item_id not in ITEM_CATALOGUE for item_id in self.item_ids):
+            raise InventoryError("Inventory snapshots require known item types")
+        object.__setattr__(self, "item_ids", frozenset(self.item_ids))
+
+
 class Inventory:
     def __init__(self, owner_id: str):
         if not owner_id:
@@ -141,6 +158,9 @@ class Inventory:
     @property
     def entries(self) -> tuple[InventoryEntry, ...]:
         return tuple(self._entries.values())
+
+    def snapshot(self) -> InventorySnapshot:
+        return InventorySnapshot(self.owner_id, frozenset(entry.item_id for entry in self.entries))
 
     def grant(self, item_id: str) -> InventoryEntry:
         if item_id not in ITEM_CATALOGUE:
@@ -220,19 +240,37 @@ class DraftState:
             raise InventoryError("The item pool has no second distinct choice")
         self._extra_pick_armed = True
 
-    def enter_room(self, room_id: str) -> DraftOffer | None:
+    def _owned_types(self, inventory: InventorySnapshot) -> frozenset[str]:
+        if not isinstance(inventory, InventorySnapshot):
+            raise InventoryError("A current inventory snapshot is required")
+        if inventory.owner_id != self.owner_id:
+            raise InventoryError("This item offer belongs to another player")
+        return inventory.item_ids
+
+    def enter_room(self, room_id: str, inventory: InventorySnapshot) -> DraftOffer | None:
+        owned = self._owned_types(inventory)
         if not room_id:
             raise InventoryError("A room identifier is required")
         if self._pending_offer is not None:
             if self._pending_offer.room_id == room_id:
+                offer = self._pending_offer
+                options = tuple(item_id for item_id in offer.options if item_id not in owned)
+                if options != offer.options:
+                    self._pending_offer = (
+                        DraftOffer(uuid4().hex, room_id, options, min(offer.picks_remaining, len(options)),
+                                   offer.picked_item_ids) if options else None
+                    )
                 return self._pending_offer
             raise InventoryError("Choose or skip the current item offer first")
         if room_id in self._seen_rooms:
             return None
-        options = tuple(self._rng.sample(self.eligible_item_ids, min(3, len(self.eligible_item_ids))))
+        eligible = tuple(item_id for item_id in self.eligible_item_ids if item_id not in owned)
+        self._seen_rooms.add(room_id)
+        if not eligible:
+            return None
+        options = tuple(self._rng.sample(eligible, min(3, len(eligible))))
         picks = min(2 if self._extra_pick_armed else 1, len(options))
         offer = DraftOffer(uuid4().hex, room_id, options, picks)
-        self._seen_rooms.add(room_id)
         self._pending_offer = offer
         self._extra_pick_armed = False
         return offer
@@ -248,19 +286,26 @@ class DraftState:
         if type(slot_index) is not int or not 0 <= slot_index < len(offer.options):
             raise InventoryError("Choose a valid item slot")
 
-    def reroll(self, offer_id: str, slot_index: int) -> DraftOffer:
+    def reroll_alternatives(self, offer_id: str, inventory: InventorySnapshot) -> tuple[str, ...]:
+        offer = self._require_offer(offer_id)
+        owned = self._owned_types(inventory)
+        return tuple(item_id for item_id in self.eligible_item_ids
+                     if item_id not in offer.options and item_id not in offer.picked_item_ids
+                     and item_id not in owned)
+
+    def reroll(self, offer_id: str, slot_index: int, inventory: InventorySnapshot) -> DraftOffer:
         offer = self._require_offer(offer_id)
         self._require_slot(offer, slot_index)
+        alternatives = self.reroll_alternatives(offer_id, inventory)
         if not self._rerolls_remaining:
             raise InventoryError("The run's reroll has already been used")
-        alternatives = tuple(item_id for item_id in self.eligible_item_ids
-                             if item_id not in offer.options and item_id not in offer.picked_item_ids)
         if not alternatives:
             raise InventoryError("No alternative items are available for this offer")
         options = list(offer.options)
         options[slot_index] = self._rng.choice(alternatives)
-        updated = DraftOffer(uuid4().hex, offer.room_id, tuple(options),
-                             offer.picks_remaining, offer.picked_item_ids)
+        options = tuple(item_id for item_id in options if item_id not in inventory.item_ids)
+        updated = DraftOffer(uuid4().hex, offer.room_id, options,
+                             min(offer.picks_remaining, len(options)), offer.picked_item_ids)
         self._pending_offer = updated
         self._rerolls_remaining -= 1
         return updated
@@ -270,8 +315,11 @@ class DraftState:
         self._require_slot(offer, slot_index)
         if inventory.owner_id != self.owner_id:
             raise InventoryError("This item offer belongs to another player")
+        if offer.options[slot_index] in inventory.snapshot().item_ids:
+            raise InventoryError("This item type is already in your inventory")
         entry = inventory.grant(offer.options[slot_index])
-        remaining = tuple(item_id for index, item_id in enumerate(offer.options) if index != slot_index)
+        owned = inventory.snapshot().item_ids
+        remaining = tuple(item_id for item_id in offer.options if item_id not in owned)
         self._pending_offer = (
             DraftOffer(uuid4().hex, offer.room_id, remaining, offer.picks_remaining - 1,
                        (*offer.picked_item_ids, entry.item_id))
