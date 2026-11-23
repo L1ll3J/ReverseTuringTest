@@ -141,6 +141,7 @@ class GameWindow(QMainWindow):
         self.old_crime_scenes = []
         self.room_assignments = {}
         self.night_arrivals = None
+        self._night_known_alive_bodies = None
         self._arrival_entry_events = set()
         self._arrival_memory_receipts = set()
         self._disclosed_item_deaths = set()
@@ -909,6 +910,7 @@ class GameWindow(QMainWindow):
             if disclose:
                 self.record_history(f"{decision.cause.value}: {label} died.", display=True)
                 self._disclosed_item_deaths.add(decision.attempt_id)
+                self.observe_night_death(decision.target_body_id)
             if decision.target_body_id != self.body_id(self.player_name):
                 self.queue_progress("player_kill")
         self.apply_item_events(resolution.events)
@@ -2801,6 +2803,8 @@ class GameWindow(QMainWindow):
         self.night_memory_views = ()
         self.bonus_action_pending = False
         self.bonus_action_id = None
+        self._night_known_alive_bodies = tuple(
+            body.body_id for body in self.body_states() if body.is_npc and body.alive)
         self.apply_item_events(self.item_rules.begin_night(self.round_number, self.body_states()))
         if self.resolve_action_curses():
             return
@@ -2905,7 +2909,7 @@ class GameWindow(QMainWindow):
             self.apply_arrival(event, observed=True, outside=True)
         self.update_arrival_controls()
 
-    def remember_arrival(self, event_id, body_id, text, *, source, speaker_body_id=None):
+    def remember_arrival(self, event_id, body_id, text, *, source, speaker_body_id=None, observed_dead_body_id=None):
         """Persist one private perception to the mind present when it occurred."""
         self.ensure_identity_state()
         mind_id = self.identity_state.mind_for_body(body_id)
@@ -2915,6 +2919,8 @@ class GameWindow(QMainWindow):
         self._arrival_memory_receipts.add(receipt)
         if mind_id == self.player_owner_id:
             self.record_history(text, display=True)
+            if observed_dead_body_id is not None:
+                self.observe_night_death(observed_dead_body_id)
         else:
             self.mind_data[mind_id]["experiences"].append(
                 MemoryRecord(self.round_number, "experience", text, source))
@@ -2992,7 +2998,7 @@ class GameWindow(QMainWindow):
                     self.remember_arrival(
                         f"{event.event_id}:report:{original_room}:{corpse_body_id}", recipient,
                         f"At {event.time}, {discoverer} told you what they had found in the {original_room}. They described {victim}'s body torn apart, with blood and scattered remains across the floor.",
-                        source="hearsay", speaker_body_id=event.body_id)
+                        source="hearsay", speaker_body_id=event.body_id, observed_dead_body_id=corpse_body_id)
             self.night_arrival_resolved.emit({"arrival": event, "room": room,
                                              "corpse_body_ids": tuple(body_id for _, body_id, _ in reports)})
         self.update_room_button_states()
@@ -3018,6 +3024,7 @@ class GameWindow(QMainWindow):
                 label = record.observed_name or self.perceived_name(record.body_id)
                 self.record_history(f"{record.cause.value}: {label} died.", display=True)
                 self._disclosed_item_deaths.add(record.attempt_id)
+                self.observe_night_death(record.body_id)
         if state is not None and not self._arrival_finalized:
             for event in state.finish():
                 if self.apply_arrival(event, observed=event.room == selected_room):
@@ -3146,14 +3153,12 @@ class GameWindow(QMainWindow):
                     self.append_output_text("Choose a controller and a target first.\n")
                     self.room_buttons_widget.show(); self.weapon_action_panel.show()
                     return
-                # Find target room
-                target_room = None
-                for rm, occs in self.room_assignments.items():
-                    if tgt in occs:
-                        target_room = rm; break
-                if not target_room:
-                    self.append_output_text("GAME ERROR (dev's fault): Target could not be located. No kill happened.\n")
+                target_room = next((room for room, names in self.room_assignments.items() if tgt in names), None)
+                controlled_current_room = next((room for room, names in self.room_assignments.items() if ctrl in names), None)
+                if (not all(self.characters.get(name, {}).get("alive") for name in (ctrl, tgt))
+                        or target_room is None or controlled_current_room is None):
                     self.new_crime_scenes = []
+                    self.trace_action("controlled_attack_unavailable", controller=ctrl, target=tgt)
                     return self.finish_night()
 
                 # Kill via controller in the target room but keep existing pipeline
@@ -3163,7 +3168,6 @@ class GameWindow(QMainWindow):
                 self.record_history(f"{self.perceived_actor(ctrl)} (under your control) kills {self.perceived_actor(tgt)} in the {target_room}.\n", display=True)
 
                 # Adjust room assignments to handle mind control
-                controlled_current_room = next((rm for rm, occs in self.room_assignments.items() if ctrl in occs), None)
                 self.room_assignments[controlled_current_room].remove(ctrl)
                 self.room_assignments[target_room].append(ctrl)
 
@@ -3276,6 +3280,8 @@ class GameWindow(QMainWindow):
             return
         self.commit_attack(victim, room)
         target = self.knife_extra_target
+        if (self.selected_weapon or {}).get("id") == "knife":
+            self.knife_used_bloodlust = False
         if ((self.selected_weapon or {}).get("id") == "knife" and target != victim
                 and self.characters.get(target, {}).get("alive")):
             extra_room = next((name for name, occupants in self.room_assignments.items()
@@ -3288,7 +3294,7 @@ class GameWindow(QMainWindow):
     def finish_knife_attack(self, target, room):
         if room not in self.rooms_visited:
             self.rooms_visited.append(room)
-        self.commit_attack(target, room, weapon_id="knife")
+        self.knife_used_bloodlust = bool(self.commit_attack(target, room, weapon_id="knife"))
         self.finish_night()
 
     def finish_night(self):
@@ -4652,6 +4658,21 @@ class GameWindow(QMainWindow):
         w.show()
         w.raise_()
 
+    def observe_night_death(self, body_id):
+        if self._night_known_alive_bodies is not None:
+            self._night_known_alive_bodies = tuple(
+                known for known in self._night_known_alive_bodies if known != body_id)
+
+    def night_weapon_targets(self):
+        """Use the player's night roster without probing undisclosed deaths."""
+        if not self.show_room_allocations and self._night_known_alive_bodies is not None:
+            bodies = self._night_known_alive_bodies
+        else:
+            bodies = tuple(body.body_id for body in self.body_states() if body.is_npc and body.alive)
+        return tuple(label for body_id in bodies
+                     for label in (self.label_for_body(body_id),)
+                     if label in self.characters and label != self.player_name)
+
     def open_blackmagic_dialog(self):
         if not self.can_configure_weapon("blackmagic"):
             return
@@ -4664,7 +4685,7 @@ class GameWindow(QMainWindow):
         fams = QFontDatabase.applicationFontFamilies(font_id)
         font_family = fams[0] if fams else "Sans-Serif"
 
-        alive = [c for c in self.characters if self.characters[c]["alive"]]
+        alive = self.night_weapon_targets()
 
         editor_night = self.round_number
         w = QWidget(self)
@@ -4750,9 +4771,8 @@ class GameWindow(QMainWindow):
             if not self.can_configure_weapon("blackmagic", w, editor_night):
                 return
             c, t = self.label_for_body(ctrl.currentData()), self.label_for_body(tgt.currentData())
-            if (c and t and c != t and c != self.player_name and t != self.player_name
-                    and self.characters.get(c, {}).get("alive")
-                    and self.characters.get(t, {}).get("alive")):
+            allowed = self.night_weapon_targets()
+            if c in allowed and t in allowed and c != t:
                 self.black_magic_controller, self.black_magic_target = c, t
                 self.record_history(f"You planned to compel {self.perceived_actor(c)} to attack {self.perceived_actor(t)}.")
                 self.trace_action("weapon_configured", weapon_id="blackmagic", controller=c, target=t)
@@ -4794,7 +4814,7 @@ class GameWindow(QMainWindow):
             self._weapon_windows["knife"].activateWindow()
             return
         
-        alive = [c for c in self.characters if self.characters[c]["alive"]]
+        alive = self.night_weapon_targets()
         editor_night = self.round_number
         w = QWidget(self); w.setWindowFlags(Qt.FramelessWindowHint)
         w.setAttribute(Qt.WA_StyledBackground, True)
@@ -4853,7 +4873,7 @@ class GameWindow(QMainWindow):
                 return
             body_id = victim.currentData()
             choice = self.label_for_body(body_id) if body_id is not None else None
-            if body_id is not None and (choice == self.player_name or not self.characters.get(choice, {}).get("alive")):
+            if body_id is not None and choice not in self.night_weapon_targets():
                 return
             if choice is None:
                 self.knife_extra_target = None

@@ -129,6 +129,7 @@ class NightArrivalIntegrationTests(unittest.TestCase):
         self.assertEqual(set(photo.occupants), {'Alex','Hank','Jerry'})
         self.assertNotIn('Dave', photo.occupants)
         self.assertFalse(self.window.house_view.observations['attic'].known_names)
+        self.assertNotIn('Dave', self.window.night_weapon_targets())
         event = state.events[2]
         before = (len(discoverer), len(recipient))
         self.window.apply_arrival(event)
@@ -191,6 +192,112 @@ class NightArrivalIntegrationTests(unittest.TestCase):
             self.assertLessEqual(point.y() + control.height(), viewport.height())
             self.assertGreaterEqual(control.height(), 44)
             self.assertTrue(control.isEnabled())
+
+    def hidden_dead_target_night(self, weapon_id):
+        self.conversation()
+        self.arm_optional('booby_trap', room='Attic')
+        self.open_night(initial_count=1, normal=False, plan={
+            'Dave':'Attic', 'Hank':'Kitchen', 'Jerry':'Library', 'Debra':'Basement', 'Owen':'Cellar'})
+        self.assertFalse(self.window.characters['Dave']['alive'])
+        self.assertIn('Dave', self.window.night_weapon_targets())
+        self.window.selected_weapon = self.weapon(weapon_id)
+        self.window.build_weapon_action_panel()
+        self.window.apply_weapon_gating()
+
+    def check_hidden_blackmagic_plan(self, controller, target):
+        self.hidden_dead_target_night('blackmagic')
+        self.window.open_blackmagic_dialog()
+        editor = self.window._weapon_windows['blackmagic']
+        control_box, target_box = editor.findChildren(game.QComboBox)
+        for box, name in ((control_box, controller), (target_box, target)):
+            self.assertGreaterEqual(box.findData(self.window.body_id('Dave')), 0)
+            box.setCurrentIndex(box.findData(self.window.body_id(name)))
+        next(button for button in editor.findChildren(game.QPushButton) if button.text() == 'Save').click()
+        self.assertTrue(editor.isHidden())
+        self.assertEqual((self.window.black_magic_controller, self.window.black_magic_target), (controller, target))
+        self.assertTrue(self.window.weapon_configured())
+        self.assertTrue(self.window.room_buttons['Kitchen'].isEnabled())
+        hidden_history = '\n'.join(record.text for record in self.window.history_records
+                                   if record.round_number == self.window.round_number)
+        self.assertNotIn('trap: Dave died.', hidden_history)
+        self.assertNotIn('not powerful enough', hidden_history)
+        self.window.choose_room('Kitchen')
+        self.assertIsNotNone(self.window.pending_room_action)
+        self.window.draft_page.leave_button.click()
+        self.assertEqual(self.window.night_attacks, [])
+        self.assertTrue(self.window.characters['Hank']['alive'])
+        self.assertFalse(any('under your control) kills' in record.text for record in self.window.history_records))
+
+    def test_hidden_dead_blackmagic_controller_stays_selectable_and_saved_plan_noops(self):
+        self.check_hidden_blackmagic_plan('Dave', 'Hank')
+
+    def test_hidden_dead_blackmagic_victim_stays_selectable_and_saved_plan_noops(self):
+        self.check_hidden_blackmagic_plan('Hank', 'Dave')
+
+    def test_available_blackmagic_plan_still_attacks_and_moves_controller(self):
+        self.open_night(normal=False)
+        self.window.selected_weapon = self.weapon('blackmagic')
+        self.window.open_blackmagic_dialog()
+        editor = self.window._weapon_windows['blackmagic']
+        control_box, target_box = editor.findChildren(game.QComboBox)
+        control_box.setCurrentIndex(control_box.findData(self.window.body_id('Dave')))
+        target_box.setCurrentIndex(target_box.findData(self.window.body_id('Jerry')))
+        next(button for button in editor.findChildren(game.QPushButton) if button.text() == 'Save').click()
+        self.window.choose_room('Kitchen')
+        self.window.draft_page.leave_button.click()
+        attack, = self.window.night_attacks
+        self.assertEqual((attack['attacker_label'], attack['target_label']), ('Dave', 'Jerry'))
+        self.assertFalse(self.window.characters['Jerry']['alive'])
+        self.assertIn('Dave', self.window.room_assignments['Attic'])
+        self.assertNotIn('Dave', self.window.room_assignments['Kitchen'])
+
+    def test_hidden_dead_knife_extra_target_saves_without_probe_and_adds_no_attack_or_bloodlust(self):
+        self.hidden_dead_target_night('knife')
+        self.window.open_knife_dialog()
+        editor = self.window._weapon_windows['knife']
+        box, = editor.findChildren(game.QComboBox)
+        self.assertGreaterEqual(box.findData(self.window.body_id('Dave')), 0)
+        box.setCurrentIndex(box.findData(self.window.body_id('Dave')))
+        next(button for button in editor.findChildren(game.QPushButton) if button.text() == 'Confirm').click()
+        self.assertTrue(editor.isHidden())
+        self.assertEqual(self.window.knife_extra_target, 'Dave')
+        self.window.choose_room('Kitchen')
+        self.window.draft_page.leave_button.click()
+        self.assertEqual([attack['target_label'] for attack in self.window.night_attacks], ['Hank'])
+        self.assertFalse(self.window.knife_used_bloodlust)
+        self.assertIsNone(self.window.pending_room_action)
+        self.assertEqual(len(self.window.item_deaths), 1)
+        self.assertFalse(any('covered in blood' in line.text for line in self.window.public_dialogue))
+
+    def test_available_knife_extra_target_still_resolves_second_attack_and_bloodlust(self):
+        self.open_night(normal=False)
+        self.window.selected_weapon = self.weapon('knife')
+        self.window.open_knife_dialog()
+        editor = self.window._weapon_windows['knife']
+        box, = editor.findChildren(game.QComboBox)
+        box.setCurrentIndex(box.findData(self.window.body_id('Hank')))
+        next(button for button in editor.findChildren(game.QPushButton) if button.text() == 'Confirm').click()
+        self.window.choose_room('Attic')
+        self.window.draft_page.leave_button.click()
+        self.assertEqual(self.window.item_drafts.pending_offer.room_id, 'Kitchen')
+        self.window.draft_page.leave_button.click()
+        self.assertEqual([attack['target_label'] for attack in self.window.night_attacks], ['Jerry','Hank'])
+        self.assertTrue(self.window.knife_used_bloodlust)
+
+    def test_witnessed_death_is_removed_from_the_hard_night_roster(self):
+        self.conversation()
+        self.arm_optional('booby_trap', room='Attic')
+        self.open_night(initial_count=1, normal=False, plan={
+            'Hank':'Kitchen', 'Dave':'Attic', 'Jerry':'Library', 'Debra':'Basement', 'Owen':'Cellar'})
+        self.assertIn('Dave', self.window.night_weapon_targets())
+        self.window.loiter_button.click()
+        self.assertFalse(self.window.characters['Dave']['alive'])
+        self.assertNotIn('Dave', self.window.night_weapon_targets())
+        self.window.selected_weapon = self.weapon('knife')
+        self.window.open_knife_dialog()
+        editor = self.window._weapon_windows['knife']
+        box, = editor.findChildren(game.QComboBox)
+        self.assertEqual(box.findData(self.window.body_id('Dave')), -1)
 
     def test_bonus_room_choice_never_restarts_arrivals_or_creates_another_reward(self):
         state = self.open_night()
