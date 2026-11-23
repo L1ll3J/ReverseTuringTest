@@ -167,8 +167,9 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertFalse(self.window.play_tab_button.isVisible())
         self.assertFalse(self.window.item_catalogue.isVisible())
         goals = [label.text() for label in self.window.weapon_picker_widget.findChildren(QLabel)
-                 if label.text().startswith("Locked:")]
-        self.assertIn("Locked: Kill your first victim.", goals)
+                 if "\n\nLocked:" in label.text()]
+        knife = next(weapon for weapon in self.window.weapons if weapon["id"] == "knife")
+        self.assertIn(knife["desc"] + "\n\nLocked: Kill your first victim.", goals)
         bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.select_weapon_and_start(bare)
         self.assertEqual(self.window.phase, "action")
