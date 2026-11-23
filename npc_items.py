@@ -119,16 +119,19 @@ class NPCItemState:
         *,
         appearance_names: Mapping[str, str] | None = None,
         body_ids: Mapping[str, str] | None = None,
+        eligible_photographers: Iterable[str] | None = None,
     ) -> tuple[CameraSnapshot, ...]:
+        """Bound visible living subjects separately from who may operate NPC equipment."""
         if round_number in self._photos_by_night:
             return self._photos_by_night[round_number]
         living = set(living_npcs)
+        photographers = living if eligible_photographers is None else living & set(eligible_photographers)
         names = dict(appearance_names or {})
         identifiers = dict(body_ids or {})
         rooms = {room: tuple(occupants) for room, occupants in room_assignments.items()}
         photos = []
         for owner, item_id in self.equipment.items():
-            if item_id != "camera" or owner not in living:
+            if item_id != "camera" or owner not in photographers:
                 continue
             locations = [room for room, occupants in rooms.items() if owner in occupants]
             if len(locations) != 1:

@@ -77,6 +77,16 @@ class NPCItemTests(unittest.TestCase):
         self.assertNotIn("Dave", photo.public_description())
         self.assertNotIn("dead rat", photo.public_description())
 
+    def test_photographer_eligibility_does_not_remove_visible_human_subjects(self):
+        state = NPCItemState({"Hank": "camera"})
+        scene = {"Kitchen": ["Hank", "Alex"]}
+        photo, = state.capture_night(1, scene, ("Hank", "Alex"), eligible_photographers=("Hank",))
+        self.assertEqual(photo.owner, "Hank")
+        self.assertEqual(photo.occupants, ("Alex", "Hank"))
+        original = photo.public_description()
+        self.assertEqual(state.capture_night(2, scene, ("Hank", "Alex"), eligible_photographers=()), ())
+        self.assertEqual(photo.public_description(), original)
+
     def test_visible_flavour_is_bounded_and_separate_from_mechanical_scene(self):
         state = NPCItemState({"Hank": "camera"})
         photo, = state.capture_night(1, {"Kitchen": ["Hank"]}, ("Hank",))

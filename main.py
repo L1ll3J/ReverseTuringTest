@@ -3060,11 +3060,13 @@ class GameWindow(QMainWindow):
             for event in state.finish():
                 if self.apply_arrival(event, observed=event.room == selected_room):
                     return False
-            living = tuple(body.label for body in self.body_states() if body.alive)
+            bodies = self.body_states()
+            living = tuple(body.label for body in bodies if body.alive)
+            photographers = tuple(body.label for body in bodies if body.is_npc and body.alive)
             camera_rooms = {room: list(names) for room, names in self.room_assignments.items()}
             camera_rooms[selected_room].append(self.player_name)
             self.npc_items.capture_night(
-                self.round_number, camera_rooms, living,
+                self.round_number, camera_rooms, living, eligible_photographers=photographers,
                 appearance_names={name: self.perceived_actor(name) for name in self.body_ids},
                 body_ids=self.body_ids)
             self._arrival_finalized = True

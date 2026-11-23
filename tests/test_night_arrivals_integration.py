@@ -99,6 +99,18 @@ class NightArrivalIntegrationTests(unittest.TestCase):
         self.assertIs(self.window.npc_items._photos_by_night[state.night][0], photo)
         self.assertEqual(self.window.night_attacks, [])
 
+    def test_human_possessing_camera_body_cannot_take_automatic_npc_photo(self):
+        self.conversation()
+        self.window.npc_items = NPCItemState({'Hank': 'camera'})
+        camera_body = self.window.body_id('Hank')
+        self.window.exchange_player_mind(camera_body)
+        self.window.selected_weapon = self.weapon()
+        self.window.run_action_phase()
+        self.assertTrue(self.window.prepare_room_entry('Kitchen'))
+        self.assertEqual(self.window.player_name, 'Hank')
+        self.assertEqual(self.window.npc_items._photos_by_night[self.window.round_number], ())
+        self.assertEqual(dict(self.window.npc_items.equipment), {'Hank': 'camera'})
+
     def test_solo_trap_then_flight_tells_only_actual_copresent_guest_and_camera_settles(self):
         self.conversation()
         self.arm_optional('booby_trap', room='Attic')

@@ -1097,16 +1097,22 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertFalse(any(event.source == "Visible equipment" for event in context.public_events))
         self.assertFalse(any(event.source == "Photograph" for event in context.public_events))
 
-    def test_camera_captures_before_attack_and_presents_once_after_owner_dies(self):
+    def begin_camera_night(self, weapon_id):
         self.window.npc_items = game.NPCItemState({"Hank": "camera"})
-        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
-        with patch.object(game.random, "choice", side_effect=lambda choices: choices[0]):
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == weapon_id)
+        placements = {self.window.body_id(name): room for name, room in
+                      (("Hank", "Kitchen"), ("Jerry", "Attic"), ("Dave", "Attic"))}
+        with patch.object(game, "assign_guest_rooms", return_value=placements):
             self.window.run_action_phase()
-        photos = self.window.npc_items.capture_night(1, {}, ())
-        self.assertEqual(len(photos), 1)
-        photo = photos[0]
+        self.assertNotIn(1, self.window.npc_items._photos_by_night)
+        self.assertTrue(self.window.prepare_room_entry("Kitchen"))
+        photo, = self.window.npc_items._photos_by_night[1]
+        self.assertEqual(set(photo.occupants), {"Alex", "Hank"})
+        return photo
+
+    def test_camera_captures_before_attack_and_presents_once_after_owner_dies(self):
+        photo = self.begin_camera_night("bare")
         self.assertEqual(photo.owner, "Hank")
-        self.assertNotIn("Alex", photo.occupants)
         self.assertFalse(any(event.source == "Photograph" for event in self.window.public_events))
         with patch.object(self.window, "run_conversation_loop"):
             self.window.choose_room(photo.room)
@@ -1121,24 +1127,21 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(sum(event.source == "Photograph" for event in self.window.public_events), 1)
         self.assertEqual(self.window.output_area.toPlainText().count("genuine photograph"), 1)
         self.window.run_action_phase()
-        self.assertEqual(self.window.npc_items.capture_night(2, {}, ()), ())
+        self.window.prepare_room_entry(self.window.night_rooms[0])
+        self.assertEqual(self.window.npc_items._photos_by_night[2], ())
 
     def test_possession_does_not_rewrite_photo_or_continue_the_npc_camera(self):
-        self.window.npc_items = game.NPCItemState({"Hank": "camera"})
-        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "voodoo")
-        with patch.object(game.random, "choice", side_effect=lambda choices: choices[0]):
-            self.window.run_action_phase()
-        photo, = self.window.npc_items.capture_night(1, {}, ())
+        photo = self.begin_camera_night("voodoo")
         original = photo.public_description()
         with patch.object(self.window, "run_conversation_loop"):
             self.window.choose_room(photo.room)
         self.assertEqual(self.window.player_name, "Hank")
         self.assertNotIn("Hank", self.window.characters)
         self.assertEqual(photo.public_description(), original)
-        self.assertIn("Visible people: Hank", original)
-        self.assertNotIn("Alex", original)
+        self.assertEqual(set(photo.occupants), {"Alex", "Hank"})
         self.window.run_action_phase()
-        self.assertEqual(self.window.npc_items.capture_night(2, {}, ()), ())
+        self.window.prepare_room_entry(self.window.night_rooms[0])
+        self.assertEqual(self.window.npc_items._photos_by_night[2], ())
 
     def test_final_morning_still_presents_a_dead_owners_photo(self):
         self.window.round_number = 1
