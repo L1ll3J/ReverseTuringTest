@@ -214,7 +214,7 @@ class ExpandedItemRulesTests(unittest.TestCase):
         with self.assertRaises(ItemRuleError):
             self.rules.use_item(duplicate.instance_id, self.context, drafts=drafts)
         self.assertIn(duplicate, self.inventory.entries)
-        offer = drafts.enter_room("Kitchen")
+        offer = drafts.enter_room("Kitchen", self.inventory.snapshot())
         self.assertEqual(offer.picks_remaining, 2)
         drafts.choose(offer.offer_id, 0, self.inventory)
         self.assertIsNotNone(drafts.pending_offer)

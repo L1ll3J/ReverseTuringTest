@@ -16,11 +16,11 @@ from PyQt5.QtCore import QCoreApplication, QEvent, QPoint, Qt
 from PyQt5.QtGui import QFont, QFontDatabase, QFontInfo, QPalette, QPixmap
 from PyQt5.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton, QWidget
 
-from content import UNLOCK_GOALS
+from content import CONTENT_CATALOGUE, UNLOCK_GOALS
 from item_catalogue_ui import ItemCataloguePanel
 from item_ui import InventoryDialog, ItemDraftDialog
 from items import ITEM_CATALOGUE, DraftOffer, InventoryEntry
-from progression import ProfileError, ProfileSnapshot
+from progression import ProfileError, ProfileSnapshot, ProfileStore, ProgressEvent
 
 
 class ItemCatalogueTests(unittest.TestCase):
@@ -61,11 +61,32 @@ class ItemCatalogueTests(unittest.TestCase):
             self.assertTrue(panel.findChild(QLabel, f"itemIcon_{item_id}").isVisible())
             expected = "Default - always included" if item.default else "Locked"
             self.assertEqual(panel.findChild(QLabel, f"itemStatus_{item_id}").text(), expected)
+            if not item.default:
+                goal = panel.findChild(QLabel, f"itemGoal_{item_id}")
+                self.assertEqual(goal.text(), "Unlock: " + UNLOCK_GOALS[item_id])
         goal = panel.findChild(QLabel, "itemGoal_guardian_angel")
         self.assertEqual(goal.text(), "Unlock: " + UNLOCK_GOALS["guardian_angel"])
         self.assertFalse(panel.checkboxes)
         self.assertFalse(panel.findChildren(QCheckBox))
         self.callback.assert_not_called()
+
+    def test_real_profile_unlock_and_pool_toggle_roundtrip_through_catalogue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProfileStore(Path(directory) / "profile.json", CONTENT_CATALOGUE)
+            panel = self.panel(store.read())
+            self.assertEqual(len(panel.findChildren(QLabel, "itemName_booby_trap")), 1)
+            profile = store.record(ProgressEvent("run", 1, "marked_kill_completed")).profile
+            panel.refresh(profile)
+            self.assertEqual(set(panel.checkboxes), {"booby_trap"})
+            self.assertIn("booby_trap", store.item_pool())
+            self.callback.side_effect = store.set_item_enabled
+            panel.checkboxes["booby_trap"].setChecked(False)
+            self.assertNotIn("booby_trap", store.item_pool())
+            reopened = ProfileStore(store.path, CONTENT_CATALOGUE)
+            panel.refresh(reopened.read())
+            self.assertFalse(panel.checkboxes["booby_trap"].isChecked())
+            self.assertNotIn("booby_trap", reopened.item_pool())
+            self.assertEqual(panel.findChild(QLabel, "itemStatus_booby_trap").text(), "Unlocked")
 
     def test_optional_checkbox_uses_returned_snapshot_and_refresh_does_not_write(self):
         profile = ProfileSnapshot(unlocked={"guardian_angel"})

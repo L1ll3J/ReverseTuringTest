@@ -330,7 +330,7 @@ class GameWindow(QMainWindow):
         # The continuation owns the accepted action. Closing an offer is an explicit skip.
         if self.pending_room_action is not None:
             return
-        offer = self.item_drafts.enter_room(room) if self.item_drafts else None
+        offer = self.item_drafts.enter_room(room, self.inventory.snapshot()) if self.item_drafts else None
         if offer is None:
             continuation()
             return
@@ -345,7 +345,7 @@ class GameWindow(QMainWindow):
             self.draft_dialog.deleteLater()
         self.draft_dialog = ItemDraftDialog(
             offer, ITEM_CATALOGUE, self.item_drafts.rerolls_remaining,
-            bool(set(self.item_drafts.eligible_item_ids) - set(offer.options)),
+            bool(self.item_drafts.reroll_alternatives(offer.offer_id, self.inventory.snapshot())),
             self.choose_item_offer, self.reroll_item_offer,
             lambda: self.skip_item_offer(offer.offer_id), readable_body_font(), self)
         self.draft_dialog.open()
@@ -368,7 +368,7 @@ class GameWindow(QMainWindow):
 
     def reroll_item_offer(self, offer_id, slot):
         try:
-            offer = self.item_drafts.reroll(offer_id, slot)
+            offer = self.item_drafts.reroll(offer_id, slot, self.inventory.snapshot())
         except InventoryError:
             return
         self.trace_action("item_offer_rerolled", offer=offer, slot=slot)
