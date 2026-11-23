@@ -259,7 +259,7 @@ class PlayerItemRules:
         if guardian_scope not in {"owner", "body"}:
             raise ItemRuleError("Guardian protection requires owner or body scope")
         self._guardian_scope = guardian_scope
-        self._protection_body_id = None
+        self._body_protections: set[str] = set()
         if not owner_id or inventory.owner_id != owner_id:
             raise ItemRuleError("Item rules and inventory must have the same owner")
         self._owner_id = owner_id
@@ -304,7 +304,11 @@ class PlayerItemRules:
 
     @property
     def protection_armed(self) -> bool:
-        return self._protection_armed
+        return bool(self._body_protections) if self._guardian_scope == "body" else self._protection_armed
+
+    @property
+    def guardian_body_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self._body_protections))
 
     @property
     def pending_ballot_bonus(self) -> int:
@@ -435,7 +439,7 @@ class PlayerItemRules:
                 raise ItemRuleError("This room already has two reservations for next night")
         if entry.item_id == "muffle" and target.body_id in self._muffles:
             raise ItemRuleError("This suspect is already muffled")
-        if entry.item_id == "guardian_angel" and self._protection_armed:
+        if entry.item_id == "guardian_angel" and self.guardian_protects(actor.body_id, self.owner_id):
             raise ItemRuleError("Guardian Angel protection is already armed")
         if entry.item_id == "stay_of_execution" and target.body_id in self._execution_stays:
             raise ItemRuleError("This body already has a stay of execution")
@@ -499,8 +503,10 @@ class PlayerItemRules:
             self._pending_ballot_bonus += 2
             effect = self._event("extra_ballots_added", context.day, **values)
         elif entry.item_id == "guardian_angel":
-            self._protection_armed = True
-            self._protection_body_id = actor.body_id
+            if self._guardian_scope == "body":
+                self._body_protections.add(actor.body_id)
+            else:
+                self._protection_armed = True
             effect = self._event("guardian_armed", context.day, **values)
         elif entry.item_id == "room_reservation":
             self._reservations[target.mind_identity] = RoomReservation(target.mind_identity, room_id, context.day + 1)
@@ -744,6 +750,25 @@ class PlayerItemRules:
                                               target_body_id=body_id, private_text=MUFFLE_EXPIRED))
         return tuple(events)
 
+    def guardian_protects(self, body_id: str, target_owner_id: str | None = None) -> bool:
+        return (body_id in self._body_protections if self._guardian_scope == "body"
+                else self._protection_armed and target_owner_id == self.owner_id)
+
+    def intercept_guardian(self, attempt_id: str, target: BodyState, day: int,
+                           target_owner_id: str | None = None) -> DeathDecision | None:
+        """Resolve protection alone; an unprotected target never enters the death path."""
+        if not attempt_id or day < 1:
+            raise ItemRuleError("A protection attempt requires an identifier and a day")
+        previous = self._death_decisions.get(attempt_id)
+        if previous is not None:
+            if previous[1].protection_item_id != "guardian_angel":
+                raise ItemRuleError("This attempt already describes another death resolution")
+            return self.attempt_death(attempt_id, target, day, target_owner_id)
+        if (not target.alive or target.body_id in self._known_dead
+                or not self.guardian_protects(target.body_id, target_owner_id)):
+            return None
+        return self.attempt_death(attempt_id, target, day, target_owner_id)
+
     def attempt_death(
         self,
         attempt_id: str,
@@ -794,11 +819,11 @@ class PlayerItemRules:
             outcome = "prevented"
             protection = "stay_of_execution"
             events = (self._event("execution_stayed", day, item_id=protection, target_body_id=target.body_id),)
-        elif self._protection_armed and (
-                target.body_id == self._protection_body_id if self._guardian_scope == "body"
-                else target_owner_id == self.owner_id):
-            self._protection_armed = False
-            self._protection_body_id = None
+        elif self.guardian_protects(target.body_id, target_owner_id):
+            if self._guardian_scope == "body":
+                self._body_protections.remove(target.body_id)
+            else:
+                self._protection_armed = False
             outcome = "prevented"
             protection = "guardian_angel"
             events = (self._event("guardian_intervened", day, item_id="guardian_angel",

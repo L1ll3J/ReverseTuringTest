@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 class IdentityState:
     player_mind_id: str
     occupants: tuple[tuple[str, str], ...]
+    appearances: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self):
         pairs = tuple(tuple(pair) for pair in self.occupants)
@@ -17,12 +18,32 @@ class IdentityState:
                 or len({mind for _, mind in pairs}) != len(pairs)
                 or self.player_mind_id not in {mind for _, mind in pairs}):
             raise ValueError("Each body and mind requires one unique occupant relationship")
+        appearances = tuple(tuple(pair) for pair in self.appearances)
+        if (any(len(pair) != 2 or any(not isinstance(value, str) or not value.strip()
+                                     for value in pair) for pair in appearances)
+                or len({body for body, _ in appearances}) != len(appearances)
+                or not {body for body, _ in appearances}.issubset({body for body, _ in pairs})):
+            raise ValueError("Appearance names require unique known bodies and nonempty names")
         object.__setattr__(self, "occupants", pairs)
+        object.__setattr__(self, "appearances", appearances)
 
     @classmethod
-    def from_bodies(cls, player_mind_id, player_body_id, npc_body_ids):
+    def from_bodies(cls, player_mind_id, player_body_id, npc_body_ids, *, appearance_names=None):
         return cls(player_mind_id, ((player_body_id, player_mind_id),
-                                   *((body_id, body_id) for body_id in npc_body_ids)))
+                                   *((body_id, body_id) for body_id in npc_body_ids)),
+                   tuple((appearance_names or {}).items()))
+
+    def appearance_name(self, body_id):
+        return next((name for body, name in self.appearances if body == body_id), None)
+
+    def clone_appearance(self, actor_body_id, target_body_id):
+        name = self.appearance_name(target_body_id)
+        if (self.mind_for_body(actor_body_id) is None or actor_body_id == target_body_id
+                or name is None):
+            raise ValueError("Appearance cloning requires distinct known bodies and a named target")
+        appearances = dict(self.appearances)
+        appearances[actor_body_id] = name
+        return replace(self, appearances=tuple(appearances.items()))
 
     def body_for_mind(self, mind_id):
         return next((body for body, mind in self.occupants if mind == mind_id), None)
