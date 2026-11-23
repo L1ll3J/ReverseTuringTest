@@ -128,6 +128,8 @@ class ItemEvent:
     observed_source: str | None = None
     death_decision: DeathDecision | None = None
     giver_label: str | None = None
+    recipient_mind_id: str | None = None
+    target_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -508,7 +510,8 @@ class PlayerItemRules:
         if not definition.reusable:
             self.inventory.consume(instance_id)
         values = {"item_id": entry.item_id, "actor_body_id": actor.body_id,
-                  "target_body_id": target.body_id if target is not None else None}
+                  "target_body_id": target.body_id if target is not None else None,
+                  "target_name": target.perceived_name if target is not None else None}
         consequences = ()
         if entry.item_id == "banana":
             disposition = BANANA_DISPOSITION.format(giver=actor.perceived_name, day=context.day)
@@ -516,15 +519,17 @@ class PlayerItemRules:
             effect = self._event("banana_given", context.day, **values,
                                  subject_body_id=actor.body_id,
                                  public_text=BANANA_PUBLIC.format(giver=actor.perceived_name, recipient=target.perceived_name),
-                                 disposition_text=disposition)
+                                 disposition_text=disposition, recipient_mind_id=target.mind_identity)
         elif entry.item_id == "muffle":
             self._muffles[target.body_id] = MuffleEffect(target.body_id, context.day, context.day + 1)
-            effect = self._event("muffle_applied", context.day, **values, private_text=MUFFLE_PRIVATE)
+            effect = self._event("muffle_applied", context.day, **values, private_text=MUFFLE_PRIVATE,
+                                 recipient_mind_id=target.mind_identity)
         elif entry.item_id == "mass_discombobulator":
             effect = self._event("npc_recollections_cleared", context.day, **values)
         elif entry.item_id == "love_potion":
             effect = self._event("love_potion_applied", context.day, **values,
-                                 subject_body_id=actor.body_id, giver_label=actor.perceived_name)
+                                 subject_body_id=actor.body_id, giver_label=actor.perceived_name,
+                                 recipient_mind_id=target.mind_identity)
         elif entry.item_id == "spare_paper":
             self._pending_ballot_bonus += 2
             effect = self._event("extra_ballots_added", context.day, **values)
@@ -580,8 +585,10 @@ class PlayerItemRules:
             observation = {}
             if entry.item_id == "throw_voice":
                 observation["private_text"] = THROW_VOICE_PRIVATE.format(message=message)
+                observation["recipient_mind_id"] = target.mind_identity
             elif entry.item_id == "divine_revelation":
                 observation["private_text"] = DIVINE_REVELATION_PRIVATE.format(message=message)
+                observation["recipient_mind_id"] = target.mind_identity
             else:
                 observation["public_text"] = DARK_WHISPER_PUBLIC.format(
                     apparent_speaker=target.perceived_name, subject_pronoun=target.subject_pronoun,
@@ -650,7 +657,7 @@ class PlayerItemRules:
             self._prepared_note = None
             events.append(self._event("prepared_note_bound", decision.day, item_id="forged_note",
                                       actor_body_id=note.actor_body_id, target_body_id=corpse.body_id,
-                                      message=note.message))
+                                      message=note.message, target_name=corpse.perceived_name))
         if (self._marked_target is not None and phase == "action"
                 and self._marked_target.due_day == decision.day
                 and self._marked_target.target_body_id == corpse.body_id):
@@ -771,7 +778,9 @@ class PlayerItemRules:
                 del self._muffles[body_id]
                 if body_id in living:
                     events.append(self._event("muffle_expired", day, item_id="muffle",
-                                              target_body_id=body_id, private_text=MUFFLE_EXPIRED))
+                                              target_body_id=body_id, private_text=MUFFLE_EXPIRED,
+                                              recipient_mind_id=snapshots[body_id].mind_identity,
+                                              target_name=snapshots[body_id].perceived_name))
         return tuple(events)
 
     def guardian_protects(self, body_id: str, target_owner_id: str | None = None) -> bool:
@@ -843,7 +852,8 @@ class PlayerItemRules:
         elif cause == DeathCause.EXECUTION and target.body_id in self._votes[source_id].execution_stays:
             outcome = "prevented"
             protection = "stay_of_execution"
-            events = (self._event("execution_stayed", day, item_id=protection, target_body_id=target.body_id),)
+            events = (self._event("execution_stayed", day, item_id=protection, target_body_id=target.body_id,
+                                  target_name=target.perceived_name),)
         elif self.guardian_protects(target.body_id, target_owner_id):
             if self._guardian_scope == "body":
                 self._body_protections.remove(target.body_id)
@@ -852,7 +862,7 @@ class PlayerItemRules:
             outcome = "prevented"
             protection = "guardian_angel"
             events = (self._event("guardian_intervened", day, item_id="guardian_angel",
-                                  target_body_id=target.body_id,
+                                  target_body_id=target.body_id, target_name=target.perceived_name,
                                   public_text=GUARDIAN_PUBLIC.format(target=target.perceived_name)),)
         else:
             outcome = "killed"

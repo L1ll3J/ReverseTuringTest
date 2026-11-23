@@ -739,16 +739,28 @@ class GameWindow(QMainWindow):
             return True
         if self.inventory_page is not None:
             self.open_inventory()
-            messages = [f"Listening Glass: {self.display_label(event.target_body_id)}, night {event.observed_day}\n{event.message}"
+            messages = [f"Listening Glass: {(event.target_name or self.display_label(event.target_body_id))}, night {event.observed_day}\n{event.message}"
                         for event in events if event.event_type == "private_memory_revealed"]
             if messages and self.inventory_page is not None:
                 self.inventory_page.show_feedback("\n\n".join(messages))
         self.maybe_prepare_next_turn()
         return True
 
+    def personal_event_recipient(self, event):
+        """Resolve personal ownership separately from the physical target body."""
+        if event.recipient_mind_id is None:
+            handle = self.label_for_body(event.target_body_id)
+            return self.characters.get(handle), handle
+        self.ensure_identity_state()
+        if (not isinstance(event.recipient_mind_id, str)
+                or event.recipient_mind_id not in self.mind_data):
+            raise ItemRuleError("The captured personal recipient mind is unknown")
+        return self.mind_data[event.recipient_mind_id], self.label_for_mind(event.recipient_mind_id)
+
     def apply_item_events(self, events):
         death_applied = False
         for event in events:
+            personal_data, personal_handle = self.personal_event_recipient(event)
             if event.event_id in self.applied_item_events:
                 continue
             if event.death_decision is not None:
@@ -772,13 +784,13 @@ class GameWindow(QMainWindow):
             recipient = self.label_for_body(event.target_body_id)
             if event.public_text:
                 self.add_public_event(event.public_text, source="Observed event")
-            if recipient in self.characters:
+            if personal_data is not None:
                 if event.private_text:
-                    self.remember(recipient, "experience", event.private_text)
+                    self.remember_private(personal_data, personal_handle, "experience", event.private_text)
                 if event.disposition_text:
-                    self.remember(recipient, "disposition", event.disposition_text)
-            if event.event_type == "love_potion_applied" and recipient in self.characters:
-                data = self.characters[recipient]
+                    self.remember_private(personal_data, personal_handle, "disposition", event.disposition_text)
+            if event.event_type == "love_potion_applied" and personal_data is not None:
+                data = personal_data
                 history = data.get("love_history", LovePotionHistory())
                 updated = history.apply(LoveDose(event.event_id, event.day, event.subject_body_id, event.giver_label))
                 if updated is not history:
@@ -789,11 +801,11 @@ class GameWindow(QMainWindow):
             elif event.event_type == "banana_given":
                 self.queue_progress("banana_given")
             elif event.event_type == "apparent_speech" and event.origin == "projected_voice":
-                self.append_speech(recipient, event.message, origin=event.origin)
+                self.append_speech(recipient, event.message, origin=event.origin, perceived_speaker=event.target_name)
             elif event.event_type == "private_memory_revealed":
-                self.record_history(f"Listening Glass: {self.display_actor(recipient)}, night {event.observed_day}\n{event.message}", display=True)
+                self.record_history(f"Listening Glass: {event.target_name or self.display_actor(recipient)}, night {event.observed_day}\n{event.message}", display=True)
             elif event.event_type == "prepared_note_bound":
-                self.morning_item_notes.append((event.event_id, self.perceived_name(event.target_body_id), event.message))
+                self.morning_item_notes.append((event.event_id, event.target_name or self.perceived_name(event.target_body_id), event.message))
             elif event.event_type == "reserved_room_kill":
                 self.queue_progress("reserved_room_kill")
             elif event.event_type == "extra_action_earned":
@@ -801,7 +813,7 @@ class GameWindow(QMainWindow):
             elif event.event_type == "vote_skipped":
                 self.record_history("Presidential Decree: the next vote was skipped.", display=True)
             elif event.event_type == "execution_stayed":
-                self.add_public_event(GUARDIAN_PUBLIC.format(target=self.perceived_name(event.target_body_id)))
+                self.add_public_event(GUARDIAN_PUBLIC.format(target=event.target_name or self.perceived_name(event.target_body_id)))
             elif event.event_type == "guardian_intervened" and recipient == self.player_name:
                 self.guardian_intervened_this_run = True
             elif event.event_type == "item_used":
@@ -811,7 +823,7 @@ class GameWindow(QMainWindow):
                 if distinct_before < 5 <= len(self.used_item_types):
                     self.queue_progress("five_item_types_used")
                 item_name = ITEM_CATALOGUE[event.item_id].name
-                target = f" on {self.display_actor(recipient)}" if recipient is not None and recipient != self.player_name else ""
+                target = f" on {event.target_name or self.display_actor(recipient)}" if recipient is not None and recipient != self.player_name else ""
                 self.record_history(f"You used {item_name}{target}.")
 
         self.update_muffled_player_controls()
@@ -1031,9 +1043,12 @@ class GameWindow(QMainWindow):
         return {"trace_task": task, "trace_actor": actor, "trace_parent_job_id": parent_job_id}
 
     def remember(self, character, kind, text):
+        self.remember_private(self.characters[character], character, kind, text)
+
+    def remember_private(self, data, character, kind, text):
         self.invalidate_prepared_turn("memory_changed", changed=True)
         section = {"experience": "experiences", "disposition": "dispositions"}[kind]
-        self.characters[character][section].append(MemoryRecord(self.round_number, kind, text, "self"))
+        data[section].append(MemoryRecord(self.round_number, kind, text, "self"))
         self.trace.record("memory_added", {"character": character, "kind": kind,
                                           "round": self.round_number, "text": text})
 
@@ -1145,7 +1160,8 @@ class GameWindow(QMainWindow):
         if changed:
             self.invalidate_prepared_turn("private_experiences_changed", changed=True)
 
-    def append_speech(self, speaker, speech, addressee=None, *, origin="ordinary", direct_reply=False):
+    def append_speech(self, speaker, speech, addressee=None, *, origin="ordinary", direct_reply=False,
+                      perceived_speaker=None):
         if speaker == self.player_name and origin == "ordinary" and self.player_is_muffled():
             if (self.phase != "conversation" or self.game_over or self.ai_busy
                     or not self.player_reply_required()):
@@ -1163,9 +1179,12 @@ class GameWindow(QMainWindow):
         self.retry_action = None
         self.retry_button.hide()
         self.request_serial += 1
+        canonical_speaker = self.perceived_actor(speaker) if perceived_speaker is None else perceived_speaker
+        display_speaker = (self.display_actor(speaker) if perceived_speaker is None
+                           or self.perceived_actor(speaker) == perceived_speaker else perceived_speaker)
         line = DialogueLine(self.round_number, speaker, speech, addressee)
         self.public_dialogue.append(line)
-        perception = DialogueLine(self.round_number, self.perceived_actor(speaker), speech,
+        perception = DialogueLine(self.round_number, canonical_speaker, speech,
                                   self.perceived_actor(addressee))
         self.dialogue_perceptions[id(line)] = (line, perception)
         self.last_speech_origin = (line, origin)
@@ -1176,11 +1195,11 @@ class GameWindow(QMainWindow):
                                               "speech": speech, "addressee": addressee,
                                               "origin": origin, "direct_reply": direct_reply},
                           scope=self.trace_callback_scope)
-        message = f"{self.perceived_actor(speaker)}: {speech}"
+        message = f"{canonical_speaker}: {speech}"
         self.current_conversation.append(message)
         self.most_recent_messageS.append(message)
         speaker_id = self.body_id(speaker) if speaker in self.characters or speaker == self.player_name else None
-        self.record_history(speech, kind="speech", speaker=self.display_actor(speaker),
+        self.record_history(speech, kind="speech", speaker=display_speaker,
                             speaker_id=speaker_id, display=True)
         if ordinary_npc:
             self.direct_replies.committed(self.body_id(speaker), direct=direct_reply)
