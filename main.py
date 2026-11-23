@@ -15,6 +15,8 @@ from conversation_widgets import DialogueView, ConversationStage, StageParticipa
 from message_view import DisplayRecord, MessageLog
 from house_view import HouseView, RoomObservation, ROOM_LABELS, ARTWORK_SIZE
 from night_arrivals import NightArrivals, assign_guest_rooms, flight_destination, room_capacity
+from weapon_aftermath import (WeaponAftermath, NightFacts, OBJECT_NAMES, OBJECT_DESCRIPTIONS,
+                              PUBLIC_FINDING, PRIVATE_FINDING)
 from overlay_host import OverlayHost
 from unlock_ui import UnlockPage, unlock_presentation
 from npc_items import NPCItemState, NPC_ITEM_REGISTRY
@@ -213,6 +215,8 @@ class GameWindow(QMainWindow):
         self.mind_data = {}
         self.body_weapons = {}
         self.mind_weapons = {}
+        self.weapon_aftermath = WeaponAftermath()
+        self.weapon_aftermath_panel = None
         self.body_muffle_styles = {}
         self.player_alive = True
         self.inventory = Inventory(self.player_owner_id)
@@ -392,6 +396,13 @@ class GameWindow(QMainWindow):
                                 or self.body_weapons.pop(target_body_id, None)
                                 or next(weapon for weapon in self.weapons if weapon["id"] == "bare"))
         self.stopwatch_selected = self.selected_weapon["id"] == "stopwatch"
+        held = self.body_weapons.get(old_body_id)
+        if held is not None:
+            self.weapon_aftermath.schedule_pocket(
+                f"exchange:{new_state.revision}:{old_body_id}", old_body_id,
+                new_state.mind_for_body(old_body_id), held["id"],
+                description=OBJECT_DESCRIPTIONS.get(held["id"]))
+        self.process_pocket_discoveries()
         self.refresh_recipient_choices()
         self.refresh_conversation_stage()
         self.trace_action("identity_changed", previous_body=old_label, current_body=target.label)
@@ -1103,6 +1114,8 @@ class GameWindow(QMainWindow):
         state = {name: getattr(self, name, None) for name in fields}
         state["expected_voters"] = sorted(getattr(self, "expected_voters", ()))
         state["last_addressee"] = self.public_dialogue[-1].addressee if self.public_dialogue else None
+        state["weapon_aftermath"] = {"nights": tuple(self.weapon_aftermath.nights.values()),
+                                    "drop": self.weapon_aftermath.drop, "turn": self.weapon_aftermath.turn}
         state["npc_items"] = self.npc_items.trace_state()
         state["player_items"] = {
             "run_id": self.run_id, "owner_id": self.player_owner_id,
@@ -1335,6 +1348,10 @@ class GameWindow(QMainWindow):
         self.conversation_stage.set_active_speaker(speaker_id)
         if ordinary_npc:
             self.direct_replies.committed(self.body_id(speaker), direct=direct_reply)
+        if (self.phase == "conversation" and origin == "ordinary"
+                and (speaker == self.player_name or ordinary_npc)):
+            self.weapon_aftermath.spoken(f"{self.run_id}:speech:{len(self.public_dialogue)}")
+            self.process_pocket_discoveries()
         self.refresh_recipient_choices()
         if speaker == "Detective" or speaker in self.characters:
             self.play_sound_effect(f"sounds/voices/{speaker}.mp3")
@@ -3045,6 +3062,7 @@ class GameWindow(QMainWindow):
             state.commit(selected_room)
         self.update_arrival_controls()
         self._player_entry_receipts.add(key)
+        self.weapon_aftermath.visit(("entry", *key), self.round_number, selected_room)
         if self.resolve_room_entry_items(
                 f"{self.run_id}:night:{self.round_number}:player:{len(self.rooms_visited)}:{selected_room}",
                 selected_room, {self.body_id(self.player_name)}):
@@ -3330,6 +3348,7 @@ class GameWindow(QMainWindow):
         self.finish_night()
 
     def finish_knife_attack(self, target, room):
+        self.weapon_aftermath.visit(("knife", self.round_number, self.body_id(target)), self.round_number, room)
         if room not in self.rooms_visited:
             self.rooms_visited.append(room)
         self.knife_used_bloodlust = bool(self.commit_attack(target, room, weapon_id="knife"))
@@ -3352,8 +3371,107 @@ class GameWindow(QMainWindow):
                 self.room_buttons_widget.show()
                 self.append_output_text("Watch This Drive: choose a room for one extra basic attack.")
             return
+        self.freeze_night_aftermath()
+        if (self.round_number not in self.weapon_aftermath.decided_nights
+                and self.weapon_aftermath.can_ditch((self.selected_weapon or {}).get("id"))
+                and self.weapon_aftermath.current_rooms.get(self.round_number)):
+            self.show_weapon_aftermath()
+            return
+        self.complete_night_aftermath()
+
+    def freeze_night_aftermath(self):
+        saved = self.weapon_aftermath.nights.get(self.round_number)
+        if saved is not None:
+            return saved
+        pen = next((attack for attack in self.night_attacks
+                    if attack["weapon_id"] == "pen" and attack.get("killed", True)), None)
+        note, signature = None, None
+        if pen is not None and self.pending_pen_note_text:
+            roll = random.random()
+            signature = (pen["attacker_name"] if roll < self.weapon_pen_backfire else pen["corpse_name"])
+            note = self.pending_pen_note_text
+            self.trace.record("random_outcome", {"kind": "pen_signature", "roll": roll,
+                              "threshold": self.weapon_pen_backfire, "signed_name": signature})
+        return self.weapon_aftermath.freeze(NightFacts(
+            self.round_number, (self.selected_weapon or {}).get("id", "bare"),
+            self.weapon_aftermath.current_rooms.get(self.round_number),
+            self.rooms_visited[0] if self.rooms_visited else None, note, signature,
+            self.knife_used_bloodlust))
+
+    def show_weapon_aftermath(self):
+        if self.weapon_aftermath_panel is not None:
+            return
+        night, body = self.round_number, self.body_id(self.player_name)
+        weapon_id = self.selected_weapon["id"]
+        panel = QWidget(self)
+        panel.setObjectName("weaponAftermath")
+        layout = QVBoxLayout(panel)
+        title = QLabel("Leave the weapon behind?")
+        title.setFont(self.speaker_font)
+        layout.addWidget(title)
+        hint = QLabel("You can ditch a weapon once per run. The Detective will find it in the morning.")
+        hint.setFont(readable_body_font())
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        buttons = QHBoxLayout()
+        self.keep_weapon_button = QPushButton("Keep weapon")
+        self.ditch_weapon_button = QPushButton("Ditch weapon")
+        for button in (self.keep_weapon_button, self.ditch_weapon_button):
+            button.setFont(self.speaker_font)
+            button.setStyleSheet("padding:12px 20px; border:1px solid #999; color:white; background:#111;")
+            buttons.addWidget(button)
+        self.keep_weapon_button.clicked.connect(lambda: self.choose_weapon_aftermath(night, body, weapon_id, False))
+        self.ditch_weapon_button.clicked.connect(lambda: self.choose_weapon_aftermath(night, body, weapon_id, True))
+        layout.addLayout(buttons)
+        self.weapon_aftermath_panel = panel
+        self.layout.addWidget(panel)
+        self.room_buttons_widget.hide()
+        self.weapon_action_panel.hide()
+        self.retire_weapon_editors()
+        panel.show()
+
+    def choose_weapon_aftermath(self, night, body, weapon_id, ditch):
+        if (self.phase != "action" or self.game_over or self.round_number != night
+                or self.body_id(self.player_name) != body or self.weapon_aftermath_panel is None
+                or (self.selected_weapon or {}).get("id") != weapon_id
+                or night in self.weapon_aftermath.decided_nights):
+            return
+        if ditch:
+            drop = self.weapon_aftermath.ditch(f"{self.run_id}:ditch", night, body, weapon_id,
+                                               description=OBJECT_DESCRIPTIONS[weapon_id])
+            self.body_weapons.pop(body, None)
+            self.selected_weapon = next(weapon for weapon in self.weapons if weapon["id"] == "bare")
+            self.stopwatch_selected = False
+            self.record_history(f"You ditched your {OBJECT_NAMES[weapon_id]} in the {drop.room}.", display=True)
+        self.weapon_aftermath.decided_nights.add(night)
+        panel, self.weapon_aftermath_panel = self.weapon_aftermath_panel, None
+        self.layout.removeWidget(panel)
+        panel.hide()
+        panel.deleteLater()
+        self.complete_night_aftermath()
+
+    def complete_night_aftermath(self):
         self.update_witness_memories(None)
         self.run_conversation_phase()
+
+    def process_pocket_discoveries(self):
+        if self.identity_state is None:
+            return
+        for ticket in self.weapon_aftermath.due_pockets(self.identity_state, self.body_states(), self.body_weapons):
+            if ticket.description is None:
+                continue
+            data = self.mind_data[ticket.mind_id]
+            self.remember_private(data, self.label_for_mind(ticket.mind_id), "experience",
+                PRIVATE_FINDING.format(object_name=OBJECT_NAMES[ticket.weapon_id], description=ticket.description))
+            self.weapon_aftermath.published(ticket.receipt_id)
+
+    def publish_dropped_weapon(self):
+        drop = self.weapon_aftermath.drop
+        if (drop is not None and drop.night == self.round_number and drop.description is not None
+                and not self.weapon_aftermath.is_published(drop.receipt_id)):
+            self.add_public_event(PUBLIC_FINDING.format(room=drop.room,
+                object_name=OBJECT_NAMES[drop.weapon_id], description=drop.description), display=False)
+            self.weapon_aftermath.published(drop.receipt_id)
 
     def update_witness_memories(self, victim):
         # One authoritative pass after every attack has resolved avoids contradictory alibis.
@@ -3365,7 +3483,9 @@ class GameWindow(QMainWindow):
         attacked_rooms = {attack["room"] for attack in self.night_attacks}
         attacked_rooms.update(record.room_id for record in self.item_deaths.values()
                               if record.day == self.round_number and record.room_id is not None)
-        sleep_room = self.rooms_visited[0] if self.rooms_visited else None
+        facts = self.weapon_aftermath.nights.get(self.round_number)
+        night_weapon = facts.weapon_id if facts is not None else (self.selected_weapon or {}).get("id")
+        sleep_room = facts.sleep_room if facts is not None else (self.rooms_visited[0] if self.rooms_visited else None)
         for attack in self.night_attacks:
             room = attack["room"]
             target = attack.get("target_name", attack["target_label"])
@@ -3405,7 +3525,7 @@ class GameWindow(QMainWindow):
             if attack.get("killed", True):
                 self.add_public_event(f"In the morning the Detective reveals {attack.get('corpse_name', attack['corpse_label'])}'s body was found in the {room}.")
         for room, occupants in self.room_assignments.items():
-            if room in attacked_rooms or (room == sleep_room and (self.selected_weapon or {}).get("id") == "love"):
+            if room in attacked_rooms or (room == sleep_room and night_weapon == "love"):
                 continue
             for observer in occupants:
                 if not self.characters.get(observer, {}).get("alive"):
@@ -3418,7 +3538,7 @@ class GameWindow(QMainWindow):
                 else:
                     self.remember(observer, "experience", f"You ({self.perceived_actor(observer)}) spent the night alone in the {room}.")
 
-        if (self.selected_weapon or {}).get("id") == "love":
+        if night_weapon == "love":
             self.record_history(f"You brewed a storm of passion in the {self.rooms_visited[-1]}.")
             occupants = self.room_assignments.get(self.rooms_visited[-1], [])
             for occupant in occupants:
@@ -4419,6 +4539,7 @@ class GameWindow(QMainWindow):
         self.message_log.clear()
         self.message_log.append_record(self.make_display_record(f"Morning {self.round_number}", kind="section"))
         self.publish_item_bodies()
+        self.publish_dropped_weapon()
         self.npc_items.present_morning(
             self.round_number,
             lambda description: self.add_public_event(description, source="Photograph", display=False),
@@ -4451,16 +4572,11 @@ class GameWindow(QMainWindow):
         if not self.victims_last_night and not any(
                 record.day == self.round_number for record in self.item_deaths.values()):
             self.add_public_event("The Detective informs everyone that no murder occurred last night.")
-        if ((self.selected_weapon or {}).get("id") == "pen"
-                and self.pending_pen_note_text and self.victims_last_night):
-            roll = random.random()
-            signed_name = (self.player_name if roll < self.weapon_pen_backfire
-                           else self.pen_last_victim_name or self.victims_last_night[-1])
-            self.trace.record("random_outcome", {"kind": "pen_signature", "roll": roll,
-                                                "threshold": self.weapon_pen_backfire, "signed_name": signed_name})
-            note = self.pending_pen_note_text + " - Signed: " + signed_name
+        facts = self.freeze_night_aftermath()
+        if facts.pen_note and facts.pen_signature:
+            note = facts.pen_note + " - Signed: " + facts.pen_signature
             self.add_public_event("The Detective reveals that a note was found by the body, it reads: " + note)
-        bloodlust = (self.selected_weapon or {}).get("id") == "knife" and self.knife_used_bloodlust
+        bloodlust = facts.bloodlust
         if bloodlust:
             self.add_public_event(f"The Detective points out to everyone that {self.perceived_actor(self.player_name)} is covered in blood!")
         first = self.player_name if bloodlust else random.choice(self.alive_characters)
