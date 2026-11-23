@@ -5,10 +5,11 @@ existing QTextEdit subclass keeps its input and anchor handling unchanged.
 """
 
 from dataclasses import dataclass
+from time import monotonic
 from typing import Callable, Iterable, Literal
 
-from PyQt5.QtCore import Qt, QSize, pyqtSignal
-from PyQt5.QtGui import QFont, QTextBlockFormat, QTextCharFormat, QTextCursor
+from PyQt5.QtCore import Qt, QSize, QTextBoundaryFinder, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PyQt5.QtWidgets import QHBoxLayout, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
 
@@ -49,6 +50,8 @@ class MessageLog(QWidget):
 
     unread_changed = pyqtSignal(int)
     follow_tail_changed = pyqtSignal(bool)
+    reveal_started = pyqtSignal(str)
+    reveal_finished = pyqtSignal(str)
 
     def sizeHint(self):
         return QSize(1280, super().sizeHint().height())
@@ -69,6 +72,14 @@ class MessageLog(QWidget):
         self._by_id = {}
         self._unread_count = 0
         self._rendering = False
+        self._reveal_enabled = False
+        self._revealing_id = None
+        self._reveal_positions = ()
+        self._reveal_extras = []
+        self._reveal_visible = 0
+        self._reveal_timer = QTimer(self)
+        self._reveal_timer.setInterval(16)
+        self._reveal_timer.timeout.connect(self._advance_reveal)
         bar = editor.verticalScrollBar()
         self._follow_tail = bar.maximum() - bar.value() <= 1
 
@@ -80,6 +91,13 @@ class MessageLog(QWidget):
         layout.addWidget(editor, 1)
         layout.setSpacing(4)
         editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        editor.verticalScrollBar().setStyleSheet('''
+            QScrollBar:vertical { background:transparent; width:9px; margin:2px; }
+            QScrollBar::handle:vertical { background:#4b4b4b; min-height:28px; border-radius:2px; }
+            QScrollBar::handle:vertical:hover { background:#888; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
+        ''')
         editor.document().setDocumentMargin(16)
         controls = QHBoxLayout()
         controls.addStretch()
@@ -99,6 +117,95 @@ class MessageLog(QWidget):
         bar = editor.verticalScrollBar()
         bar.valueChanged.connect(self._scroll_changed)
         bar.rangeChanged.connect(self._range_changed)
+        editor.selectionChanged.connect(self._selection_changed)
+
+    @property
+    def revealing_record_id(self):
+        return self._revealing_id
+
+    def set_reveal_enabled(self, enabled):
+        """Animate committed live speech without delaying canonical records or text."""
+        if type(enabled) is not bool:
+            raise TypeError("Speech reveal requires a boolean setting")
+        self._reveal_enabled = enabled
+        if not enabled:
+            self.finish_reveal()
+
+    def _selection_changed(self):
+        if self.editor.textCursor().hasSelection():
+            self.finish_reveal()
+
+    def _start_reveal(self, record, start, end):
+        finder = QTextBoundaryFinder(QTextBoundaryFinder.Grapheme, record.text)
+        boundaries = [start]
+        while True:
+            boundary = finder.toNextBoundary()
+            if boundary < 0:
+                break
+            boundaries.append(start + boundary)
+        if len(boundaries) <= 1:
+            return
+        self._revealing_id = record.record_id
+        self._reveal_positions = tuple(boundaries)
+        self._reveal_end = end
+        self._reveal_visible = 0
+        self._reveal_extras = self.editor.extraSelections()
+        self._reveal_started_at = monotonic()
+        self._reveal_duration = min(.9, max(.24, len(boundaries) / 550))
+        self._paint_reveal()
+        self._reveal_timer.start()
+        self.reveal_started.emit(record.record_id)
+
+    def _paint_reveal(self):
+        position = self._reveal_positions[self._reveal_visible]
+        hidden = QTextEdit.ExtraSelection()
+        hidden.cursor = QTextCursor(self.editor.document())
+        hidden.cursor.setPosition(position)
+        hidden.cursor.setPosition(self._reveal_end, QTextCursor.KeepAnchor)
+        hidden.format.setForeground(QColor(0, 0, 0, 0))
+        self.editor.setExtraSelections([*self._reveal_extras, hidden])
+        # Follow the revealed line without changing the user's actual cursor.
+        if self._follow_tail:
+            cursor = QTextCursor(self.editor.document())
+            cursor.setPosition(position)
+            rect = self.editor.cursorRect(cursor)
+            bar = self.editor.verticalScrollBar()
+            self._rendering = True
+            try:
+                if rect.top() < 0:
+                    bar.setValue(bar.value() + rect.top())
+                elif rect.bottom() > self.editor.viewport().height():
+                    bar.setValue(bar.value() + rect.bottom() - self.editor.viewport().height())
+            finally:
+                self._rendering = False
+
+    def _advance_reveal(self):
+        if self._revealing_id is None:
+            return
+        count = len(self._reveal_positions) - 1
+        progress = (monotonic() - self._reveal_started_at) / self._reveal_duration
+        self._reveal_visible = min(count, max(1, int(progress * count)))
+        if self._reveal_visible == count:
+            self.finish_reveal()
+        else:
+            self._paint_reveal()
+
+    def finish_reveal(self):
+        """Immediately expose any pending speech; safe on append, selection or clear."""
+        if self._revealing_id is None:
+            return
+        record_id, self._revealing_id = self._revealing_id, None
+        self._reveal_timer.stop()
+        self.editor.setExtraSelections(self._reveal_extras)
+        self._reveal_extras = []
+        self._reveal_positions = ()
+        if self._follow_tail:
+            self._rendering = True
+            try:
+                self.editor.verticalScrollBar().setValue(self.editor.verticalScrollBar().maximum())
+            finally:
+                self._rendering = False
+        self.reveal_finished.emit(record_id)
 
     @property
     def records(self):
@@ -132,12 +239,19 @@ class MessageLog(QWidget):
     def _scroll_changed(self, _value):
         if self._rendering:
             return
+        if self._revealing_id is not None:
+            # A deliberate scroll takes precedence over presentation animation.
+            self._set_follow_tail(self._at_tail())
+            self.finish_reveal()
         at_tail = self._at_tail()
         self._set_follow_tail(at_tail)
         if at_tail:
             self._set_unread(0)
 
     def _range_changed(self, _minimum, maximum):
+        if not self._rendering and self._revealing_id is not None:
+            self._paint_reveal()
+            return
         if not self._rendering and self._follow_tail:
             self._rendering = True
             try:
@@ -181,7 +295,8 @@ class MessageLog(QWidget):
         self._append_prepared(pending)
         return len(pending)
 
-    def _append_prepared(self, pending):
+    def _append_prepared(self, pending, *, animate=True):
+        self.finish_reveal()
         vertical = self.editor.verticalScrollBar()
         horizontal = self.editor.horizontalScrollBar()
         follow = self._at_tail()
@@ -195,7 +310,7 @@ class MessageLog(QWidget):
             cursor.movePosition(QTextCursor.End)
             cursor.beginEditBlock()
             for record, header in pending:
-                self._render_record(cursor, record, header)
+                body_range = self._render_record(cursor, record, header)
                 self._records.append(record)
                 self._by_id[record.record_id] = record
             cursor.endEditBlock()
@@ -210,6 +325,9 @@ class MessageLog(QWidget):
         finally:
             self._rendering = False
         self._set_unread(0 if follow else self._unread_count + len(pending))
+        if (animate and self._reveal_enabled and follow and not preserve_cursor
+                and len(pending) == 1 and record.kind == "speech" and body_range is not None):
+            self._start_reveal(record, *body_range)
 
     def _render_record(self, cursor, record, header):
         body = QTextCharFormat()
@@ -239,18 +357,21 @@ class MessageLog(QWidget):
             cursor.setBlockFormat(heading)
             cursor.insertText(record.speaker, header)
             cursor.insertBlock(block, body)
+        start = cursor.position()
         cursor.insertText(record.text, body)
+        return start, cursor.position()
 
     def set_records(self, records: Iterable[DisplayRecord], *, follow_tail=True):
         pending = self._prepare(records, {})
         self.clear()
-        self._append_prepared(pending)
+        self._append_prepared(pending, animate=False)
         if not follow_tail:
             self.editor.verticalScrollBar().setValue(self.editor.verticalScrollBar().minimum())
             self._set_follow_tail(self._at_tail())
             self._set_unread(0)
 
     def clear(self):
+        self.finish_reveal()
         self._rendering = True
         try:
             self.editor.clear()

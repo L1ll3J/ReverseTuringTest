@@ -55,14 +55,28 @@ class ConversationStageTests(unittest.TestCase):
         self.stage.set_participants([StageParticipant("one", "One", photo), StageParticipant("two", "Two", "missing.png")])
         self.app.processEvents()
         button = self.stage._buttons["one"]
-        before = button.grab().toImage().pixelColor(button.width() // 2, 70).lightness()
+        sample_x = button.x() + button.width() // 2
+        before = self.stage.grab().toImage().pixelColor(sample_x, button.y() + 70).lightness()
         self.stage.set_active_speaker("one")
         self.app.processEvents()
-        after = button.grab().toImage().pixelColor(button.width() // 2, 70).lightness()
+        after = self.stage.grab().toImage().pixelColor(sample_x, button.y() + 70).lightness()
         self.assertGreater(after, before)
         self.assertEqual(self.stage._buttons["two"].text(), "Two")
+        self.assertTrue(self.stage._buttons["two"].uses_fallback_art)
+        self.assertFalse(self.stage._buttons["two"].photo.isNull())
         self.assertIsNone(character_art_path("Unknown"))
         self.assertTrue(Path(character_art_path("Dave")).is_file())
+
+    def test_required_reply_notice_is_explicit_and_clears_without_replacing_cast(self):
+        self.stage.set_participants([StageParticipant("old-player-body", "John")])
+        self.stage.set_required_reply("Dave")
+        self.assertIn("Dave, you have been addressed", self.stage.reply_notice.text())
+        self.assertFalse(self.stage.reply_notice.isHidden())
+        self.assertEqual(self.stage.participants[0].body_id, "old-player-body")
+        self.stage.set_required_reply(None)
+        self.assertTrue(self.stage.reply_notice.isHidden())
+        with self.assertRaises(ValueError):
+            self.stage.set_required_reply("")
 
 if __name__ == "__main__":
     unittest.main()
