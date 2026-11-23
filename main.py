@@ -3295,6 +3295,8 @@ class GameWindow(QMainWindow):
         self.game_over = True
         self.invalidate_prepared_turn("game_over", changed=True)
         self.phase = "game_over"
+        self.message_log.setMaximumHeight(16777215)
+        self.position_corner_controls()
         self.cancel_dictation()
         self.update_inventory_button()
         won = self.player_alive and sum(data["alive"] for name, data in self.characters.items()
