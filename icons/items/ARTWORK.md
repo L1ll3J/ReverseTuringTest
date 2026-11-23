@@ -133,3 +133,97 @@ a small open ivory eye inside a warm gold sunburst, two short straight gold rays
 ```text
 a cream envelope with a small ballot corner showing one dark red X and a blue postage-stamp square, no words or other writing.
 ```
+
+## Refined artwork and utility set
+
+Generated with the built-in `image_gen` tool, one request per asset, with `transparent_background=true`. Files were copied unchanged from the generated-image directory. Four requested replacements update their existing paths; the earlier versions remain in Git history. Soul Transfusion and Occult Ritual alternatives use `_candidate` filenames and are not selected automatically. The attempted Revolver revision produced no output asset, so `revolver.png` retains its earlier version.
+
+The exact prompt for each file is the shared prefix below followed by one space and its subject text. The existing item sprite was the edit target for replacements and candidates; `presidential_decree.png` supplied a quality/style reference. Utility sprites used that decree as a style reference.
+
+```text
+Detailed, beautifully drawn 32-bit pixel-art inventory sprite for AlibAi, a warm, slightly theatrical murder-mystery game. Deliberate crisp pixel clusters, nuanced material shading and a coherent limited palette, strong readable silhouette at 64px. More crafted and evocative than a flat pictogram or toy sticker. Whole object centered on a genuinely transparent square canvas with generous consistent padding. No text, labels, diagrams, background, frame, cast shadow, glossy 3D render, soft-focus edges or photorealism.
+```
+
+
+### love_potion.png (replacement)
+
+```text
+Image 1 is the edit target. Image 2 is only a reference for the material quality and deliberate pixel detail; do not copy its subject. Replace the plain round heart bottle with a beautiful antique apothecary love potion: elegantly faceted ruby-rose glass vial, a refined curved stopper, fine warm brass collar, deep pink liquid and just a small heart motif in the glass. Rich shape and light through glass, restrained rather than cute.
+```
+
+
+### dark_whisper.png (replacement)
+
+```text
+Image 1 is the edit target. Image 2 is only a reference for the material quality and deliberate pixel detail; do not copy its subject. Replace the smiling skull speech bubble with a beautiful spectral keepsake: an open tarnished silver mourning locket, midnight-teal interior, a very faint pale human profile suggested in a thin whisper of vapor emerging from it. Wistful and mysterious, not a cartoon mascot, no happy skull or speech-bubble outline.
+```
+
+
+### throw_voice.png (replacement)
+
+```text
+Image 1 is the edit target. Image 2 is only a reference for the material quality and deliberate pixel detail; do not copy its subject. Replace the theatrical mask entirely with a compact antique brass speaking horn, gracefully flared bell, dark polished mouthpiece, and one delicate turquoise ribbon of projected voice curling from its opening. A convincing beautiful magical object for throwing one's voice, no mask or human face.
+```
+
+
+### booby_trap.png (replacement)
+
+```text
+Image 1 is the edit target. Image 2 is only a reference for the material quality and deliberate pixel detail; do not copy its subject. Replace the bear trap entirely with a fictional room-wide magical pressure trap: a squat aged dark-iron disc with warm brass edging, a sealed crimson crystal inset and restrained etched geometric inlay. A coherent ominous little floor device powerful enough to affect a room, no jaws, clamps, real explosive components or assembly drawing.
+```
+
+
+### soul_transfusion_candidate.png (candidate)
+
+```text
+Image 1 is the edit target. Image 2 is only a reference for the material quality and deliberate pixel detail; do not copy its subject. Create an alternate more evocative Soul Transfusion sprite: two small antique soul phials, one holding amber light and one teal light, with an ivory spirit-ribbon visibly passing between them. Delicate faces suggested in the colored light, refined brass necks, a beautiful singular magical artifact composition rather than generic avatar pictograms. Keep it compact and legible.
+```
+
+
+### occult_ritual_candidate.png (candidate)
+
+```text
+Image 1 is the edit target. Image 2 is only a reference for the material quality and deliberate pixel detail; do not copy its subject. Refine this ritual into a more beautiful compact occult object: three uneven violet-black wax candles with carefully drawn drips and warm tiny flames on a weathered circular metal ritual tray, restrained violet inlay and a few ash-colored details. Keep the existing candle-ring concept, improve craft and material depth, no readable runes or cartoon sparkles.
+```
+
+
+### lucky_match.png (new)
+
+```text
+Subject: An old brass matchbox with one single partly charred wooden match resting across it, a small warm golden flame and a discreet lucky green enamel detail. An elegant small keepsake that restores a chance.
+```
+
+
+### deep_pockets.png (new)
+
+```text
+Subject: A richly shaded worn walnut-brown leather satchel with two distinct generous front pockets, brass clasps and a folded ivory lining visible at the rim. Compact and tactile, no floating loot.
+```
+
+
+### pocket_gavel.png (new)
+
+```text
+Subject: A miniature polished dark-walnut judge's gavel with a narrow brass band, resting diagonally over its small matching sound block. Thoughtfully shaped wood and warm restrained highlights.
+```
+
+
+### listening_glass.png (new)
+
+```text
+Subject: An antique cut-crystal listening glass tilted on its side, finely shaded smoky blue glass with a silver rim, a single faint teal whisper curling within it. A beautiful small divining object, not a speech-bubble pictogram.
+```
+
+
+### stay_of_execution.png (new)
+
+```text
+Subject: A folded ivory court writ held by a deep blue wax seal with a small silver shield-shaped clasp, a short restrained dark-blue ribbon. Distinct from a royal proclamation, no legible writing.
+```
+
+
+### room_reservation.png (new)
+
+```text
+Subject: A charming old brass house-room key with a long shaped bow and a blank muted-plum enamel tag, one small ivory door-shaped inlay on the tag, no numbers or writing.
+```
