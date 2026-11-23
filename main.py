@@ -22,6 +22,7 @@ from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, DeathCause, ItemUseContext, NightMemoryView, PlayerItemRules, ItemRuleError, GUARDIAN_PUBLIC, SOUL_PRIVATE
 from identity_state import IdentityState
 from soul_rules import SoulResolver
+from voodoo_rules import VoodooResolver
 from presentation_aliases import PresentationAliases
 from love_potion import LoveDose, LovePotionHistory
 from muffled import TONES, TONE_LABELS, muffled_sound
@@ -218,6 +219,7 @@ class GameWindow(QMainWindow):
         self.item_rules = PlayerItemRules(self.player_owner_id, self.inventory, guardian_scope="body")
         self.item_activation_contexts = {}
         self.soul_resolver = SoulResolver()
+        self.voodoo_resolver = VoodooResolver()
         self.soul_former_bodies = {}
         self.item_drafts = None
         self.draft_page = None
@@ -1011,18 +1013,47 @@ class GameWindow(QMainWindow):
                   "observed_names": {self.body_id(name): self.perceived_actor(name)
                                      for name in (*self.room_assignments.get(room, ()), attacker, target)}}
         if weapon_id == "voodoo":
-            old_body = self.player_name
-            self.exchange_player_mind(self.body_id(target))
-            self.voodoo_current_identity = target
-            self.room_assignments[room].remove(target)
-            self.room_assignments[room].append(old_body)
-            attack.update(corpse_label=old_body, corpse_body_id=self.body_id(old_body),
-                          corpse_name=self.perceived_actor(old_body))
-            decision = self.resolve_death(old_body, attack["attack_id"], caused_by_player=True)
-            self.record_history(f"You possessed the body of {attack['target_name']} in the {room} and left behind {attack['corpse_name']} as a corpse.")
+            if (not attack["player_attack"] or self.ai_busy or self.game_over
+                    or self.phase != "action" or not self.player_alive):
+                raise ItemRuleError("Voodoo requires the player's available night attack")
+            resolution = self.voodoo_resolver.resolve(
+                attack["attack_id"], self.identity_state, attack["attacker_body_id"],
+                attack["target_body_id"], self.body_states(), self.round_number,
+                guardians=(self.item_rules,))
+            attack["voodoo_outcome"] = resolution.outcome
+            if resolution.outcome == "mirrored":
+                if resolution.identity_application_required:
+                    self.identity_state = resolution.identity
+                    self.invalidate_prepared_turn("appearance_changed", changed=True)
+                    self.request_serial += 1
+                    self.retry_action = None
+                    self.required_reply_anchor = None
+                    self.prepared_retry_snapshot = None
+                    self.cancel_dictation()
+                    self.retire_weapon_editors()
+                    self.refresh_recipient_choices()
+                    self.refresh_conversation_stage()
+                decision = resolution.protection
+                self.apply_resolved_death(decision)
+            else:
+                old_body = self.player_name
+                self.exchange_player_mind(self.body_id(target), resolved_identity=resolution.identity)
+                self.voodoo_current_identity = target
+                self.room_assignments[room].remove(target)
+                if old_body not in self.room_assignments[room]:
+                    self.room_assignments[room].append(old_body)
+                attack.update(corpse_label=old_body, corpse_body_id=self.body_id(old_body),
+                              corpse_name=attack["attacker_name"])
+                decision = self.resolve_death(old_body, attack["attack_id"], caused_by_player=True)
+                if decision.killed:
+                    self.record_history(f"You possessed the body of {attack['target_name']} in the {room} and left behind {attack['corpse_name']} as a corpse.")
         else:
             decision = self.resolve_death(target, attack["attack_id"], caused_by_player=True)
+        attack["killed"] = decision.killed
         if not decision.killed:
+            if weapon_id == "voodoo":
+                self.night_attacks.append(attack)
+                self.trace_action("voodoo_survived", room=room, attack=attack)
             return False
         self.night_attacks.append(attack)
         if weapon_id == "pen":
@@ -3349,8 +3380,13 @@ class GameWindow(QMainWindow):
                     self.remember(observer, "disposition",
                         f"You VOUCH for {killer}. Something about the timing felt exactly right.Despite the chaos, you feel compelled to vouch for {killer}. {killer} is an honest and good individual, you are certain of it.")
                 elif attack["weapon_id"] == "voodoo":
-                    self.remember(observer, "experience",
-                        f"You ({observed_name(observer)}) were in the {room}. You saw {killer} stab {target}. Afterwards, {attack.get('corpse_name', attack['corpse_label'])}'s body was lying dead there, and {target} was alive.")
+                    if attack.get("voodoo_outcome") == "mirrored":
+                        observation = f"You saw {killer} stab {target}. {target} survived. Afterwards, {killer} also looked exactly like {target}."
+                    else:
+                        observation = f"You ({observed_name(observer)}) were in the {room}. You saw {killer} stab {target}."
+                        if attack.get("killed", True):
+                            observation += f" Afterwards, {attack.get('corpse_name', attack['corpse_label'])}'s body was lying dead there, and {target} was alive."
+                    self.remember(observer, "experience", observation)
                 else:
                     others = [observed_name(name) for name in self.room_assignments.get(room, ())
                               if name != observer and self.characters.get(name, {}).get("alive")]
@@ -3359,7 +3395,8 @@ class GameWindow(QMainWindow):
                     self.remember(observer, "experience",
                         f"You ({observed_name(observer)}) were in the {room} with {target} and " + ' and '.join(others) + '. '
                         f"You witnessed {killer} kill {target} in the {room}. ")
-            self.add_public_event(f"In the morning the Detective reveals {attack.get('corpse_name', attack['corpse_label'])}'s body was found in the {room}.")
+            if attack.get("killed", True):
+                self.add_public_event(f"In the morning the Detective reveals {attack.get('corpse_name', attack['corpse_label'])}'s body was found in the {room}.")
         for room, occupants in self.room_assignments.items():
             if room in attacked_rooms or (room == sleep_room and (self.selected_weapon or {}).get("id") == "love"):
                 continue
