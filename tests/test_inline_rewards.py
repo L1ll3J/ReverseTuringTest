@@ -150,7 +150,7 @@ class InlineRewardsTests(unittest.TestCase):
             self.assertEqual(name.font().pixelSize(), 14)
             self.assertEqual(sprite.accessibleName(), definitions[item_id].name)
             self.assertFalse(sprite.pixmap().isNull())
-            self.assertEqual(sprite.width(), 128)
+            self.assertEqual(sprite.width(), 160)
             self.assertEqual(page.take_buttons[slot].accessibleName(), "Take " + definitions[item_id].name)
             self.assertEqual(page.reroll_buttons[slot].accessibleName(), "Reroll " + definitions[item_id].name)
         for button in page.findChildren(QPushButton):

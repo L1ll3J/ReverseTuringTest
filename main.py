@@ -30,7 +30,7 @@ from love_potion import LoveDose, LovePotionHistory
 from muffled import TONES, TONE_LABELS, muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
-from item_ui import InlineItemDraftPage, InventoryPage, GameComboBox
+from item_ui import InlineItemDraftPage, InventoryPage, GameComboBox, ITEM_SCROLLBAR_STYLE
 from item_catalogue_ui import ItemCataloguePanel
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea, QStyle, QStyleOptionButton
@@ -2479,19 +2479,14 @@ class GameWindow(QMainWindow):
             if w:
                 w.deleteLater()
 
-        available_width = max(240, self.centralWidget().width() - 60)
-        columns = max(1, min(4, available_width // 300))
-        card_w = min(320, (available_width - 16 * (columns - 1)) // columns)
-        card_h = 420
-        icon_sz = min(200, card_w - 32)
+        self.weapon_cards = []
+        icon_sz = 180
 
-        for i, wpn in enumerate(self.weapons):
-            row = i // columns
-            col = i % columns
+        for wpn in self.weapons:
             unlocked = wpn["id"] in available_content(self.profile, "weapon")
 
             card = QFrame(self.weapon_picker_widget)
-            card.setFixedSize(QSize(card_w, card_h))
+            card.setProperty("weapon_id", wpn["id"])
             card.setCursor(Qt.PointingHandCursor)
             card.setFocusPolicy(Qt.NoFocus)
             card.setObjectName("weaponCard")
@@ -2508,11 +2503,12 @@ class GameWindow(QMainWindow):
             """ if unlocked else ""))
 
             v = QVBoxLayout(card)
-            v.setContentsMargins(10, 10, 10, 10)
-            v.setSpacing(8)
+            v.setContentsMargins(16, 16, 16, 16)
+            v.setSpacing(12)
 
             # --- Image ---
             img = QLabel(card)
+            img.setObjectName(f"weaponIcon_{wpn['id']}")
             img.setAlignment(Qt.AlignCenter)
             img.setFocusPolicy(Qt.NoFocus)
             img.setStyleSheet("border: none; background: transparent;")  # no outline
@@ -2520,12 +2516,16 @@ class GameWindow(QMainWindow):
             if pix.isNull():
                 ph = QPixmap(icon_sz, icon_sz); ph.fill(Qt.transparent); pix = ph
             img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.FastTransformation))
+            card.weapon_pixmap = pix
             # Make child transparent to mouse so the FRAME gets hover/click even over the image
             img.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             v.addWidget(img, alignment=Qt.AlignHCenter)
 
             # --- Name ---
             name = QLabel(wpn["name"], card)
+            name.setObjectName(f"weaponName_{wpn['id']}")
+            name.setWordWrap(True)
+            name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             name.setAlignment(Qt.AlignHCenter)
             name.setFocusPolicy(Qt.NoFocus)
             name.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {'white' if unlocked else '#888'}; border: none; background: transparent;")
@@ -2537,6 +2537,7 @@ class GameWindow(QMainWindow):
             if not unlocked:
                 description += "\n\nLocked: " + UNLOCK_GOALS[wpn["id"]]
             desc = QLabel(description, card)
+            desc.setObjectName(f"weaponDescription_{wpn['id']}")
             desc.setWordWrap(True)
             desc.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
             desc.setFocusPolicy(Qt.NoFocus)
@@ -2553,9 +2554,41 @@ class GameWindow(QMainWindow):
                 card.setCursor(Qt.ArrowCursor)
             card.mousePressEvent = _click_handler
 
-            self.weapon_grid.addWidget(card, row, col)
+            self.weapon_cards.append(card)
 
         self.weapon_scroll.show()
+        self.weapon_scroll.setStyleSheet(ITEM_SCROLLBAR_STYLE)
+        self.resize_weapon_cards()
+
+    def resize_weapon_cards(self):
+        """Fit every wrapped field before assigning a common row height."""
+        cards = getattr(self, "weapon_cards", ())
+        if self.phase != "weapon_select" or not cards:
+            return
+        available_width = max(220, self.centralWidget().width() - 60)
+        columns = max(1, min(4, available_width // 300))
+        spacing = self.weapon_grid.spacing()
+        card_width = min(340, (available_width - spacing * (columns - 1)) // columns)
+        icon_size = min(180, card_width - 48)
+        heights = []
+        for card in cards:
+            card.ensurePolished()
+            icon = card.findChild(QLabel, f"weaponIcon_{card.property('weapon_id')}")
+            icon.setPixmap(card.weapon_pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.FastTransformation))
+            layout = card.layout()
+            margins = layout.contentsMargins()
+            text_width = card_width - margins.left() - margins.right() - 2
+            fields = [layout.itemAt(index).widget() for index in range(layout.count())]
+            height = sum(field.heightForWidth(text_width) if field.hasHeightForWidth()
+                         else field.sizeHint().height() for field in fields)
+            heights.append(height + margins.top() + margins.bottom()
+                           + layout.spacing() * (len(fields) - 1) + 4)
+        card_height = max(400, *heights)
+        while self.weapon_grid.count():
+            self.weapon_grid.takeAt(0)
+        for index, card in enumerate(cards):
+            card.setFixedSize(card_width, card_height)
+            self.weapon_grid.addWidget(card, index // columns, index % columns)
 
 
     def select_weapon_and_start(self, weapon):
