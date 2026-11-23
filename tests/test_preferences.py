@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PyQt5.QtCore import QSettings
 
 from preferences import Preferences
+from input_bindings import InputBinding
+from PyQt5.QtCore import Qt
 
 
 class PreferencesTests(unittest.TestCase):
@@ -26,6 +28,7 @@ class PreferencesTests(unittest.TestCase):
     def test_missing_preferences_read_does_not_create_file(self):
         preferences = Preferences()
         self.assertEqual(preferences.last_player_name(), "")
+        self.assertEqual(preferences.dictation_binding(), InputBinding())
         self.assertFalse(self.path.exists())
 
     def test_literal_name_roundtrips_and_preserves_unrelated_keys(self):
@@ -54,6 +57,42 @@ class PreferencesTests(unittest.TestCase):
         preferences = Preferences(path=self.directory.name)
         self.assertFalse(preferences.save_player_name("Alex"))
         self.assertTrue(Path(self.directory.name).is_dir())
+
+    def test_binding_roundtrips_preserve_name_and_unknown_settings(self):
+        preferences = Preferences()
+        self.assertTrue(preferences.save_player_name("Adad O'Connor"))
+        preferences.settings.setValue("future/option", "retained")
+        preferences.settings.sync()
+        for binding in (InputBinding.for_key(Qt.Key_PageUp), InputBinding.for_mouse("mouse4"), InputBinding()):
+            self.assertTrue(preferences.save_dictation_binding(binding))
+            reopened = Preferences()
+            self.assertEqual(reopened.dictation_binding(), binding)
+            self.assertEqual(reopened.last_player_name(), "Adad O'Connor")
+            self.assertEqual(reopened.settings.value("future/option"), "retained")
+
+    def test_bad_or_future_binding_falls_back_without_rewriting_the_raw_value(self):
+        preferences = Preferences()
+        raw = '{"version":9,"kind":"future","data":"keep"}'
+        preferences.settings.setValue("input/dictation_binding", raw)
+        preferences.settings.setValue("future/option", "retained")
+        preferences.settings.sync()
+        before = self.path.read_bytes()
+        self.assertEqual(preferences.dictation_binding(), InputBinding())
+        self.assertEqual(preferences.settings.value("input/dictation_binding"), raw)
+        self.assertEqual(self.path.read_bytes(), before)
+        with self.assertRaises(TypeError):
+            preferences.save_dictation_binding("PgUp")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_failed_binding_save_can_retry_after_the_path_is_repaired(self):
+        self.path.mkdir()
+        preferences = Preferences()
+        binding = InputBinding.for_mouse("mouse5")
+        self.assertFalse(preferences.save_dictation_binding(binding))
+        self.assertEqual(preferences.dictation_binding(), InputBinding())
+        self.path.rmdir()
+        self.assertTrue(preferences.save_dictation_binding(binding))
+        self.assertEqual(Preferences().dictation_binding(), binding)
 
 
 if __name__ == "__main__":
