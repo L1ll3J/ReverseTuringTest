@@ -35,9 +35,7 @@ from PyQt5.QtGui import QColor, QTextCursor, QTextCharFormat, QFontDatabase, QFo
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 # Mechanics are integrated separately from approval of NPC-facing narration.
-OPTIONAL_ITEM_NARRATION_PENDING = frozenset({
-    "revolver",
-})
+OPTIONAL_ITEM_NARRATION_PENDING = frozenset()
 
 
 @dataclass(frozen=True)
@@ -810,6 +808,8 @@ class GameWindow(QMainWindow):
             personal_data, personal_handle = self.personal_event_recipient(event)
             if event.event_id in self.applied_item_events:
                 continue
+            if event.public_text:
+                self.add_public_event(event.public_text, source="Observed event")
             if event.event_type == "soul_exchange_requested":
                 self.apply_soul_exchange(event)
             if event.death_decision is not None:
@@ -833,8 +833,6 @@ class GameWindow(QMainWindow):
             self.applied_item_events.add(event.event_id)
             self.trace.record("item_effect", {"event": event})
             recipient = self.label_for_body(event.target_body_id)
-            if event.public_text:
-                self.add_public_event(event.public_text, source="Observed event")
             if personal_data is not None:
                 if event.private_text:
                     self.remember_private(personal_data, personal_handle, "experience", event.private_text)

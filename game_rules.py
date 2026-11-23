@@ -623,7 +623,9 @@ class PlayerItemRules:
                 self.owner_id if loser.body_id == actor.body_id else None, cause=cause,
                 caused_by_owner_id=self.owner_id, phase=context.phase)
             effect = self._event("immediate_death_resolved", context.day, **values,
-                                 subject_body_id=loser.body_id, death_decision=decision)
+                                 subject_body_id=loser.body_id, death_decision=decision,
+                                 public_text=(f"{actor.perceived_name} fires a revolver at {target.perceived_name}."
+                                              if entry.item_id == "revolver" else None))
             consequences = decision.events
         else:
             raise AssertionError("A registered item has no effect implementation")

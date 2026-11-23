@@ -311,7 +311,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.phase, "weapon_select")
         self.assertIsNone(self.window.selected_weapon)
 
-    def test_new_run_filters_unready_rewards_without_changing_earned_unlocks_or_preferences(self):
+    def test_new_run_includes_ready_rewards_without_changing_earned_unlocks_or_preferences(self):
         store = self.window.profile_store
         for sequence, event_type in enumerate(("three_kills_one_run", "survived_spare_paper_vote",
                                                 "marked_kill_completed"), 1):
@@ -326,12 +326,11 @@ class ItemIntegrationTests(unittest.TestCase):
             next_window.start_game()
             next_window.select_weapon_and_start(next(weapon for weapon in next_window.weapons
                                                      if weapon["id"] == "bare"))
-            self.assertNotIn("revolver", next_window.run_item_pool)
+            self.assertIn("revolver", next_window.run_item_pool)
             self.assertNotIn("booby_trap", next_window.run_item_pool)
             self.assertIn("presidential_decree", next_window.run_item_pool)
             self.assertEqual(next_window.item_drafts.eligible_item_ids, next_window.run_item_pool)
-            with patch.object(next_window.item_drafts._rng, "sample", side_effect=lambda population, count:
-                              sorted(population, key=lambda item: item != "presidential_decree")[:count]):
+            with patch.object(next_window.item_drafts._rng, "random", return_value=.99):
                 next_window.choose_room("Attic")
             offer = next_window.item_drafts.pending_offer
             self.assertIsNotNone(offer)
@@ -1775,27 +1774,22 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.run_player_kills, 2)
         self.assertEqual(self.window.items_used, 2)
 
-    def test_all_death_items_stay_unavailable_before_rule_execution(self):
+    def test_revolver_is_enabled_and_publishes_a_shot_before_guardian_survival(self):
         self.conversation()
-        entries = [self.window.inventory.grant(item_id)
-                   for item_id in ("revolver",)]
-        self.window.open_inventory()
-        with patch.object(self.window.item_rules, "use_item", side_effect=AssertionError("Unavailable item")):
-            for entry in entries:
-                with self.subTest(item_id=entry.item_id):
-                    self.assertFalse(self.window.inventory_page.use_buttons[entry.instance_id].isEnabled())
-                    self.assertFalse(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
-                    self.assertIn(entry, self.window.inventory.entries)
-        self.assertTrue(all(body.alive for body in self.window.body_states()))
-        self.assertEqual(self.window.items_used, 0)
-
-    def test_optional_unfinished_use_is_explicitly_blocked_without_consuming(self):
-        self.conversation()
-        entry = self.use_card("revolver", "Dave")
-        self.assertIn(entry, self.window.inventory.entries)
-        self.assertFalse(self.window.inventory_page.use_buttons[entry.instance_id].isEnabled())
-        self.assertFalse(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
-        self.assertTrue(self.window.characters["Dave"]["alive"])
+        self.give("guardian_angel")
+        entry = self.window.inventory.grant("revolver")
+        target = self.window.body_id(self.window.player_name)
+        self.assertTrue(self.window.use_inventory_item(entry.instance_id, target, activation_id="protected-shot"))
+        self.assertTrue(self.window.player_alive)
+        texts = [event.text for event in self.window.public_events]
+        shot = "Alex fires a revolver at Alex."
+        survival = "Against all expectation, Alex survives."
+        self.assertLess(texts.index(shot), texts.index(survival))
+        self.assertTrue(self.window.use_inventory_item(entry.instance_id, target, activation_id="protected-shot"))
+        texts = [event.text for event in self.window.public_events]
+        self.assertEqual(texts.count(shot), 1)
+        self.assertEqual(texts.count(survival), 1)
+        self.assertEqual(self.window.items_used, 2)
 
     def arm_optional(self, item_id, target=None, room=None):
         entry = self.window.inventory.grant(item_id)
@@ -1853,17 +1847,19 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.run_player_kills, 1)
         self.assertEqual(self.window.items_used, 3)
 
-    def test_known_revolver_activation_cannot_bypass_pending_narration_gate(self):
+    def test_cached_revolver_activation_recovers_one_shot_and_one_death(self):
         self.conversation()
         target = self.window.body_id("Dave")
         entry = self.window.inventory.grant("revolver")
         self.window.item_rules.use_item(entry.instance_id, self.window.item_use_context(), target,
-                                       activation_id="pending-shot")
-        self.assertNotIn(entry, self.window.inventory.entries)
-        with patch.object(self.window.item_rules, "use_item", side_effect=AssertionError("Gate must precede replay")):
-            self.assertFalse(self.window.use_inventory_item(entry.instance_id, target, activation_id="pending-shot"))
+                                       activation_id="lost-shot")
         self.assertTrue(self.window.characters["Dave"]["alive"])
-        self.assertEqual(self.window.items_used, 0)
+        for _ in range(2):
+            self.assertTrue(self.window.use_inventory_item(entry.instance_id, target, activation_id="lost-shot"))
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertEqual(self.window.items_used, 1)
+        self.assertEqual(self.window.run_player_kills, 1)
+        self.assertEqual(sum(event.text == "Alex fires a revolver at Dave." for event in self.window.public_events), 1)
 
     def test_lost_first_entry_result_recovers_guardian_note_bonus_and_death_once(self):
         self.conversation()
@@ -2084,14 +2080,8 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertFalse(any("Dave" in names for names in self.window.room_assignments.values()))
         self.assertEqual(self.window.run_player_kills, 1)
 
-    def test_narration_gate_blocks_revolver_without_consumption(self):
-        self.conversation()
-        self.assertEqual(game.OPTIONAL_ITEM_NARRATION_PENDING, {"revolver"})
-        for item_id in game.OPTIONAL_ITEM_NARRATION_PENDING:
-            entry = self.window.inventory.grant(item_id)
-            with patch.object(self.window.item_rules, "use_item", side_effect=AssertionError("Gate required")):
-                self.assertFalse(self.window.use_inventory_item(entry.instance_id))
-            self.assertIn(entry, self.window.inventory.entries)
+    def test_all_registered_items_have_approved_runtime_narration(self):
+        self.assertFalse(game.OPTIONAL_ITEM_NARRATION_PENDING)
 
     def test_enabled_gambles_update_canonical_context_without_new_npc_prose(self):
         self.conversation()
