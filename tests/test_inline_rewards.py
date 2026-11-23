@@ -183,6 +183,17 @@ class InlineRewardsTests(unittest.TestCase):
         QTest.keyClick(reroll, Qt.Key_Space)
         self.reroll.assert_called_once_with(self.offer.offer_id, 0)
 
+    def test_flavour_is_separate_literal_text_and_does_not_replace_effects(self):
+        definition = ItemDefinition("banana", "Banana", "Actual effect.", "self", True,
+                                    flavour="A <b>literal</b> flavour & aside.")
+        page = self.page(definitions=dict(ITEM_CATALOGUE, banana=definition))
+        self.assertEqual(page.findChild(QLabel, "inlineItemDescription_0").text(), "Actual effect.")
+        flavour = page.findChild(QLabel, "inlineItemFlavour_0")
+        self.assertEqual(flavour.text(), definition.flavour)
+        self.assertEqual(flavour.textFormat(), Qt.PlainText)
+        self.assertEqual(flavour.font().pixelSize(), 18)
+        self.assertIsNone(page.findChild(QLabel, "inlineItemFlavour_1"))
+
     def test_small_host_scrolls_all_controls_and_wraps_long_descriptions(self):
         definitions = dict(ITEM_CATALOGUE)
         definitions["banana"] = ItemDefinition("banana", "Banana of Friendship", "Readable description. " * 30, "living_npc", True)

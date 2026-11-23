@@ -2,7 +2,7 @@
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from item_ui import item_sprite
 from progression import ProfileError
@@ -43,6 +43,7 @@ class ItemCataloguePanel(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self.scroll, 1)
         self.refresh(profile)
 
@@ -55,6 +56,8 @@ class ItemCataloguePanel(QWidget):
         label.setTextFormat(Qt.PlainText)
         label.setFont(self._body_font)
         label.setWordWrap(True)
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         return label
 
     def refresh(self, profile):
@@ -84,7 +87,13 @@ class ItemCataloguePanel(QWidget):
             name_font.setBold(True)
             name.setFont(name_font)
             details.addWidget(name)
-            details.addWidget(self._label(definition.description))
+            description = self._label(definition.description)
+            description.setObjectName(f"itemDescription_{item_id}")
+            details.addWidget(description)
+            if definition.flavour:
+                flavour = self._label(definition.flavour)
+                flavour.setObjectName(f"itemFlavour_{item_id}")
+                details.addWidget(flavour)
             unlocked = definition.default or item_id in profile.unlocked
             status = "Default - always included" if definition.default else "Unlocked" if unlocked else "Locked"
             status_label = self._label(status)

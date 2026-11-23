@@ -122,6 +122,18 @@ class InventoryPageTests(unittest.TestCase):
         self.assertEqual(box.currentData(), "body-hank")
         self.assertFalse(box.view().isVisible())
 
+    def test_flavour_is_literal_and_never_replaces_the_effect(self):
+        definition = ItemDefinition("banana", "Banana", "Actual effect.", "self", True,
+                                    flavour="A <b>literal</b> flavour & aside.")
+        page = self.page((InventoryEntry("one", "banana"),), definitions={"banana": definition})
+        self.assertEqual(page.findChild(QLabel, "inventoryDescription_one").text(), "Actual effect.")
+        flavour = page.findChild(QLabel, "inventoryFlavour_one")
+        self.assertEqual(flavour.text(), definition.flavour)
+        self.assertEqual(flavour.textFormat(), Qt.PlainText)
+        self.assertEqual(flavour.font().pixelSize(), 18)
+        page.use_buttons["one"].click()
+        self.use.assert_called_once_with("one", None)
+
     def test_empty_inventory_has_only_contextual_empty_state(self):
         page = self.page()
         self.assertEqual(page.findChild(QLabel, "inventoryEmpty").text(), "Your inventory is empty.")

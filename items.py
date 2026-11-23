@@ -20,6 +20,7 @@ class ItemDefinition:
     default: bool
     requires_message: bool = False
     reusable: bool = False
+    flavour: str = ""
 
 
 ITEM_CATALOGUE = MappingProxyType({
@@ -54,7 +55,7 @@ ITEM_CATALOGUE = MappingProxyType({
     "love_potion": ItemDefinition(
         "love_potion", "Love Potion",
         "Make a living suspect adore you for this discussion. Their devotion becomes bitterness next discussion.",
-        "living_npc", True,
+        "living_npc", True, flavour="Sweet on the tongue. Bitter by morning.",
     ),
     "forged_note": ItemDefinition(
         "forged_note", "Forged Note", "Prepare a signed note for the body of your next victim.",
@@ -62,15 +63,15 @@ ITEM_CATALOGUE = MappingProxyType({
     ),
     "divine_revelation": ItemDefinition(
         "divine_revelation", "Divine Revelation", "Send a private message that seems to come from a higher power.",
-        "living_npc", True, requires_message=True,
+        "living_npc", True, requires_message=True, flavour="Funny how the heavens agree with you.",
     ),
     "mail_in_ballot": ItemDefinition(
         "mail_in_ballot", "Mail-in Ballot", "Choose a suspect whose ballot you will cast this round.",
         "living_npc", True,
     ),
     "watch_this_drive": ItemDefinition(
-        "watch_this_drive", "Watch This Drive", "Mark a suspect. Kill their body next night to earn one extra action.",
-        "living_npc", True,
+        "watch_this_drive", "Watch This Drive", "Mark a suspect. Kill them next night to earn one extra basic room attack.",
+        "living_npc", True, flavour="One good murder deserves another.",
     ),
     "lucky_match": ItemDefinition(
         "lucky_match", "Lucky Match", "Gain one extra single-slot reroll for this run.", "self", True,
@@ -97,6 +98,7 @@ ITEM_CATALOGUE = MappingProxyType({
     "lucky_coin": ItemDefinition(
         "lucky_coin", "(Un)Lucky Coin", "Flip between your death and a chosen living body's death. Reusable.",
         "living_body", False, reusable=True,
+        flavour="A little weight in the hand. A great deal hanging in the balance.",
     ),
     "spin_the_dagger": ItemDefinition(
         "spin_the_dagger", "Spin the Dagger", "Strike a random living person, possibly yourself.", "self", False,

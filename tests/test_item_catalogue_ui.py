@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton, QWidge
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS
 from item_catalogue_ui import ItemCataloguePanel
 from item_ui import InventoryPage, ItemDraftDialog
-from items import ITEM_CATALOGUE, DraftOffer, InventoryEntry
+from items import ITEM_CATALOGUE, DraftOffer, InventoryEntry, ItemDefinition
 from progression import ProfileError, ProfileSnapshot, ProfileStore, ProgressEvent
 
 
@@ -103,6 +103,24 @@ class ItemCatalogueTests(unittest.TestCase):
         panel.refresh(ProfileSnapshot())
         self.assertFalse(panel.checkboxes)
         self.assertEqual(self.callback.call_count, 1)
+
+    def test_flavour_keeps_effect_text_and_refresh_does_not_duplicate_it(self):
+        panel = self.panel()
+        panel.refresh(ProfileSnapshot())
+        for item_id, item in ITEM_CATALOGUE.items():
+            self.assertEqual(panel.findChild(QLabel, f"itemDescription_{item_id}").text(), item.description)
+            labels = panel.findChildren(QLabel, f"itemFlavour_{item_id}")
+            if item.flavour:
+                self.assertEqual(len(labels), 1)
+                self.assertEqual(labels[0].text(), item.flavour)
+                self.assertEqual(labels[0].textFormat(), Qt.PlainText)
+            else:
+                self.assertEqual(labels, [])
+        self.assertEqual(ITEM_CATALOGUE["love_potion"].flavour, "Sweet on the tongue. Bitter by morning.")
+        self.assertEqual(ITEM_CATALOGUE["lucky_coin"].flavour,
+                         "A little weight in the hand. A great deal hanging in the balance.")
+        self.assertEqual(ItemDefinition("id", "Name", "Effect", "self", True, True, True).flavour, "")
+        self.callback.assert_not_called()
 
     def test_profile_error_rolls_back_without_retrying_or_losing_snapshot(self):
         profile = ProfileSnapshot(unlocked={"guardian_angel"}, disabled_items={"guardian_angel"})

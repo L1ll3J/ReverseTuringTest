@@ -248,3 +248,15 @@ Source: `C:/Users/Josh/.codex/generated_images/01a2048b-9a4a-7631-b641-942c692ef
 ```text
 Use case: precise-object-edit. Refine this Love Potion inventory sprite into a more ominous, less sweet magical object while preserving its beautifully drawn faceted glass vial, coherent silhouette, centered composition and transparent background. Shift bright candy pink glass toward deep ruby-wine and muted plum, with dark crimson liquid, restrained warm light through the facets and aged brass rather than shiny cheerful gold. Remove the obvious heart emblem and replace it with a subtle intertwined ornamental motif in the brass collar. Keep the item elegant, tactile and evocative, with deliberate crisp pixel clusters and readability at64px. This is an instantly targeted magical charm in the game: show only the potion object, with no throwing, spraying, drinking figure or delivery animation. No skull, cute face, cartoon sparkles, text, scene, frame or opaque background.
 ```
+
+## Watch This Drive material revision
+
+Generated with the built-in image_gen tool using transparent_background=true. The returned PNG was copied unchanged over the previously criticised sprite; its predecessor remains in Git history. Image 1 was the existing Watch This Drive target; image 2 was lucky_coin.png, used only as a material-quality reference. No other sprite changed.
+
+Source: `C:/Users/Josh/.codex/generated_images/01a2048b-9a4a-7631-b641-942c692efb20/exec-5a9809de-0b7f-4485-81be-14f55bf4b968.png`
+
+Exact prompt:
+
+```text
+Use case: precise-object-edit. Asset type: a single inventory sprite for AlibAi, an eerie, dryly funny pixel-art murder game. Image 1 is the Watch This Drive edit target; Image 2 is only a material, shading and pixel-cluster quality reference, not an object to reproduce. Replace the flat target/arrow/chequered-flag pictogram with a beautifully crafted compact physical mark: a small worn dark-brass bullseye medallion with muted oxblood enamel rings, pierced diagonally by one short antique brass dart. Remove the chequered racing flag completely. Keep the semantic idea of selecting a target and following through, without adding any new game mechanic. Give the object a convincing rim, tactile tarnished metal, clean dart silhouette and deliberate square pixel clusters comparable in craft to the reference coin. The medallion should remain the clear main shape, with a strong readable silhouette at 64px. Restrained warm brass, deep red, charcoal and ivory highlights, no glowing interface symbol, candy red plastic, glossy 3D, smooth gradients, cute cartoon face or giant featureless blocks. Exactly one isolated sprite, whole object visible, centered on a square canvas with comfortable transparent padding. No scene, text, letters, frame, logo or cast shadow. Preserve a genuinely transparent background.
+```

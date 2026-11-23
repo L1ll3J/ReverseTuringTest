@@ -193,6 +193,10 @@ class InventoryPage(QWidget):
             detail = self._label(definition.description, self._body_font)
             detail.setObjectName(f"inventoryDescription_{entry.instance_id}")
             text.addWidget(detail)
+            if definition.flavour:
+                flavour = self._label(definition.flavour, self._body_font)
+                flavour.setObjectName(f"inventoryFlavour_{entry.instance_id}")
+                text.addWidget(flavour)
             description.addLayout(text, 1)
             row.addLayout(description)
             controls = QHBoxLayout()
@@ -377,6 +381,10 @@ class InlineItemDraftPage(QWidget):
             detail = self._label(definition.description, self._body_font)
             detail.setObjectName(f"inlineItemDescription_{slot}")
             text.addWidget(detail)
+            if definition.flavour:
+                flavour = self._label(definition.flavour, self._body_font)
+                flavour.setObjectName(f"inlineItemFlavour_{slot}")
+                text.addWidget(flavour)
             description.addLayout(text, 1)
             row.addLayout(description)
             controls = QHBoxLayout()
