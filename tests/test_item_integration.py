@@ -1556,18 +1556,63 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.characters["Dave"]["alive"])
         self.assertEqual(self.window.run_player_kills, 0)
 
-    def test_cached_prevention_then_original_applies_nested_events_once(self):
+    def test_cached_prevention_recovers_lost_first_application_events_once(self):
         self.conversation()
         self.give("guardian_angel")
         target = next(body for body in self.window.body_states() if body.label == "Alex")
         original = self.window.item_rules.attempt_death("cached-shield", target, 1, self.window.player_owner_id)
         cached = self.window.item_rules.attempt_death("cached-shield", target, 1, self.window.player_owner_id)
+        self.assertFalse(cached.is_new)
+        self.assertEqual(cached.events, original.events)
+        self.assertFalse(self.window.guardian_intervened_this_run)
+        self.assertFalse(self.window.item_rules.protection_armed)
+        self.assertFalse(any("Against all expectation" in event.text for event in self.window.public_events))
+        self.give("guardian_angel")
+        self.assertFalse(self.window.apply_resolved_death(cached))
+        self.assertTrue(self.window.guardian_intervened_this_run)
+        self.assertTrue(self.window.item_rules.protection_armed)
+        self.assertEqual(sum("Against all expectation" in event.text for event in self.window.public_events), 1)
+        self.assertTrue(set(event.event_id for event in original.events).issubset(self.window.applied_item_events))
         self.assertFalse(self.window.apply_resolved_death(cached))
         self.assertFalse(self.window.apply_resolved_death(original))
-        self.assertFalse(self.window.apply_resolved_death(original))
         self.assertTrue(self.window.player_alive)
-        self.assertTrue(self.window.guardian_intervened_this_run)
+        self.assertTrue(self.window.item_rules.protection_armed)
         self.assertEqual(sum("Against all expectation" in event.text for event in self.window.public_events), 1)
+
+    def test_cached_kill_recovers_note_and_bonus_progress_after_first_result_was_lost(self):
+        self.conversation()
+        note = self.window.inventory.grant("forged_note")
+        self.assertTrue(self.window.use_inventory_item(note.instance_id, message="A captured note."))
+        self.give("watch_this_drive", "Dave")
+        self.window.round_number = 2
+        self.window.phase = "action"
+        target = next(body for body in self.window.body_states() if body.label == "Dave")
+        original = self.window.item_rules.attempt_death(
+            "cached-consequences", target, 2, caused_by_owner_id=self.window.player_owner_id, phase="action")
+        self.assertEqual([event.event_type for event in original.events],
+                         ["prepared_note_bound", "extra_action_earned"])
+        self.assertTrue(self.window.characters["Dave"]["alive"])
+        self.assertEqual(self.window.morning_item_notes, [])
+        self.assertNotIn("marked_kill_completed", self.window.profile.counters)
+        self.assertEqual(self.window.item_rules.bonus_actions, 1)
+        cached = self.window.item_rules.attempt_death(
+            "cached-consequences", target, 2, caused_by_owner_id=self.window.player_owner_id, phase="action")
+        self.assertFalse(cached.is_new)
+        self.assertFalse(cached.killed)
+        self.assertEqual(cached.events, original.events)
+        self.assertTrue(self.window.apply_resolved_death(cached))
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertEqual(self.window.morning_item_notes,
+                         [(original.events[0].event_id, "Dave", "A captured note.")])
+        self.assertEqual(self.window.profile.counters["marked_kill_completed"], 1)
+        self.assertEqual(self.window.item_rules.bonus_actions, 1)
+        self.assertIsNone(self.window.item_rules.prepared_note)
+        self.assertIsNone(self.window.item_rules.marked_target)
+        self.assertFalse(self.window.apply_resolved_death(cached))
+        self.assertFalse(self.window.apply_resolved_death(original))
+        self.assertEqual(len(self.window.morning_item_notes), 1)
+        self.assertEqual(self.window.profile.counters["marked_kill_completed"], 1)
+        self.assertEqual(self.window.item_rules.bonus_actions, 1)
 
     def test_shared_adapter_preserves_already_dead_and_delayed_causes(self):
         self.conversation()

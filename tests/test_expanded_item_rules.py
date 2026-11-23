@@ -270,7 +270,7 @@ class ExpandedItemRulesTests(unittest.TestCase):
                 replay = rules.attempt_death("kill", changed[1], day, caused_by_owner_id=owner,
                                              phase=phase, room_id=room)
                 self.assertFalse(replay.is_new)
-                self.assertFalse(replay.events)
+                self.assertEqual(replay.events, decision.events)
                 self.assertFalse(rules.reservations)
 
     def test_dead_reservation_cannot_occupy_capacity_or_move_a_body(self):
@@ -356,6 +356,7 @@ class ExpandedItemRulesTests(unittest.TestCase):
         replay = self.rules.attempt_death("duplicate-execution", self.player, 1, "owner",
                                           cause=DeathCause.EXECUTION, source_id="first")
         self.assertFalse(replay.is_new)
+        self.assertEqual(replay.events, saved.events)
         self.assertTrue(self.rules.protection_armed)
         self.rules.open_vote("second", self.voters, "p", day=1)
         self.rules.resolve_vote("second", self.ballots_for_player())
@@ -484,7 +485,10 @@ class ExpandedItemRulesTests(unittest.TestCase):
         repeat = self.rules.attempt_death("night-attack", replace(self.jerry, alive=False), 2,
                                           caused_by_owner_id="owner", phase="action")
         self.assertFalse(repeat.is_new)
-        self.assertEqual(repeat.events, ())
+        self.assertEqual(repeat.events, killed.events)
+        self.assertEqual(self.rules.bonus_actions, 1)
+        self.assertIsNone(self.rules.prepared_note)
+        self.assertIsNone(self.rules.marked_target)
         self.assertTrue(self.rules.consume_bonus_action("chosen-action", 2))
         self.assertFalse(self.rules.consume_bonus_action("chosen-action", 2))
         with self.assertRaises(ItemRuleError):

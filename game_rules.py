@@ -789,6 +789,7 @@ class PlayerItemRules:
         phase: str | None = None,
         room_id: str | None = None,
     ) -> DeathDecision:
+        """Resolve once and preserve stable events for idempotent world application."""
         if not attempt_id or day < 1:
             raise ItemRuleError("A death attempt requires an identifier and a day")
         try:
@@ -805,7 +806,7 @@ class PlayerItemRules:
             original_identity, original = self._death_decisions[attempt_id]
             if identity != original_identity:
                 raise ItemRuleError("This death attempt has already been resolved for another target")
-            return replace(original, is_new=False, events=())
+            return replace(original, is_new=False)
         if cause == DeathCause.EXECUTION:
             resolved = self._resolved_votes.get(source_id)
             if (resolved is None or resolved[1].outcome != "execution"
@@ -817,7 +818,7 @@ class PlayerItemRules:
                 if self._death_decisions[original.attempt_id][0] != identity:
                     raise ItemRuleError("This execution has already resolved with another identity")
                 self._death_decisions[attempt_id] = identity, original
-                return replace(original, is_new=False, events=())
+                return replace(original, is_new=False)
         events = ()
         protection = None
         if not target.alive or target.body_id in self._known_dead:
