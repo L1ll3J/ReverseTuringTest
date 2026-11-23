@@ -44,5 +44,14 @@ class ConversationControlsUXTests(unittest.TestCase):
         self.assertEqual(self.window.interject_input.alignment(), Qt.AlignCenter)
         self.assertNotIn("border-bottom", self.window.interject_input.styleSheet())
 
+    def test_required_reply_notice_tracks_the_current_human_reply_obligation(self):
+        self.open_input()
+        self.app.processEvents()
+        self.assertFalse(self.window.conversation_stage.reply_notice.isHidden())
+        self.assertIn(self.window.display_actor(self.window.player_name),
+                      self.window.conversation_stage.reply_notice.text())
+        self.window.append_speech(self.window.player_name, "I was in the kitchen.")
+        self.assertTrue(self.window.conversation_stage.reply_notice.isHidden())
+
 if __name__ == "__main__":
     unittest.main()

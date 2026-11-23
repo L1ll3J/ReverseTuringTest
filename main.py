@@ -1523,8 +1523,9 @@ class GameWindow(QMainWindow):
         self.speaker_font.setPixelSize(12)
         self.message_log = MessageLog(self.output_area, body_font=body_font,
                                       speaker_font=self.speaker_font, name_format=self.speaker_display_format)
+        self.message_log.set_reveal_enabled(True)
         self.message_log.hide()
-        self.conversation_stage = ConversationStage(self, name_font=self.speaker_font)
+        self.conversation_stage = ConversationStage(self, name_font=self.speaker_font, body_font=body_font)
         self.conversation_stage.speaker_chosen.connect(self.choose_speaker_recipient)
         self.conversation_stage.hide()
         self.overlay_host = OverlayHost(self, body_font=body_font, title_font=self.speaker_font,
@@ -2797,6 +2798,7 @@ class GameWindow(QMainWindow):
         super().resizeEvent(event)
         self.resize_menu_content()
         self.position_corner_controls()
+        self.resize_weapon_cards()
         self.position_weapon_panel()
 
     # Weapon-gating logic
@@ -3652,6 +3654,9 @@ class GameWindow(QMainWindow):
         self.update_recipient_controls()
 
     def update_recipient_controls(self, *_args):
+        if hasattr(self, "conversation_stage"):
+            name = self.display_actor(self.player_name) if self.player_reply_required() else None
+            self.conversation_stage.set_required_reply(name)
         if not hasattr(self, "recipient_controls"):
             return
         visible = (self.phase == "conversation" and not self.game_over
