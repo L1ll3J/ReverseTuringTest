@@ -1812,7 +1812,7 @@ class GameWindow(QMainWindow):
         cancel_policy = self.dictation_cancel_button.sizePolicy()
         cancel_policy.setRetainSizeWhenHidden(True)
         self.dictation_cancel_button.setSizePolicy(cancel_policy)
-        for button in (self.dictation_button, self.dictation_cancel_button):
+        for button in (self.dictation_cancel_button, self.dictation_button):
             button.setFont(body_font)
             button.setStyleSheet(f'QPushButton {{ font-family: "{body_family}"; font-size: 18px; padding: 6px; }} QPushButton:disabled {{ color: #777; }}')
             dictation_layout.addWidget(button)
@@ -1845,7 +1845,7 @@ class GameWindow(QMainWindow):
         badge_policy = self.dictation_binding_badge.sizePolicy()
         badge_policy.setRetainSizeWhenHidden(True)
         self.dictation_binding_badge.setSizePolicy(badge_policy)
-        dictation_layout.addWidget(self.dictation_binding_badge)
+        dictation_layout.insertWidget(1, self.dictation_binding_badge)
         self.update_dictation_controls()
         self.interject_input.installEventFilter(self)
 

@@ -74,12 +74,15 @@ class SoulConversationTests(unittest.TestCase):
         window.run_conversation_loop()
         self.assertFalse(window.player_reply_required())
         self.assertTrue(window.pass_button.isEnabled())
+        self.assertTrue(window.conversation_stage.reply_notice.isHidden())
         window.append_speech("Jerry", "Dave, what happened?", "Dave")
         window.run_conversation_loop()
         self.assertTrue(window.player_reply_required())
         self.assertFalse(window.pass_button.isEnabled())
         self.assertTrue(window.interject_button.isEnabled())
         self.assertFalse(window.interject_input.isHidden())
+        self.assertFalse(window.conversation_stage.reply_notice.isHidden())
+        self.assertIn(window.display_actor(window.player_name), window.conversation_stage.reply_notice.text())
 
     def test_soul_replay_does_not_repeat_reaction_or_reopen_old_obligation(self):
         entry, target = self.use_soul()
