@@ -234,6 +234,9 @@ class PlayerItemRules:
             effect = self._event("guardian_armed", context.day, **values)
         return effect, self._event("item_used", context.day, **values)
 
+    def is_muffled(self, body_id: str) -> bool:
+        return body_id in self._muffles
+
     def speech_override(self, body_id: str) -> SpeechProposal | None:
         if body_id in self._muffles:
             return SpeechProposal(None, MUFFLED_SPEECH)

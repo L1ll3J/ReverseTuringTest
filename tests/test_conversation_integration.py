@@ -26,6 +26,7 @@ import ai_runtime
 import main as game
 from ai_context import MemoryRecord, render_character_context
 from game_rules import MUFFLED_SPEECH
+from muffled import muffled_sound
 
 
 class ConversationIntegrationTests(unittest.TestCase):
@@ -490,7 +491,7 @@ class ConversationIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.interject_input.text(), "My new account")
         self.assertIsNone(self.window.turn_preparation.ready)
 
-    def test_item_use_invalidates_cache_and_muffle_is_applied_to_next_reply(self):
+    def test_item_use_invalidates_cache_and_excludes_muffled_speaker(self):
         self.free_floor()
         self.prepare()
         self.cached()
@@ -498,10 +499,151 @@ class ConversationIntegrationTests(unittest.TestCase):
         entry = self.window.inventory.grant("muffle")
         self.assertTrue(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
         self.assertIsNone(self.window.turn_preparation.ready)
-        self.selector.side_effect = lambda *_args: "Dave"
+        seen = []
+        self.selector.side_effect = lambda state, events, dialogue, proposals: seen.append(proposals) or next(iter(proposals))
         self.window.pass_conversation()
         self.wait_for(lambda: not self.window.active_workers)
-        self.assertEqual(self.window.public_dialogue[-1].text, MUFFLED_SPEECH)
+        self.assertNotIn("Dave", seen[-1])
+        self.assertNotEqual(self.window.public_dialogue[-1].speaker, "Dave")
+
+    def muffle(self, name):
+        self.window.characters[name]["muffle_style"] = name
+        entry = self.window.inventory.grant("muffle")
+        self.assertTrue(self.window.use_inventory_item(entry.instance_id, self.window.body_id(name)))
+
+    def test_direct_muffled_reply_uses_one_tone_call_no_selector_and_counts_only_commits(self):
+        self.free_floor()
+        self.muffle("Dave")
+        with patch.object(self.window.ai_runtime, "muffled_tone", return_value=-2) as tone:
+            for count in range(1, 4):
+                self.send_direct("Dave")
+                self.wait_for(lambda: not self.window.active_workers)
+                latest = self.window.public_dialogue[-1]
+                self.assertEqual(latest.text, muffled_sound("Dave", -2))
+                self.assertIsNone(latest.addressee)
+                self.assertEqual(self.window.direct_replies.count_for(self.window.body_id("Dave")), count)
+                self.assertTrue(self.window.interject_button.isEnabled())
+            self.assertEqual(tone.call_count, 3)
+            before = tuple(self.window.public_dialogue)
+            self.send_direct("Dave")
+            self.assertEqual(tuple(self.window.public_dialogue), before)
+            self.assertEqual(tone.call_count, 3)
+        self.speech.assert_not_called()
+        self.selector.assert_not_called()
+
+    def test_addressed_muffled_npc_waits_for_player_pass_and_skips_preparation(self):
+        self.muffle("Hank")
+        with patch.object(self.window.ai_runtime, "muffled_tone", return_value=2) as tone:
+            self.window.append_speech("Dave", "What did you see?", "Hank")
+            self.window.run_conversation_loop()
+            self.prepare()
+            self.assertIsNone(self.window.turn_preparation.active)
+            tone.assert_not_called()
+            self.assertTrue(self.window.interject_button.isEnabled())
+            self.preparation_paused = True
+            self.window.pass_conversation()
+            self.wait_for(lambda: not self.window.active_workers)
+            self.assertEqual(self.window.public_dialogue[-1].speaker, "Hank")
+            self.assertEqual(self.window.public_dialogue[-1].text, muffled_sound("Hank", 2))
+            self.assertEqual(tone.call_count, 1)
+        self.assertEqual(self.window.direct_replies.count, 0)
+        self.speech.assert_not_called()
+        self.selector.assert_not_called()
+
+    def test_detective_addressed_muffled_npc_uses_tone_without_selector(self):
+        self.muffle("Jerry")
+        with patch.object(self.window.ai_runtime, "muffled_tone", return_value=0) as tone:
+            self.window.append_speech("Detective", "Your account?", "Jerry")
+            self.window.run_conversation_loop()
+            self.wait_for(lambda: not self.window.active_workers)
+            self.assertEqual(self.window.public_dialogue[-1].text, muffled_sound("Jerry", 0))
+            tone.assert_called_once()
+        self.selector.assert_not_called()
+
+    def test_muffled_request_failure_and_retry_do_not_publish_or_increment_early(self):
+        self.free_floor()
+        self.muffle("Dave")
+        with patch.object(self.window.ai_runtime, "muffled_tone",
+                          side_effect=[ai_runtime.AIRequestError("Retry this tone"), -1]) as tone:
+            self.send_direct("Dave")
+            self.wait_for(lambda: not self.window.active_workers)
+            self.assertEqual(self.window.public_dialogue[-1].speaker, "Alex")
+            self.assertEqual(self.window.direct_replies.count, 0)
+            self.assertIsNotNone(self.window.retry_action)
+            self.window.retry_ai_request()
+            self.wait_for(lambda: not self.window.active_workers)
+            self.assertEqual(self.window.public_dialogue[-1].text, muffled_sound("Dave", -1))
+            self.assertEqual(self.window.direct_replies.count, 1)
+            self.assertEqual(tone.call_count, 2)
+        self.selector.assert_not_called()
+
+    def test_inflight_muffled_tone_is_discarded_after_identity_effect_or_phase_change(self):
+        self.free_floor()
+        self.muffle("Dave")
+        for mutation in ("identity", "effect", "phase"):
+            with self.subTest(mutation=mutation):
+                self.window.phase = "conversation"
+                if not self.window.item_rules.is_muffled(self.window.body_id("Dave")):
+                    self.muffle("Dave")
+                entered, release = Event(), Event()
+                self.releases.append(release)
+                def choose(*_args, **_kwargs):
+                    entered.set()
+                    release.wait(3)
+                    return -2
+                with patch.object(self.window.ai_runtime, "muffled_tone", side_effect=choose):
+                    self.send_direct("Dave")
+                    self.wait_for(entered.is_set)
+                    before = tuple(self.window.public_dialogue)
+                    if mutation == "identity":
+                        self.window.characters["Dave"] = dict(self.window.characters["Dave"])
+                    elif mutation == "effect":
+                        self.window.item_rules.begin_night(2, self.window.body_states())
+                    else:
+                        self.window.phase = "action"
+                    release.set()
+                    self.wait_for(lambda: not self.window.active_workers)
+                    self.assertEqual(tuple(self.window.public_dialogue), before)
+                    self.assertEqual(self.window.direct_replies.count, 0)
+
+    def test_all_muffled_only_bypasses_vote_minimum_and_has_no_empty_selector(self):
+        self.free_floor()
+        for name in self.window.characters:
+            self.muffle(name)
+        self.assertLess(len(self.window.current_conversation), self.window.minimum_to_call_vote)
+        self.assertTrue(self.window.can_call_vote())
+        self.window.run_conversation_loop()
+        self.assertFalse(self.window.pass_button.isEnabled())
+        self.assertIn("Nobody can speak freely", self.window.secondary_output_area.text())
+        self.window.run_multiple_responses()
+        self.speech.assert_not_called()
+        self.selector.assert_not_called()
+        self.assertFalse(self.window.active_workers)
+        for field, value in (("ai_busy", True), ("game_over", True), ("phase", "action")):
+            old = getattr(self.window, field)
+            setattr(self.window, field, value)
+            self.assertFalse(self.window.can_call_vote())
+            setattr(self.window, field, old)
+        self.window.append_speech("Detective", "Alex, answer.", "Alex")
+        self.assertFalse(self.window.can_call_vote())
+        self.window.public_dialogue.clear()
+        self.window.current_conversation.clear()
+        self.window.characters.clear()
+        self.assertFalse(self.window.all_npcs_muffled())
+        self.assertFalse(self.window.can_call_vote())
+
+    def test_muffled_style_is_persona_metadata_instead_of_public_label(self):
+        self.free_floor()
+        self.muffle("Dave")
+        self.window.characters["Dave"]["muffle_style"] = "Hank"
+        with patch.object(self.window.ai_runtime, "muffled_tone", return_value=1) as tone:
+            self.send_direct("Dave")
+            self.wait_for(lambda: not self.window.active_workers)
+            self.assertEqual(tone.call_args.args[1], "Hank")
+            self.assertEqual(self.window.public_dialogue[-1].text, muffled_sound("Hank", 1))
+            self.assertEqual(self.window.public_dialogue[-1].speaker, "Dave")
+        self.assertIsNone(self.window.public_dialogue[-1].addressee)
+        self.assertNotIn("tone", render_character_context(self.window.build_character_context("Jerry")))
 
     def test_close_retains_old_preparation_until_safe_finish_without_public_result(self):
         self.free_floor()

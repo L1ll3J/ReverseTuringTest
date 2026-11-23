@@ -24,7 +24,8 @@ from openai import (
     PermissionDeniedError,
     RateLimitError,
 )
-from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError, create_model
+from pydantic import BaseModel, BeforeValidator, ConfigDict, StringConstraints, ValidationError, create_model
+from muffled import TONES, TONE_LABELS, response_bank
 
 from ai_context import (
     CharacterContext,
@@ -71,6 +72,12 @@ def _literal(values):
 
 def _schema(name, **fields):
     return create_model(name, __config__=ConfigDict(extra="forbid", strict=True), **fields)
+
+
+def _strict_tone(value):
+    if type(value) is not int or value not in TONES:
+        raise ValueError("Expected an integer tone from -2 to 2")
+    return value
 
 
 class AIRuntime:
@@ -141,6 +148,21 @@ class AIRuntime:
             trace_scope=trace_scope, task="speech", actor=context.character,
         )
         return SpeechProposal(addressee=result.addressee, speech=result.speech)
+
+    def muffled_tone(self, context: CharacterContext, style="fallback", *, trace_scope=None) -> int:
+        self._eligible_targets(context)
+        tone_type = Annotated[Literal[-2, -1, 0, 1, 2], BeforeValidator(_strict_tone)]
+        output_schema = _schema("MuffledTone", tone=(tone_type, ...))
+        root = ElementTree.fromstring(render_character_context(context))
+        bank = ElementTree.SubElement(root, "muffled_responses", {"recipient": context.character})
+        for tone, label, sound in zip(TONES, TONE_LABELS, response_bank(style)):
+            ElementTree.SubElement(bank, "response", {"tone": str(tone), "feeling": label}).text = sound
+        result = self._request(
+            self.config.speech_model, self._character_instructions("muffled"),
+            ElementTree.tostring(root, encoding="unicode"), output_schema,
+            trace_scope=trace_scope, task="muffled_tone", actor=context.character,
+        )
+        return result.tone
 
     def vote(self, context: CharacterContext, *, trace_scope=None) -> str:
         eligible = self._eligible_targets(context)

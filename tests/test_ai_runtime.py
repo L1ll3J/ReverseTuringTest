@@ -37,7 +37,7 @@ class AIRuntimeTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.root.joinpath("prompts").mkdir()
         self.root.joinpath("System Prompt.txt").write_text("<character_policy>shared fixture</character_policy>", encoding="utf-8")
-        for task in ("speech", "vote", "director"):
+        for task in ("speech", "vote", "director", "muffled"):
             self.root.joinpath("prompts", task + ".xml").write_text(f'<task name="{task}" />', encoding="utf-8")
         self.client = Mock()
         self.runtime = AIRuntime(client=self.client, prompt_root=self.root)
@@ -106,6 +106,36 @@ class AIRuntimeTests(unittest.TestCase):
             self.response({"target": target})
             with self.subTest(target=target), self.assertRaises(AIRequestError):
                 self.runtime.vote(self.context)
+
+    def test_muffled_tone_has_only_own_bank_and_retains_private_context(self):
+        from muffled import MUFFLED_BANKS, TONE_LABELS
+        for tone in range(-2, 3):
+            self.response({"tone": tone})
+            self.assertEqual(self.runtime.muffled_tone(self.context, "Jerry"), tone)
+        request = self.client.responses.parse.call_args.kwargs
+        schema = request["text_format"].model_json_schema()
+        self.assertEqual(list(schema["properties"]), ["tone"])
+        self.assertEqual(schema["properties"]["tone"]["enum"], [-2, -1, 0, 1, 2])
+        root = ET.fromstring(request["input"][1]["content"])
+        responses = root.findall("muffled_responses/response")
+        self.assertEqual(tuple(item.text for item in responses), MUFFLED_BANKS["Jerry"])
+        self.assertEqual(tuple(item.get("feeling") for item in responses), TONE_LABELS)
+        self.assertEqual(root.find("muffled_responses").get("recipient"), "Jerry")
+        self.assertIn("private-observation-secret", request["input"][1]["content"])
+        self.assertIn("private-persona-secret", request["input"][1]["content"])
+        self.assertIn("private-disposition-secret", request["input"][1]["content"])
+        self.assertNotIn(MUFFLED_BANKS["Dave"][0], request["input"][1]["content"])
+        self.assertEqual(ET.fromstring(request["input"][0]["content"]).find("task").get("name"), "muffled")
+
+    def test_muffled_tone_rejects_noninteger_out_of_range_and_free_text(self):
+        for value in (True, False, "0", 1.0, -3, 3, None):
+            self.response({"tone": value})
+            with self.subTest(value=value), self.assertRaises(AIRequestError):
+                self.runtime.muffled_tone(self.context)
+        for extra in ("speech", "addressee", "private_analysis"):
+            self.response({"tone": 0, extra: "forbidden"})
+            with self.subTest(extra=extra), self.assertRaises(AIRequestError):
+                self.runtime.muffled_tone(self.context)
 
     def test_selector_gets_public_context_and_drafts_without_private_character_data(self):
         proposals = {
