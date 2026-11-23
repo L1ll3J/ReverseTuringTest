@@ -156,6 +156,9 @@ class GameTraceTests(unittest.TestCase):
         self.network = patch.object(socket.socket, "connect", side_effect=AssertionError("Network access in offline test"))
         self.network.start()
         self.addCleanup(self.network.stop)
+        self.preparation_patch = patch.object(game.GameWindow, "maybe_prepare_next_turn")
+        self.preparation_patch.start()
+        self.addCleanup(self.preparation_patch.stop)
         self.window = game.GameWindow()
         self.window.trace = TraceRun(enabled=True, root=self.directory.name)
         self.window.ai_runtime.trace = self.window.trace

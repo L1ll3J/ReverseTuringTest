@@ -9,6 +9,8 @@ from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState
 from ai_runtime import AIRuntime, AIRequestError
 from dictation import DictationRecorder, DictationError
 from preferences import Preferences
+from conversation_flow import DirectReplyPolicy, GroupTurnSnapshot, TurnPreparation
+from conversation_widgets import DialogueView
 from npc_items import NPCItemState
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, ItemUseContext, PlayerItemRules, ItemRuleError
@@ -147,6 +149,12 @@ class GameWindow(QMainWindow):
         self.ai_busy = False
         self.request_serial = 0
         self.retry_action = None
+        self.direct_replies = DirectReplyPolicy()
+        self.turn_preparation = TurnPreparation()
+        self.conversation_revision = 0
+        self.awaiting_preparation = None
+        self.prepared_scope = None
+        self.prepared_retry_snapshot = None
         self.npc_items = NPCItemState()
         self.profile_store = ProfileStore(os.getenv("ALIBAI_PROFILE_PATH") or None, CONTENT_CATALOGUE)
         self.profile = ProfileSnapshot()
@@ -420,6 +428,7 @@ class GameWindow(QMainWindow):
             self.secondary_output_area.setText(str(error))
             self.secondary_output_area.show()
             return False
+        self.invalidate_prepared_turn("item_used", changed=True)
         self.request_serial += 1
         self.retry_action = None
         self.retry_button.hide()
@@ -428,6 +437,7 @@ class GameWindow(QMainWindow):
         self.trace_action("inventory_item_used", events=events)
         if self.inventory_dialog is not None:
             self.open_inventory()
+        self.maybe_prepare_next_turn()
         return True
 
     def apply_item_events(self, events):
@@ -450,6 +460,8 @@ class GameWindow(QMainWindow):
         target = next(body for body in self.body_states() if body.label == label)
         owner = self.player_owner_id if label == self.player_name else None
         decision = self.item_rules.attempt_death(attempt_id, target, max(1, self.round_number), owner)
+        if decision.is_new:
+            self.invalidate_prepared_turn("death_resolved", changed=True)
         self.apply_item_events(decision.events)
         if decision.killed:
             if label == self.player_name:
@@ -542,6 +554,17 @@ class GameWindow(QMainWindow):
             "vote_snapshot": self.vote_snapshot,
             "vote_weights": dict(self.vote_snapshot.weights) if self.vote_snapshot else {},
         }
+        active = self.turn_preparation.active
+        state["conversation_control"] = {
+            "revision": self.conversation_revision,
+            "direct_discussion": self.direct_replies.discussion_id,
+            "direct_body_id": self.direct_replies.body_id,
+            "direct_count": self.direct_replies.count,
+            "preparing_ticket": active.identifier if active is not None else None,
+            "preparation_cancelled": active.cancelled.is_set() if active is not None else False,
+            "awaiting_ticket": self.awaiting_preparation,
+            "cached_ticket": self.turn_preparation.ready.ticket_id if self.turn_preparation.ready else None,
+        }
         self.trace.snapshot(state, reason=reason)
 
     def trace_action(self, action, **details):
@@ -555,6 +578,7 @@ class GameWindow(QMainWindow):
         return {"trace_task": task, "trace_actor": actor, "trace_parent_job_id": parent_job_id}
 
     def remember(self, character, kind, text):
+        self.invalidate_prepared_turn("memory_changed", changed=True)
         section = {"experience": "experiences", "disposition": "dispositions"}[kind]
         self.characters[character][section].append(MemoryRecord(self.round_number, kind, text, "self"))
         self.trace.record("memory_added", {"character": character, "kind": kind,
@@ -566,6 +590,7 @@ class GameWindow(QMainWindow):
         self.output_area.append(f"<p>{content}</p>")
 
     def add_public_event(self, text, source="Detective", display=True):
+        self.invalidate_prepared_turn("public_event", changed=True)
         self.public_events.append(MemoryRecord(self.round_number, "public_event", text, source))
         self.trace.record("public_event", {"source": source, "round": self.round_number, "text": text})
         self.transcript.append(text)
@@ -586,28 +611,48 @@ class GameWindow(QMainWindow):
                                 tuple(data["experiences"]), tuple(data["dispositions"]),
                                 tuple(self.public_events), tuple(self.public_dialogue))
 
-    def append_speech(self, speaker, speech, addressee=None):
+    def append_speech(self, speaker, speech, addressee=None, *, origin="ordinary", direct_reply=False):
+        if self.phase == "conversation":
+            self.direct_replies.begin_discussion(self.round_number)
+        ordinary_npc = (origin == "ordinary" and speaker != self.player_name
+                        and self.characters.get(speaker, {}).get("alive", False))
+        if ordinary_npc and direct_reply and not self.direct_replies.can_direct(self.body_id(speaker)):
+            return False
+        self.invalidate_prepared_turn("speech_committed", changed=True)
         self.retry_action = None
         self.retry_button.hide()
         self.request_serial += 1
         self.public_dialogue.append(DialogueLine(self.round_number, speaker, speech, addressee))
         self.trace.record("speech_committed", {"round": self.round_number, "speaker": speaker,
-                                              "speech": speech, "addressee": addressee},
+                                              "speech": speech, "addressee": addressee,
+                                              "origin": origin, "direct_reply": direct_reply},
                           scope=self.trace_callback_scope)
         message = f"{speaker}: {speech}"
         self.current_conversation.append(message)
         self.most_recent_messageS.append(message)
         self.transcript.append(message)
         name_style = f'font-family: "{escape(self.pixel_font_family, quote=True)}"; font-size: 12px;'
-        self.output_area.append(f"<p><span style='{name_style}'><strong>{escape(speaker)}:</strong></span><br>{escape(speech)}</p><br>")
+        name = escape(speaker)
+        if self.characters.get(speaker, {}).get("alive", False) and speaker != self.player_name:
+            name = f'<a href="npc:{self.body_id(speaker)}" style="color: #E0E0E0; text-decoration: none;">{name}</a>'
+        self.output_area.append(f"<p><span style='{name_style}'><strong>{name}:</strong></span><br>{escape(speech)}</p><br>")
+        if ordinary_npc:
+            self.direct_replies.committed(self.body_id(speaker), direct=direct_reply)
+        self.refresh_recipient_choices()
         self.output_area.ensureCursorVisible()
         if speaker == "Detective" or speaker in self.characters:
             self.play_sound_effect(f"sounds/voices/{speaker}.mp3")
+        return True
 
     def start_ai_request(self, operation, on_success, status, *, trace_task=None,
-                         trace_actor=None, trace_parent_job_id=None, trace_scope=None):
+                         trace_actor=None, trace_parent_job_id=None, trace_scope=None, context_guard=None):
         if self.game_over or self.ai_busy or self.player_reply_required():
             return
+        if context_guard is not None and not context_guard():
+            self.retry_action = None
+            self.retry_button.hide()
+            return
+        self.invalidate_prepared_turn("foreground_request")
         self.request_serial += 1
         token, phase = self.request_serial, self.phase
         scope = trace_scope or self.trace.new_job(trace_task or "operation",
@@ -639,6 +684,12 @@ class GameWindow(QMainWindow):
                     scope.record("job_ignored", {"reason": "stale_result", "current_phase": self.phase,
                                                  "current_serial": self.request_serial})
                 return
+            if context_guard is not None and not context_guard():
+                self.ai_busy = False
+                self.retry_action = None
+                self.retry_button.hide()
+                self.restore_conversation_decision()
+                return
             self.ai_busy = False
             self.update_inventory_button()
             self.interject_input.setEnabled(True)
@@ -662,6 +713,12 @@ class GameWindow(QMainWindow):
                     scope.record("job_ignored", {"reason": "stale_failure", "current_phase": self.phase,
                                                  "current_serial": self.request_serial})
                 return
+            if context_guard is not None and not context_guard():
+                self.ai_busy = False
+                self.retry_action = None
+                self.retry_button.hide()
+                self.restore_conversation_decision()
+                return
             self.ai_busy = False
             self.update_inventory_button()
             self.interject_input.setEnabled(True)
@@ -670,7 +727,7 @@ class GameWindow(QMainWindow):
             self.retry_action = lambda: self.start_ai_request(
                 operation, on_success, status, trace_task=trace_task, trace_actor=trace_actor,
                 trace_parent_job_id=trace_parent_job_id,
-                trace_scope=scope.retry() if scope is not None else None)
+                trace_scope=scope.retry() if scope is not None else None, context_guard=context_guard)
             self.retry_button.show()
             if phase == "conversation":
                 self.pass_button.setEnabled(not self.player_reply_required())
@@ -715,6 +772,7 @@ class GameWindow(QMainWindow):
         if not restarting:
             self.save_player_name_preference()
         self.game_over = True
+        self.invalidate_prepared_turn("closed", changed=True)
         self.cancel_dictation()
         self.dictation_recorder.close()
         self.request_serial += 1
@@ -739,7 +797,8 @@ class GameWindow(QMainWindow):
         body_family = body_font.family()
 
         # Output area (TextEdit) to display game output, hidden initially
-        self.output_area = QTextEdit(self)
+        self.output_area = DialogueView(self)
+        self.output_area.speaker_chosen.connect(self.choose_speaker_recipient)
         self.output_area.setReadOnly(True)
         self.output_area.document().setDefaultFont(body_font)
         self.output_area.hide()  # Hide until game starts
@@ -1023,6 +1082,7 @@ class GameWindow(QMainWindow):
         """)
         self.interject_input.hide()  # Hidden until needed
         self.interject_input.returnPressed.connect(self.send_interjection)
+        self.interject_input.textEdited.connect(lambda _text: self.invalidate_prepared_turn("draft_edited"))
         self.say_button = QPushButton('Say')
         self.say_button.setStyleSheet(f"""
             QPushButton {{
@@ -1034,6 +1094,24 @@ class GameWindow(QMainWindow):
         """)
         self.say_button.clicked.connect(self.send_interjection)
         self.say_button.hide()  # Hidden until needed
+
+        self.recipient_controls = QWidget()
+        recipient_layout = QHBoxLayout(self.recipient_controls)
+        recipient_layout.setContentsMargins(0, 0, 0, 0)
+        recipient_label = QLabel("To:")
+        self.recipient_selector = QComboBox()
+        self.recipient_selector.addItem("Group", None)
+        self.recipient_selector.currentIndexChanged.connect(self.update_recipient_controls)
+        for widget in (recipient_label, self.recipient_selector):
+            widget.setFont(body_font)
+            widget.setStyleSheet(f'font-family: "{body_family}"; font-size: 18px; padding: 5px;')
+            recipient_layout.addWidget(widget)
+        self.recipient_controls.hide()
+        self.recipient_hint = QLabel()
+        self.recipient_hint.setTextFormat(Qt.PlainText)
+        self.recipient_hint.setWordWrap(True)
+        self.recipient_hint.setStyleSheet(f'font-family: "{body_family}"; font-size: 16px; color: #B8B8B8;')
+        self.recipient_hint.hide()
 
         self.dictation_controls = QWidget()
         dictation_layout = QHBoxLayout(self.dictation_controls)
@@ -1150,9 +1228,11 @@ class GameWindow(QMainWindow):
         # Layout for interjecting text box and button (below the output area)
         interject_layout = QVBoxLayout()
         input_row = QHBoxLayout()
+        input_row.addWidget(self.recipient_controls)
         input_row.addWidget(self.interject_input, 1)
         input_row.addWidget(self.dictation_controls)
         interject_layout.addLayout(input_row)
+        interject_layout.addWidget(self.recipient_hint)
         interject_layout.addWidget(self.dictation_status)
         interject_layout.addWidget(self.say_button)
         self.layout.addLayout(interject_layout)
@@ -1262,6 +1342,9 @@ class GameWindow(QMainWindow):
         if obj is self.room_buttons_widget and event.type() in (QEvent.Show, QEvent.Resize, QEvent.Move):
             QTimer.singleShot(0, self.position_weapon_panel)  # schedule after layout settles
         if obj is getattr(self, "interject_input", None) and event.type() in (QEvent.Show, QEvent.Hide, QEvent.EnabledChange):
+            if event.type() == QEvent.Show:
+                self.invalidate_prepared_turn("composing")
+            self.update_recipient_controls()
             if self.can_dictate():
                 self.update_dictation_controls()
             else:
@@ -1498,6 +1581,7 @@ class GameWindow(QMainWindow):
 
     def show_weapon_select_screen(self):
         """Populate and show a grid of square weapon buttons with image + name; tooltip on hover."""
+        self.invalidate_prepared_turn("weapon_selection", changed=True)
         self.phase = "weapon_select"
         self.cancel_dictation()
         self.menu_widget.hide()
@@ -1863,6 +1947,7 @@ class GameWindow(QMainWindow):
     def run_action_phase(self):
         if self.game_over:
             return
+        self.invalidate_prepared_turn("night_started", changed=True)
         self.phase = "action"
         self.cancel_dictation()
         self.request_serial += 1
@@ -2213,6 +2298,295 @@ class GameWindow(QMainWindow):
                     self.remember(occupant, "experience",
                         f"You and " + ' and '.join(others) + f" shared a picturesque and beautifully intimate night in the {self.rooms_visited[-1]}. It was everything your heart yearned for, espcially due to {self.player_name}.")
 
+    def restore_conversation_decision(self):
+        if self.phase != "conversation" or self.game_over:
+            return
+        self.secondary_output_area.clear()
+        self.interject_input.setEnabled(True)
+        self.pass_button.setEnabled(not self.player_reply_required())
+        self.interject_button.setEnabled(True)
+        self.vote_button.setEnabled(self.can_call_vote())
+        if self.player_reply_required():
+            self.interject_input.show()
+            self.say_button.show()
+        self.refresh_recipient_choices()
+        self.update_inventory_button()
+
+    def refresh_recipient_choices(self):
+        if not hasattr(self, "recipient_selector"):
+            return
+        selected = self.recipient_selector.currentData()
+        self.recipient_selector.blockSignals(True)
+        self.recipient_selector.clear()
+        self.recipient_selector.addItem("Group", None)
+        for name, data in self.characters.items():
+            if data["alive"] and name != self.player_name:
+                self.recipient_selector.addItem(name, self.body_id(name))
+        index = self.recipient_selector.findData(selected)
+        self.recipient_selector.setCurrentIndex(max(0, index))
+        self.recipient_selector.blockSignals(False)
+        self.update_recipient_controls()
+
+    def update_recipient_controls(self, *_args):
+        if not hasattr(self, "recipient_controls"):
+            return
+        visible = (self.phase == "conversation" and not self.game_over
+                   and not self.interject_input.isHidden())
+        self.recipient_controls.setVisible(visible)
+        self.recipient_selector.setEnabled(not self.ai_busy)
+        body_id = self.recipient_selector.currentData()
+        capped = body_id is not None and not self.direct_replies.can_direct(body_id)
+        self.recipient_hint.setVisible(visible and body_id is not None)
+        if body_id is not None:
+            name = self.recipient_selector.currentText()
+            count = self.direct_replies.count_for(body_id)
+            hint = f"{name}: {count}/{self.direct_replies.limit} direct replies."
+            if capped:
+                hint += " Let another suspect speak or choose Group."
+            self.recipient_hint.setText(hint)
+        self.say_button.setEnabled(self.phase == "conversation" and not self.game_over
+                                   and not self.ai_busy and not capped)
+
+    def choose_speaker_recipient(self, body_id):
+        if self.phase != "conversation" or self.game_over or self.ai_busy:
+            return
+        name = self.label_for_body(body_id)
+        if not self.characters.get(name, {}).get("alive", False) or name == self.player_name:
+            return
+        if self.interject_input.isHidden():
+            self.interject_conversation()
+        self.refresh_recipient_choices()
+        index = self.recipient_selector.findData(body_id)
+        if index >= 0:
+            self.recipient_selector.setCurrentIndex(index)
+            self.interject_input.setFocus()
+
+    def group_turn_snapshot(self):
+        self.ensure_body_ids()
+        contexts = tuple(self.build_character_context(name) for name, data in self.characters.items()
+                         if data["alive"] and name != self.player_name)
+        overrides = tuple((context.character, override) for context in contexts
+                          if (override := self.item_rules.speech_override(self.body_id(context.character))) is not None)
+        effects = (self.item_rules.protection_armed, self.item_rules.pending_ballot_bonus,
+                   self.item_rules.muffles, self.item_rules.affinities, self.inventory.entries,
+                   self.player_owner_id, self.player_alive)
+        runtime = self.ai_runtime
+        return GroupTurnSnapshot(self.conversation_revision, self.round_number, self.player_name,
+                                 contexts, self.public_state(), tuple(self.public_events),
+                                 tuple(self.public_dialogue), overrides, tuple(sorted(self.body_ids.items())),
+                                 effects, (id(runtime), runtime.config, str(runtime.prompt_root)))
+
+    def invalidate_prepared_turn(self, reason, *, changed=False):
+        if changed:
+            self.conversation_revision += 1
+        active = self.turn_preparation.active
+        had_preparation = active is not None or self.turn_preparation.ready is not None
+        self.turn_preparation.invalidate()
+        if self.awaiting_preparation is not None:
+            self.awaiting_preparation = None
+            self.ai_busy = False
+        if self.prepared_retry_snapshot is not None:
+            self.prepared_retry_snapshot = None
+            self.retry_action = None
+            if hasattr(self, "retry_button"):
+                self.retry_button.hide()
+        if had_preparation:
+            self.trace.record("preparation_invalidated", {"reason": reason,
+                              "ticket": active.identifier if active else None,
+                              "revision": self.conversation_revision})
+        if active is None:
+            self.prepared_scope = None
+
+    def can_prepare_next_turn(self):
+        if (self.phase != "conversation" or self.game_over or self.ai_busy
+                or self.player_reply_required() or self.retry_action is not None
+                or not self.interject_input.isHidden() or not self.public_dialogue):
+            return False
+        latest = self.public_dialogue[-1]
+        return (latest.round_number == self.round_number and latest.speaker != self.player_name
+                and self.characters.get(latest.speaker, {}).get("alive", False))
+
+    def maybe_prepare_next_turn(self):
+        if not self.can_prepare_next_turn():
+            return
+        snapshot = self.group_turn_snapshot()
+        if not snapshot.contexts:
+            return
+        state = self.turn_preparation
+        if ((state.ready is not None and state.ready.snapshot != snapshot)
+                or (state.failure is not None and state.failure.snapshot != snapshot)
+                or (state.active is not None and state.active.snapshot != snapshot)):
+            self.invalidate_prepared_turn("context_changed")
+        ticket = state.reserve(snapshot)
+        if ticket is None:
+            return
+        scope = self.trace.new_job("prepared_proposals", metadata={"round": self.round_number,
+                                   "phase": self.phase, "ticket": ticket.identifier})
+        self.prepared_scope = (ticket.identifier, scope)
+        self.trace.record("preparation_started", {"ticket": ticket.identifier,
+                                                  "revision": snapshot.revision}, scope=scope)
+        runtime = self.ai_runtime
+        fixed = dict(snapshot.overrides)
+        unblocked = tuple(context for context in snapshot.contexts if context.character not in fixed)
+
+        def propose():
+            if ticket.cancelled.is_set():
+                return None
+            proposals = parallel_requests(runtime.speech, unblocked, trace_scope=scope)
+            proposals.update(fixed)
+            return proposals
+
+        def proposed(proposals):
+            if scope is not None:
+                scope.record("job_result", {"result": proposals})
+            if proposals is None or not self.preparation_is_current(ticket):
+                self.discard_preparation(ticket, "stale_proposals", scope)
+                return
+            selector_scope = self.trace.new_job("prepared_selector",
+                parent_job_id=scope.job_id if scope is not None else None,
+                metadata={"round": snapshot.round_number, "phase": "conversation",
+                          "ticket": ticket.identifier})
+            self.prepared_scope = (ticket.identifier, selector_scope)
+
+            def select():
+                if ticket.cancelled.is_set():
+                    return None
+                return call_with_trace(runtime.select_reply, *snapshot.selector_args, proposals,
+                                       trace_scope=selector_scope)
+
+            def selected(speaker):
+                if not self.preparation_is_current(ticket):
+                    self.discard_preparation(ticket, "stale_selection", selector_scope)
+                    return
+                if speaker not in proposals:
+                    self.preparation_failed(ticket, "The conversation could not continue. Please retry.", selector_scope)
+                    return
+                state.publish(ticket, snapshot, speaker, proposals[speaker])
+                self.trace.record("preparation_ready", {"ticket": ticket.identifier,
+                                  "speaker": speaker, "proposal": proposals[speaker]}, scope=selector_scope)
+                if self.awaiting_preparation == ticket.identifier:
+                    self.consume_prepared_turn(snapshot)
+
+            self.start_preparation_worker(ticket, select, selected, selector_scope)
+
+        self.start_preparation_worker(ticket, propose, proposed, scope)
+
+    def preparation_is_current(self, ticket):
+        return (self.phase == "conversation" and not self.game_over
+                and not self.player_reply_required() and self.interject_input.isHidden()
+                and self.turn_preparation.current(ticket, self.group_turn_snapshot()))
+
+    def start_preparation_worker(self, ticket, operation, on_success, scope):
+        self.turn_preparation.worker_started(ticket)
+        worker = AIWorker(operation)
+        worker.result_ready.connect(on_success)
+        worker.failed.connect(lambda message: self.preparation_failed(ticket, message, scope))
+        worker.finished.connect(lambda: self.preparation_worker_finished(ticket))
+        if scope is not None:
+            scope.record("job_started", {"ticket": ticket.identifier, "speculative": True})
+        self.start_worker(worker)
+
+    def preparation_worker_finished(self, ticket):
+        released = self.turn_preparation.worker_finished(ticket)
+        if released:
+            if (self.prepared_scope is not None and self.prepared_scope[0] == ticket.identifier
+                    and self.turn_preparation.ready is None and self.turn_preparation.failure is None):
+                self.prepared_scope = None
+            self.maybe_prepare_next_turn()
+
+    def discard_preparation(self, ticket, reason, scope):
+        if scope is not None:
+            scope.record("job_ignored", {"reason": reason, "ticket": ticket.identifier})
+        if self.turn_preparation.active is not ticket:
+            return
+        waiting = self.awaiting_preparation == ticket.identifier
+        self.invalidate_prepared_turn(reason)
+        if waiting and self.phase == "conversation" and not self.game_over:
+            self.run_conversation_loop()
+            if not self.player_reply_required():
+                self.run_multiple_responses()
+
+    def preparation_failed(self, ticket, message, scope):
+        if scope is not None:
+            scope.record("job_failed", {"error_type": "request_failed", "ticket": ticket.identifier})
+        if not self.preparation_is_current(ticket):
+            self.discard_preparation(ticket, "stale_failure", scope)
+            return
+        self.turn_preparation.fail(ticket, ticket.snapshot, message)
+        if self.awaiting_preparation == ticket.identifier:
+            self.show_preparation_failure(ticket.snapshot, message)
+
+    def show_preparation_failure(self, snapshot, message):
+        self.awaiting_preparation = None
+        self.ai_busy = False
+        self.interject_input.setEnabled(True)
+        self.run_conversation_loop()
+        self.secondary_output_area.setText(message)
+        self.secondary_output_area.show()
+        self.prepared_retry_snapshot = snapshot
+        self.retry_action = lambda: self.retry_prepared_turn(snapshot)
+        self.retry_button.show()
+        self.update_inventory_button()
+
+    def retry_prepared_turn(self, snapshot):
+        if (self.phase != "conversation" or self.game_over or self.ai_busy
+                or self.player_reply_required() or not self.interject_input.isHidden()
+                or self.group_turn_snapshot() != snapshot):
+            self.retry_action = None
+            self.retry_button.hide()
+            self.prepared_retry_snapshot = None
+            return
+        self.invalidate_prepared_turn("preparation_retry")
+        self.run_multiple_responses(snapshot=snapshot)
+
+    def request_next_group_turn(self):
+        snapshot = self.group_turn_snapshot()
+        state = self.turn_preparation
+        if self.consume_prepared_turn(snapshot):
+            return
+        if state.failure is not None and state.failure.snapshot == snapshot:
+            self.show_preparation_failure(snapshot, state.failure.message)
+            return
+        ticket = state.active
+        if ticket is not None and state.current(ticket, snapshot):
+            self.awaiting_preparation = ticket.identifier
+            self.ai_busy = True
+            self.pass_button.setEnabled(False)
+            self.interject_button.setEnabled(False)
+            self.vote_button.setEnabled(False)
+            self.interject_input.setEnabled(False)
+            self.say_button.setEnabled(False)
+            self.secondary_output_area.setText("...")
+            self.secondary_output_area.show()
+            self.update_inventory_button()
+            self.trace.record("preparation_awaited", {"ticket": ticket.identifier})
+            return
+        self.invalidate_prepared_turn("pass_without_current_preparation")
+        self.run_multiple_responses()
+
+    def consume_prepared_turn(self, snapshot):
+        if (self.phase != "conversation" or self.game_over or self.player_reply_required()
+                or self.group_turn_snapshot() != snapshot):
+            return False
+        prepared = self.turn_preparation.take(snapshot)
+        if prepared is None:
+            return False
+        scope = (self.prepared_scope[1] if self.prepared_scope is not None
+                 and self.prepared_scope[0] == prepared.ticket_id else None)
+        self.awaiting_preparation = None
+        self.ai_busy = False
+        self.interject_input.setEnabled(True)
+        self.secondary_output_area.clear()
+        previous = self.trace_callback_scope
+        self.trace_callback_scope = scope
+        try:
+            self.trace.record("preparation_consumed", {"ticket": prepared.ticket_id}, scope=scope)
+            self.handle_best_response(prepared.proposal, prepared.speaker)
+        finally:
+            self.trace_callback_scope = previous
+        self.update_inventory_button()
+        return True
+
     def player_reply_required(self):
         if self.phase != "conversation" or self.game_over or not self.public_dialogue:
             return False
@@ -2238,6 +2612,7 @@ class GameWindow(QMainWindow):
                 or (latest.speaker == "Detective" and latest.addressee != self.player_name)):
             self.run_multiple_responses()
             return
+        self.refresh_recipient_choices()
         self.pass_button.setEnabled(not self.player_reply_required())
         self.interject_button.setEnabled(True)
         if self.player_reply_required():
@@ -2246,16 +2621,21 @@ class GameWindow(QMainWindow):
         else:
             self.interject_input.hide()
             self.say_button.hide()
+        self.update_recipient_controls()
+        self.maybe_prepare_next_turn()
 
 
     def pass_conversation(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy or self.player_reply_required():
             return
         self.cancel_dictation()
+        self.retry_action = None
+        self.retry_button.hide()
+        self.prepared_retry_snapshot = None
         self.trace_action("conversation_passed")
         self.interject_input.hide()
         self.say_button.hide()
-        self.run_multiple_responses()
+        self.request_next_group_turn()
 
         
         
@@ -2263,6 +2643,7 @@ class GameWindow(QMainWindow):
     def interject_conversation(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
             return
+        self.invalidate_prepared_turn("interjection_started")
         if self.player_reply_required():
             self.interject_input.setFocus()
             return
@@ -2275,6 +2656,7 @@ class GameWindow(QMainWindow):
         self.say_button.show()
         self.pass_button.setEnabled(False)
         self.interject_button.setEnabled(False)
+        self.refresh_recipient_choices()
 
     def send_interjection(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy:
@@ -2282,12 +2664,26 @@ class GameWindow(QMainWindow):
         speech = self.interject_input.text().strip()
         if not speech:
             return
+        recipient_id = self.recipient_selector.currentData()
+        recipient = self.label_for_body(recipient_id) if recipient_id is not None else None
+        if recipient_id is not None and not self.characters.get(recipient, {}).get("alive", False):
+            self.secondary_output_area.setText("That suspect is no longer available. Choose Group or a living suspect.")
+            self.secondary_output_area.show()
+            self.refresh_recipient_choices()
+            return
+        if recipient_id is not None and not self.direct_replies.can_direct(recipient_id):
+            self.update_recipient_controls()
+            return
         self.cancel_dictation()
         self.interject_input.clear()
         self.interject_input.hide()
         self.say_button.hide()
-        self.append_speech(self.player_name, speech)
-        self.run_conversation_loop()
+        self.append_speech(self.player_name, speech, recipient)
+        self.recipient_selector.setCurrentIndex(0)
+        if recipient is not None:
+            self.run_single_response(recipient, direct_reply=True)
+        else:
+            self.run_conversation_loop()
 
     def can_call_vote(self):
         return (self.phase == "conversation" and not self.game_over and not self.ai_busy
@@ -2313,6 +2709,7 @@ class GameWindow(QMainWindow):
     def run_voting_phase(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy or self.player_reply_required():
             return
+        self.invalidate_prepared_turn("voting_started", changed=True)
         self.phase = "voting"
         self.cancel_dictation()
         self.update_inventory_button()
@@ -2541,6 +2938,7 @@ class GameWindow(QMainWindow):
         if self.game_over:
             return
         self.game_over = True
+        self.invalidate_prepared_turn("game_over", changed=True)
         self.phase = "game_over"
         self.cancel_dictation()
         self.update_inventory_button()
@@ -2641,6 +3039,7 @@ class GameWindow(QMainWindow):
         self.trace_action("restart_requested")
         self.trace.end("restart")
         self.game_over = True
+        self.invalidate_prepared_turn("restarting", changed=True)
         self.phase = "restarting"
         self.cancel_dictation()
         # Close the ESC overlay if it’s open
@@ -2700,6 +3099,9 @@ class GameWindow(QMainWindow):
     def run_conversation_phase(self):
         if self.game_over:
             return
+        self.invalidate_prepared_turn("discussion_started", changed=True)
+        self.direct_replies.begin_discussion(self.round_number)
+        self.refresh_recipient_choices()
         self.phase = "conversation"
         self.cancel_dictation()
         self.update_inventory_button()
@@ -2760,40 +3162,48 @@ class GameWindow(QMainWindow):
         self.trace_state("conversation_started")
         self.run_conversation_loop()
     
-    def run_single_response(self, mentioned):
+    def run_single_response(self, mentioned, *, direct_reply=False):
         if (self.phase != "conversation" or self.game_over or self.ai_busy
                 or self.player_reply_required()
                 or mentioned not in self.characters or not self.characters[mentioned]["alive"]):
             return
+        if direct_reply and not self.direct_replies.can_direct(self.body_id(mentioned)):
+            self.update_recipient_controls()
+            return
+        self.invalidate_prepared_turn("direct_response")
         override = self.item_rules.speech_override(self.body_id(mentioned))
         if override is not None:
             self.trace.record("speech_overridden", {"speaker": mentioned, "proposal": override})
-            self.handle_single_response(mentioned, override)
+            self.handle_single_response(mentioned, override, direct_reply=direct_reply)
             return
         context = self.build_character_context(mentioned)
         runtime = self.ai_runtime
         self.start_ai_request(lambda scope=None: call_with_trace(runtime.speech, context, trace_scope=scope),
-                              lambda proposal: self.handle_single_response(mentioned, proposal),
+                              lambda proposal: self.handle_single_response(mentioned, proposal, direct_reply=direct_reply),
                               f"{mentioned} is responding...", **self.trace_job_options("speech", mentioned))
 
-    def handle_single_response(self, mentioned, response):
+    def handle_single_response(self, mentioned, response, *, direct_reply=False):
         if self.phase != "conversation" or self.game_over:
             return
         response = self.item_rules.speech_override(self.body_id(mentioned)) or response
-        self.append_speech(mentioned, response.speech, response.addressee)
+        self.append_speech(mentioned, response.speech, response.addressee, direct_reply=direct_reply)
         self.run_conversation_loop()
     
-    def run_multiple_responses(self):
+    def run_multiple_responses(self, *, snapshot=None):
         if self.phase != "conversation" or self.game_over or self.ai_busy or self.player_reply_required():
             return
-        contexts = tuple(self.build_character_context(char) for char, data in self.characters.items()
-                         if data["alive"] and char != self.player_name)
+        guarded = snapshot is not None
+        current = self.group_turn_snapshot()
+        if snapshot is not None and snapshot != current:
+            return
+        snapshot = snapshot or current
+        contexts = snapshot.contexts
         if not contexts:
             return
-        selector_snapshot = (self.public_state(), tuple(self.public_events), tuple(self.public_dialogue))
+        selector_snapshot = snapshot.selector_args
         runtime = self.ai_runtime
-        overrides = {context.character: self.item_rules.speech_override(self.body_id(context.character))
-                     for context in contexts}
+        fixed = dict(snapshot.overrides)
+        overrides = {context.character: fixed.get(context.character) for context in contexts}
         unblocked = tuple(context for context in contexts if overrides[context.character] is None)
         fixed = {name: proposal for name, proposal in overrides.items() if proposal is not None}
         def generate(scope=None):
@@ -2802,20 +3212,27 @@ class GameWindow(QMainWindow):
             if scope is not None:
                 scope.record("speech_overrides", {"proposals": fixed})
             return proposals
+        context_guard = (lambda: self.group_turn_snapshot() == snapshot) if guarded else None
+        options = self.trace_job_options("proposals")
+        if context_guard is not None:
+            options["context_guard"] = context_guard
         self.start_ai_request(generate,
-                              lambda proposals: self.handle_multiple_responses(proposals, selector_snapshot),
-                              "The group is responding...", **self.trace_job_options("proposals"))
+                              lambda proposals: self.handle_multiple_responses(proposals, selector_snapshot,
+                                                                               context_guard=context_guard),
+                              "The group is responding...", **options)
 
-    def handle_multiple_responses(self, responses, selector_snapshot):
+    def handle_multiple_responses(self, responses, selector_snapshot, *, context_guard=None):
         if self.phase != "conversation" or self.game_over:
             return
         runtime = self.ai_runtime
         proposals = {speaker: self.item_rules.speech_override(self.body_id(speaker)) or proposal
                      for speaker, proposal in responses.items()}
+        options = self.trace_job_options("selector", parent_job_id=self.last_completed_trace_job_id)
+        if context_guard is not None:
+            options["context_guard"] = context_guard
         self.start_ai_request(lambda scope=None: call_with_trace(runtime.select_reply, *selector_snapshot, proposals, trace_scope=scope),
                               lambda speaker: self.handle_best_response(proposals[speaker], speaker),
-                              "The conversation is continuing...",
-                              **self.trace_job_options("selector", parent_job_id=self.last_completed_trace_job_id))
+                              "The conversation is continuing...", **options)
 
     def cleanup_worker(self):
         self.active_workers = [worker for worker in self.active_workers if not worker.isFinished()]
@@ -3566,6 +3983,8 @@ class HowToPlayWindow(QWidget):
             "The Knife's second attack enters its target's room; a distant C4 explosion does not.\n\n"
             "During discussion\n"
             "Listen, pass, or interject with your own alibi. When someone directly addresses you, reply before passing or calling a vote. "
+            "Choose To: Group or a living suspect; you can also select a suspect by clicking their name. "
+            "A direct question gets that suspect's reply. After three direct replies from the same suspect, another suspect must speak before you can directly ask them again. Group remains available. "
             "In the message box, Record voice starts the microphone; Stop recording transcribes into your draft. "
             "You can keep typing, edit the result, or Cancel. Nothing is spoken until you choose Say. "
             "Use Inventory while the conversation is waiting for you. Items do not send or erase the words you are composing. "

@@ -92,6 +92,7 @@ class DictationIntegrationTests(unittest.TestCase):
         self.transcribe = self.patches.enter_context(patch.object(game.AIRuntime, "transcribe", return_value="Spoken words."))
         self.windows = []
         self.releases = []
+        self.patches.enter_context(patch.object(game.GameWindow, "maybe_prepare_next_turn"))
         self.window = self.make_window()
 
     def tearDown(self):

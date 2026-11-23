@@ -52,6 +52,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.speech = self.stack.enter_context(patch.object(game.AIRuntime, "speech", return_value=game.SpeechProposal(None, "My account.")))
         self.stack.enter_context(patch.object(game.AIRuntime, "select_reply", side_effect=lambda state, events, dialogue, proposals: next(iter(proposals))))
         self.stack.enter_context(patch.object(game.AIRuntime, "vote", return_value="NONE"))
+        self.stack.enter_context(patch.object(game.GameWindow, "maybe_prepare_next_turn"))
         self.window = game.GameWindow()
         self.window.player_name_input.setText("Alex")
         self.window.start_game()

@@ -68,6 +68,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.selector = self.patches.enter_context(patch.object(
             game.AIRuntime, "select_reply", side_effect=lambda state, events, dialogue, proposals: next(iter(proposals))
         ))
+        self.patches.enter_context(patch.object(game.GameWindow, "maybe_prepare_next_turn"))
         self.window = game.GameWindow()
         self.app.processEvents()
         self.window.player_name = "Alex"
