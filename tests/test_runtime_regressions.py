@@ -866,7 +866,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.window.remember("Jerry", "disposition", "I distrust Alex.")
         self.window.append_speech("Alex", "I was alone, Jerry is lying.")
         operations = []
-        with patch.object(self.window, "start_ai_request", side_effect=lambda operation, *args: operations.append(operation)):
+        with patch.object(self.window, "start_ai_request", side_effect=lambda operation, *args, **kwargs: operations.append(operation)):
             self.window.run_single_response("Jerry")
             self.window.run_voting_phase()
         self.assertEqual(len(operations), 2)

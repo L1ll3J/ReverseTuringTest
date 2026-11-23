@@ -237,20 +237,20 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.retry_ai_request()
         retry.assert_not_called()
 
-    def test_muffle_prevents_generation_selector_sees_override_and_commit_rechecks(self):
+    def test_muffle_excluded_from_generation_selection_and_stale_commits(self):
         self.conversation()
         self.give("muffle", "Dave")
         seen = []
         with patch.object(self.window.ai_runtime, "select_reply", side_effect=lambda state, events, dialogue, proposals:
-                          seen.append(dict(proposals)) or "Dave"):
+                          seen.append(dict(proposals)) or next(iter(proposals))):
             self.window.run_multiple_responses()
             self.wait_for_workers()
         self.assertNotIn("Dave", [call.args[0].character for call in self.speech.call_args_list])
-        self.assertEqual(seen[0]["Dave"].speech, MUFFLED_SPEECH)
-        self.assertEqual(self.window.public_dialogue[-1].text, MUFFLED_SPEECH)
+        self.assertNotIn("Dave", seen[0])
+        before = tuple(self.window.public_dialogue)
         self.window.handle_best_response(game.SpeechProposal("Alex", "Forbidden articulate text"), "Dave")
-        self.assertEqual(self.window.public_dialogue[-1].text, MUFFLED_SPEECH)
-        self.assertIsNone(self.window.public_dialogue[-1].addressee)
+        self.window.handle_single_response("Dave", game.SpeechProposal("Alex", "Forbidden articulate text"))
+        self.assertEqual(tuple(self.window.public_dialogue), before)
         with patch.object(self.window, "start_ai_request"):
             self.window.run_voting_phase()
         self.assertIn("Dave", self.window.expected_voters)

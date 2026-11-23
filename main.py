@@ -17,6 +17,7 @@ from overlay_host import OverlayHost
 from npc_items import NPCItemState
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, ItemUseContext, PlayerItemRules, ItemRuleError
+from muffled import muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
 from item_ui import ItemDraftDialog, InventoryPage
@@ -1692,6 +1693,7 @@ class GameWindow(QMainWindow):
         }
 
         for character in self.characters:
+            self.characters[character]["muffle_style"] = character
             if character in self.player_name or self.player_name == "David" or self.player_name == "Debbie":
                 self.player_name = "Einstein"
 
@@ -2511,9 +2513,9 @@ class GameWindow(QMainWindow):
     def group_turn_snapshot(self):
         self.ensure_body_ids()
         contexts = tuple(self.build_character_context(name) for name, data in self.characters.items()
-                         if data["alive"] and name != self.player_name)
-        overrides = tuple((context.character, override) for context in contexts
-                          if (override := self.item_rules.speech_override(self.body_id(context.character))) is not None)
+                         if data["alive"] and name != self.player_name
+                         and not self.item_rules.is_muffled(self.body_id(name)))
+        overrides = ()
         effects = (self.item_rules.protection_armed, self.item_rules.pending_ballot_bonus,
                    self.item_rules.muffles, self.item_rules.affinities, self.inventory.entries,
                    self.player_owner_id, self.player_alive)
@@ -2547,7 +2549,8 @@ class GameWindow(QMainWindow):
     def can_prepare_next_turn(self):
         if (self.phase != "conversation" or self.game_over or self.ai_busy
                 or self.player_reply_required() or self.retry_action is not None
-                or not self.interject_input.isHidden() or not self.public_dialogue):
+                or not self.interject_input.isHidden() or not self.public_dialogue
+                or self.addressed_muffled_npc() is not None):
             return False
         latest = self.public_dialogue[-1]
         return (latest.round_number == self.round_number and latest.speaker != self.player_name
@@ -2687,6 +2690,10 @@ class GameWindow(QMainWindow):
         self.run_multiple_responses(snapshot=snapshot)
 
     def request_next_group_turn(self):
+        muffled = self.addressed_muffled_npc()
+        if muffled is not None:
+            self.run_single_response(muffled)
+            return
         snapshot = self.group_turn_snapshot()
         state = self.turn_preparation
         if self.consume_prepared_turn(snapshot):
@@ -2769,6 +2776,9 @@ class GameWindow(QMainWindow):
             self.interject_input.hide()
             self.say_button.hide()
         self.update_recipient_controls()
+        if self.all_npcs_muffled() and self.addressed_muffled_npc() is None and not self.player_reply_required():
+            self.no_open_speaker()
+            return
         self.maybe_prepare_next_turn()
 
 
@@ -2832,10 +2842,32 @@ class GameWindow(QMainWindow):
         else:
             self.run_conversation_loop()
 
+    def addressed_muffled_npc(self):
+        if self.phase != "conversation" or self.game_over or not self.public_dialogue:
+            return None
+        latest = self.public_dialogue[-1]
+        target = latest.addressee
+        if (latest.round_number == self.round_number and target != self.player_name
+                and self.characters.get(target, {}).get("alive", False)
+                and self.item_rules.is_muffled(self.body_id(target))):
+            return target
+        return None
+
+    def all_npcs_muffled(self):
+        living = [name for name, data in self.characters.items()
+                  if data["alive"] and name != self.player_name]
+        return bool(living) and all(self.item_rules.is_muffled(self.body_id(name)) for name in living)
+
+    def no_open_speaker(self):
+        self.restore_conversation_decision()
+        self.pass_button.setEnabled(False)
+        self.secondary_output_area.setText("Nobody can speak freely. Address a suspect or call a vote.")
+        self.secondary_output_area.show()
+
     def can_call_vote(self):
         return (self.phase == "conversation" and not self.game_over and not self.ai_busy
                 and not self.player_reply_required()
-                and len(self.current_conversation) >= self.minimum_to_call_vote)
+                and (len(self.current_conversation) >= self.minimum_to_call_vote or self.all_npcs_muffled()))
 
     def call_vote(self):
         if not self.can_call_vote():
@@ -3317,48 +3349,69 @@ class GameWindow(QMainWindow):
             self.update_recipient_controls()
             return
         self.invalidate_prepared_turn("direct_response")
-        override = self.item_rules.speech_override(self.body_id(mentioned))
-        if override is not None:
-            self.trace.record("speech_overridden", {"speaker": mentioned, "proposal": override})
-            self.handle_single_response(mentioned, override, direct_reply=direct_reply)
+        body_id = self.body_id(mentioned)
+        data = self.characters[mentioned]
+        muted = self.item_rules.is_muffled(body_id)
+        if muted and self.addressed_muffled_npc() != mentioned:
             return
         context = self.build_character_context(mentioned)
+        snapshot = self.group_turn_snapshot()
+        style = data.get("muffle_style", "fallback")
+        def current():
+            return (self.phase == "conversation" and not self.game_over
+                    and self.characters.get(mentioned) is data and data["alive"]
+                    and self.body_id(mentioned) == body_id
+                    and self.item_rules.is_muffled(body_id) == muted
+                    and data.get("muffle_style", "fallback") == style
+                    and (not muted or (self.build_character_context(mentioned) == context
+                                       and self.group_turn_snapshot() == snapshot)))
         runtime = self.ai_runtime
+        if muted:
+            def choose_tone(scope=None):
+                tone = call_with_trace(runtime.muffled_tone, context, style, trace_scope=scope)
+                # Validate mocked/custom runtimes as well as the structured API response.
+                muffled_sound(style, tone)
+                return tone
+            def commit_tone(tone):
+                if current():
+                    self.append_speech(mentioned, muffled_sound(style, tone), None, direct_reply=direct_reply)
+                    self.run_conversation_loop()
+            self.start_ai_request(choose_tone, commit_tone, "...", context_guard=current,
+                                  **self.trace_job_options("muffled_tone", mentioned))
+            return
         self.start_ai_request(lambda scope=None: call_with_trace(runtime.speech, context, trace_scope=scope),
                               lambda proposal: self.handle_single_response(mentioned, proposal, direct_reply=direct_reply),
-                              f"{mentioned} is responding...", **self.trace_job_options("speech", mentioned))
+                              f"{mentioned} is responding...", context_guard=current,
+                              **self.trace_job_options("speech", mentioned))
 
     def handle_single_response(self, mentioned, response, *, direct_reply=False):
-        if self.phase != "conversation" or self.game_over:
+        if (self.phase != "conversation" or self.game_over
+                or not self.characters.get(mentioned, {}).get("alive", False)
+                or self.item_rules.is_muffled(self.body_id(mentioned))):
             return
-        response = self.item_rules.speech_override(self.body_id(mentioned)) or response
         self.append_speech(mentioned, response.speech, response.addressee, direct_reply=direct_reply)
         self.run_conversation_loop()
     
     def run_multiple_responses(self, *, snapshot=None):
         if self.phase != "conversation" or self.game_over or self.ai_busy or self.player_reply_required():
             return
-        guarded = snapshot is not None
+        muffled = self.addressed_muffled_npc()
+        if muffled is not None:
+            self.run_single_response(muffled)
+            return
         current = self.group_turn_snapshot()
         if snapshot is not None and snapshot != current:
             return
         snapshot = snapshot or current
         contexts = snapshot.contexts
         if not contexts:
+            self.no_open_speaker()
             return
         selector_snapshot = snapshot.selector_args
         runtime = self.ai_runtime
-        fixed = dict(snapshot.overrides)
-        overrides = {context.character: fixed.get(context.character) for context in contexts}
-        unblocked = tuple(context for context in contexts if overrides[context.character] is None)
-        fixed = {name: proposal for name, proposal in overrides.items() if proposal is not None}
         def generate(scope=None):
-            proposals = parallel_requests(runtime.speech, unblocked, trace_scope=scope)
-            proposals.update(fixed)
-            if scope is not None:
-                scope.record("speech_overrides", {"proposals": fixed})
-            return proposals
-        context_guard = (lambda: self.group_turn_snapshot() == snapshot) if guarded else None
+            return parallel_requests(runtime.speech, contexts, trace_scope=scope)
+        context_guard = lambda: self.group_turn_snapshot() == snapshot
         options = self.trace_job_options("proposals")
         if context_guard is not None:
             options["context_guard"] = context_guard
@@ -3371,8 +3424,12 @@ class GameWindow(QMainWindow):
         if self.phase != "conversation" or self.game_over:
             return
         runtime = self.ai_runtime
-        proposals = {speaker: self.item_rules.speech_override(self.body_id(speaker)) or proposal
-                     for speaker, proposal in responses.items()}
+        proposals = {speaker: proposal for speaker, proposal in responses.items()
+                     if speaker != self.player_name and self.characters.get(speaker, {}).get("alive", False)
+                     and not self.item_rules.is_muffled(self.body_id(speaker))}
+        if not proposals:
+            self.no_open_speaker()
+            return
         options = self.trace_job_options("selector", parent_job_id=self.last_completed_trace_job_id)
         if context_guard is not None:
             options["context_guard"] = context_guard
@@ -3384,9 +3441,10 @@ class GameWindow(QMainWindow):
         self.active_workers = [worker for worker in self.active_workers if not worker.isFinished()]
 
     def handle_best_response(self, best_response, speaker):
-        if self.phase != "conversation" or self.game_over:
+        if (self.phase != "conversation" or self.game_over
+                or not self.characters.get(speaker, {}).get("alive", False)
+                or self.item_rules.is_muffled(self.body_id(speaker))):
             return
-        best_response = self.item_rules.speech_override(self.body_id(speaker)) or best_response
         self.trace.record("proposal_selected", {"speaker": speaker, "proposal": best_response},
                           scope=self.trace_callback_scope)
         self.append_speech(speaker, best_response.speech, best_response.addressee)

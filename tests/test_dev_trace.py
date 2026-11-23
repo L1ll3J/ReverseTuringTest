@@ -1,6 +1,7 @@
 """Local trace capture contracts, including real Qt job and action boundaries."""
 
 import concurrent.futures
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -219,6 +220,11 @@ class GameTraceTests(unittest.TestCase):
         snapshot = next(record for record in records if record["kind"] == "state_snapshot" and record["payload"]["reason"] == "kill_resolved")
         self.assertFalse(snapshot["payload"]["state"]["characters"][victim]["alive"])
         self.assertNotIn("Room Assignments", self.window.output_area.toPlainText())
+
+    def test_manifest_fingerprints_actual_muffled_policy(self):
+        manifest = json.loads(self.window.trace.run_dir.joinpath("manifest.json").read_text(encoding="utf-8"))
+        policy = Path(self.window.ai_runtime.prompt_root, "prompts/muffled.xml").read_bytes()
+        self.assertEqual(manifest["metadata"]["prompts"]["prompts/muffled.xml"], sha256(policy).hexdigest())
 
     def test_parallel_requests_record_every_draft_but_commit_only_selected_speech(self):
         self.window.phase = "conversation"
