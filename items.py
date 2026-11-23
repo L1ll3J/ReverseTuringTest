@@ -11,6 +11,10 @@ class InventoryError(ValueError):
     pass
 
 
+RARITY_WEIGHTS = MappingProxyType({"green": 40, "blue": 30, "purple": 20, "gold": 10})
+RARITY_COLORS = MappingProxyType({"green": "#8dbb8d", "blue": "#82a6ce", "purple": "#b795ce", "gold": "#d2b56d"})
+
+
 @dataclass(frozen=True)
 class ItemDefinition:
     item_id: str
@@ -21,6 +25,11 @@ class ItemDefinition:
     requires_message: bool = False
     reusable: bool = False
     flavour: str = ""
+    rarity: str = "green"
+
+    def __post_init__(self):
+        if self.rarity not in RARITY_WEIGHTS:
+            raise ValueError("An item requires a known rarity tier")
 
 
 ITEM_CATALOGUE = MappingProxyType({
@@ -44,24 +53,24 @@ ITEM_CATALOGUE = MappingProxyType({
     ),
     "guardian_angel": ItemDefinition(
         "guardian_angel", "Guardian Angel",
-        "Arm one protection against your next death. Protection follows you through possession.",
+        "Protect your current body from its next death. Protection stays with that body if you swap.",
         "self", False,
-        flavour="Death can wait. Once.",
+        flavour="Death can wait. Once.", rarity="gold",
     ),
     "throw_voice": ItemDefinition(
         "throw_voice", "Throw Voice", "Send one apparent message in a living suspect's voice.",
         "living_npc", True, requires_message=True,
-        flavour="Let someone else put your foot in their mouth.",
+        flavour="Let someone else put your foot in their mouth.", rarity="blue",
     ),
     "dark_whisper": ItemDefinition(
         "dark_whisper", "Dark Whisper", "Send one apparent message from a dead character's voice.",
         "dead_body", True, requires_message=True,
-        flavour="Death needn't have the last word.",
+        flavour="Death needn't have the last word.", rarity="blue",
     ),
     "love_potion": ItemDefinition(
         "love_potion", "Love Potion",
         "Make a living suspect adore you for this discussion. Their devotion becomes bitterness next discussion.",
-        "living_npc", True, flavour="Sweet on the tongue. Bitter by morning.",
+        "living_npc", True, flavour="Sweet on the tongue. Bitter by morning.", rarity="blue",
     ),
     "forged_note": ItemDefinition(
         "forged_note", "Forged Note", "Prepare a signed note for the body of your next victim.",
@@ -70,16 +79,16 @@ ITEM_CATALOGUE = MappingProxyType({
     ),
     "divine_revelation": ItemDefinition(
         "divine_revelation", "Divine Revelation", "Send a private message that seems to come from a higher power.",
-        "living_npc", True, requires_message=True, flavour="Funny how the heavens agree with you.",
+        "living_npc", True, requires_message=True, flavour="Funny how the heavens agree with you.", rarity="blue",
     ),
     "mail_in_ballot": ItemDefinition(
         "mail_in_ballot", "Mail-in Ballot", "Choose a suspect whose ballot you will cast this round.",
         "living_npc", True,
-        flavour="Their civic duty is in your capable hands.",
+        flavour="Their civic duty is in your capable hands.", rarity="blue",
     ),
     "watch_this_drive": ItemDefinition(
         "watch_this_drive", "Watch This Drive", "Mark a suspect. Kill them next night to earn one extra basic room attack.",
-        "living_npc", True, flavour="One good murder deserves another.",
+        "living_npc", True, flavour="One good murder deserves another.", rarity="blue",
     ),
     "room_reservation": ItemDefinition(
         "room_reservation", "Room Reservation",
@@ -102,45 +111,49 @@ ITEM_CATALOGUE = MappingProxyType({
     "listening_glass": ItemDefinition(
         "listening_glass", "Listening Glass", "Privately inspect one suspect's recorded experience from the latest night.",
         "living_npc", True,
-        flavour="Some nights bear listening to twice.",
+        flavour="Some nights bear listening to twice.", rarity="blue",
     ),
     "stay_of_execution": ItemDefinition(
         "stay_of_execution", "Stay of Execution", "Protect one body from execution in the next actual vote only.",
         "living_body", True,
-        flavour="A postponement can feel remarkably like a pardon.",
+        flavour="A postponement can feel remarkably like a pardon.", rarity="blue",
     ),
     "booby_trap": ItemDefinition(
-        "booby_trap", "Booby Trap", "Prepare a room trap for next night. The next entering group triggers it once.",
+        "booby_trap", "Booby Trap", "Prepare a room trap for next night. The next person to enter triggers it once.",
         "room", False,
-        flavour="Do come in. Everyone at once.",
+        flavour="Do come in. Mind the step.", rarity="purple",
     ),
     "lucky_coin": ItemDefinition(
         "lucky_coin", "(Un)Lucky Coin", "Flip between your death and a chosen living body's death. Reusable.",
-        "living_body", False, reusable=True,
-        flavour="A little weight in the hand. A great deal hanging in the balance.",
+        "living_body", True, reusable=True,
+        flavour="A little weight in the hand. A great deal hanging in the balance.", rarity="blue",
     ),
     "spin_the_dagger": ItemDefinition(
         "spin_the_dagger", "Spin the Dagger", "Strike a random living person, possibly yourself.", "self", False,
-        flavour="At last, a fair chance to make this your own problem.",
+        flavour="At last, a fair chance to make this your own problem.", rarity="purple",
     ),
     "presidential_decree": ItemDefinition(
         "presidential_decree", "Presidential Decree", "Skip the next vote without spending pending extra ballots.",
         "self", False,
-        flavour="The people have spoken quite enough.",
+        flavour="The people have spoken quite enough.", rarity="purple",
     ),
     "occult_ritual": ItemDefinition(
         "occult_ritual", "Occult Ritual", "Curse a body to die at the action phase after next.", "living_body", False,
-        flavour="Some appointments are best forgotten. This one isn't.",
+        flavour="Some appointments are best forgotten. This one isn't.", rarity="purple",
     ),
     "mass_discombobulator": ItemDefinition(
         "mass_discombobulator", "Mass Discombobulator",
         "Erase every suspect's memories of this run. Personalities, physical state and active item effects remain.",
         "self", False,
-        flavour="A fresh start for everyone who knew too much.",
+        flavour="A fresh start for everyone who knew too much.", rarity="gold",
     ),
     "revolver": ItemDefinition(
         "revolver", "Revolver", "Shoot one living body immediately in public.", "living_body", False,
-        flavour="A rather loud way to end a discussion.",
+        flavour="A rather loud way to end a discussion.", rarity="purple",
+    ),
+    "soul": ItemDefinition(
+        "soul", "Soul Transfusion", "Permanently exchange bodies with a living suspect. Memories and inventory follow the mind.",
+        "living_npc", True, rarity="gold",
     ),
 })
 
@@ -304,7 +317,24 @@ class DraftState:
         self._seen_rooms.add(room_id)
         if not eligible:
             return None
-        options = tuple(self._rng.sample(eligible, min(3, len(eligible))))
+        remaining = list(eligible)
+        selected = []
+        for _slot in range(min(3, len(remaining))):
+            tiers = {tier: [item_id for item_id in remaining if ITEM_CATALOGUE[item_id].rarity == tier]
+                     for tier in RARITY_WEIGHTS}
+            total = sum(weight for tier, weight in RARITY_WEIGHTS.items() if tiers[tier])
+            roll = self._rng.random() * total
+            cumulative = 0
+            for tier, weight in RARITY_WEIGHTS.items():
+                if not tiers[tier]:
+                    continue
+                cumulative += weight
+                if roll < cumulative:
+                    item_id = self._rng.choice(tiers[tier])
+                    selected.append(item_id)
+                    remaining.remove(item_id)
+                    break
+        options = tuple(selected)
         picks = min(3 if self._extra_pick_armed else 1, len(options))
         offer = DraftOffer(uuid4().hex, room_id, options, picks)
         self._pending_offer = offer
@@ -322,17 +352,22 @@ class DraftState:
         if type(slot_index) is not int or not 0 <= slot_index < len(offer.options):
             raise InventoryError("Choose a valid item slot")
 
-    def reroll_alternatives(self, offer_id: str, inventory: InventorySnapshot) -> tuple[str, ...]:
+    def reroll_alternatives(self, offer_id: str, inventory: InventorySnapshot, *, slot_index=None) -> tuple[str, ...]:
         offer = self._require_offer(offer_id)
         owned = self._owned_types(inventory)
+        if slot_index is not None:
+            self._require_slot(offer, slot_index)
+            tiers = {ITEM_CATALOGUE[offer.options[slot_index]].rarity}
+        else:
+            tiers = {ITEM_CATALOGUE[item_id].rarity for item_id in offer.options}
         return tuple(item_id for item_id in self.eligible_item_ids
                      if item_id not in offer.options and item_id not in offer.picked_item_ids
-                     and item_id not in owned)
+                     and item_id not in owned and ITEM_CATALOGUE[item_id].rarity in tiers)
 
     def reroll(self, offer_id: str, slot_index: int, inventory: InventorySnapshot) -> DraftOffer:
         offer = self._require_offer(offer_id)
         self._require_slot(offer, slot_index)
-        alternatives = self.reroll_alternatives(offer_id, inventory)
+        alternatives = self.reroll_alternatives(offer_id, inventory, slot_index=slot_index)
         if not self._rerolls_remaining:
             raise InventoryError("The run's reroll has already been used")
         if not alternatives:

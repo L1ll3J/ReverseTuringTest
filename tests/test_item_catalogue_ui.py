@@ -13,7 +13,7 @@ if sys.platform == "win32":
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PyQt5.QtCore import QCoreApplication, QEvent, QPoint, Qt
-from PyQt5.QtGui import QFont, QFontDatabase, QFontInfo, QPalette, QPixmap
+from PyQt5.QtGui import QFont, QFontDatabase, QFontInfo, QFontMetrics, QPalette, QPixmap
 from PyQt5.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton, QWidget
 
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS
@@ -59,13 +59,13 @@ class ItemCatalogueTests(unittest.TestCase):
         for item_id, item in ITEM_CATALOGUE.items():
             self.assertEqual(panel.findChild(QLabel, f"itemName_{item_id}").text(), item.name)
             self.assertTrue(panel.findChild(QLabel, f"itemIcon_{item_id}").isVisible())
-            expected = "Default - always included" if item.default else "Locked"
+            expected = "Default" if item.default else "Locked"
             self.assertEqual(panel.findChild(QLabel, f"itemStatus_{item_id}").text(), expected)
             if not item.default:
-                goal = panel.findChild(QLabel, f"itemGoal_{item_id}")
-                self.assertEqual(goal.text(), "Unlock: " + UNLOCK_GOALS[item_id])
-        goal = panel.findChild(QLabel, "itemGoal_guardian_angel")
-        self.assertEqual(goal.text(), "Unlock: " + UNLOCK_GOALS["guardian_angel"])
+                panel._inspect(item_id)
+                self.assertEqual(panel.detail_goal.text(), "Unlock: " + UNLOCK_GOALS[item_id])
+        panel._inspect("guardian_angel")
+        self.assertEqual(panel.detail_goal.text(), "Unlock: " + UNLOCK_GOALS["guardian_angel"])
         self.assertFalse(panel.checkboxes)
         self.assertFalse(panel.findChildren(QCheckBox))
         self.callback.assert_not_called()
@@ -86,7 +86,7 @@ class ItemCatalogueTests(unittest.TestCase):
             panel.refresh(reopened.read())
             self.assertFalse(panel.checkboxes["booby_trap"].isChecked())
             self.assertNotIn("booby_trap", reopened.item_pool())
-            self.assertEqual(panel.findChild(QLabel, "itemStatus_booby_trap").text(), "Unlocked")
+            self.assertEqual(panel.findChild(QLabel, "itemStatus_booby_trap").text(), "Disabled")
 
     def test_optional_checkbox_uses_returned_snapshot_and_refresh_does_not_write(self):
         profile = ProfileSnapshot(unlocked={"guardian_angel"})
@@ -99,7 +99,7 @@ class ItemCatalogueTests(unittest.TestCase):
         self.callback.assert_called_once_with("guardian_angel", False)
         self.assertIs(panel.profile, excluded)
         self.assertFalse(panel.checkboxes["guardian_angel"].isChecked())
-        self.assertEqual(panel.findChild(QLabel, "itemStatus_guardian_angel").text(), "Unlocked")
+        self.assertEqual(panel.findChild(QLabel, "itemStatus_guardian_angel").text(), "Disabled")
         panel.refresh(ProfileSnapshot())
         self.assertFalse(panel.checkboxes)
         self.assertEqual(self.callback.call_count, 1)
@@ -108,14 +108,11 @@ class ItemCatalogueTests(unittest.TestCase):
         panel = self.panel()
         panel.refresh(ProfileSnapshot())
         for item_id, item in ITEM_CATALOGUE.items():
-            self.assertEqual(panel.findChild(QLabel, f"itemDescription_{item_id}").text(), item.description)
-            labels = panel.findChildren(QLabel, f"itemFlavour_{item_id}")
-            if item.flavour:
-                self.assertEqual(len(labels), 1)
-                self.assertEqual(labels[0].text(), item.flavour)
-                self.assertEqual(labels[0].textFormat(), Qt.PlainText)
-            else:
-                self.assertEqual(labels, [])
+            panel._inspect(item_id)
+            self.assertEqual(panel.detail_description.text(), item.description)
+            self.assertEqual(panel.detail_flavour.text(), item.flavour)
+            self.assertEqual(panel.detail_flavour.textFormat(), Qt.PlainText)
+            self.assertEqual(panel.detail_flavour.isHidden(), not bool(item.flavour))
         self.assertEqual(ITEM_CATALOGUE["love_potion"].flavour, "Sweet on the tongue. Bitter by morning.")
         self.assertEqual(ITEM_CATALOGUE["lucky_coin"].flavour,
                          "A little weight in the hand. A great deal hanging in the balance.")
@@ -151,6 +148,17 @@ class ItemCatalogueTests(unittest.TestCase):
             self.assertEqual(missing.accessibleName(), "Muffle")
             self.assertEqual(missing.width(), 64)
 
+    def test_soul_uses_its_full_display_name_and_existing_artwork(self):
+        panel = self.panel()
+        self.assertEqual(panel.findChild(QLabel, "itemName_soul").text(), "Soul Transfusion")
+        icon = panel.findChild(QLabel, "itemIcon_soul")
+        self.assertIsNotNone(icon.pixmap())
+        self.assertFalse(icon.pixmap().isNull())
+        expected = QPixmap(str(Path(__file__).resolve().parents[1]
+                              / "icons" / "items" / "soul_transfusion.png"))
+        expected = expected.scaled(64, 64, Qt.KeepAspectRatio, Qt.FastTransformation)
+        self.assertEqual(icon.pixmap().toImage(), expected.toImage())
+
     def test_all_text_resolves_to_readable_font_despite_parent_style(self):
         panel = self.panel(ProfileSnapshot(unlocked={"guardian_angel"}))
         expected = QFontInfo(self.font).family()
@@ -170,12 +178,33 @@ class ItemCatalogueTests(unittest.TestCase):
         panel.refresh(ProfileSnapshot())
         self.app.processEvents()
         for label in panel.findChildren(QLabel):
-            if label.objectName().startswith("itemName_"):
+            if (label.objectName().startswith("itemName_") or label is panel.detail_name
+                    or label.text() in ("Default items", "Optional items")):
                 self.assertEqual(QFontInfo(label.font()).family(), QFontInfo(title_font).family())
                 self.assertEqual(QFontInfo(label.font()).pixelSize(), 12)
-            elif not label.objectName().startswith("itemIcon_"):
+            elif label is not panel.detail_name and not label.objectName().startswith("itemIcon_"):
                 self.assertEqual(QFontInfo(label.font()).family(), QFontInfo(self.font).family())
                 self.assertEqual(QFontInfo(label.font()).pixelSize(), 18)
+
+    def test_pixel_names_fit_each_card_at_small_and_bounded_large_widths(self):
+        font_id = QFontDatabase.addApplicationFont(str(
+            Path(__file__).resolve().parents[1] / "fonts" / "PressStart2P-Regular.ttf"))
+        self.assertNotEqual(font_id, -1)
+        title_font = QFont(QFontDatabase.applicationFontFamilies(font_id)[0])
+        title_font.setPixelSize(12)
+        panel = self.panel(title_font=title_font)
+        for width in (760, 1240, 1440):
+            panel.resize(width, 580)
+            self.app.processEvents()
+            for item_id, definition in ITEM_CATALOGUE.items():
+                with self.subTest(width=width, item=item_id):
+                    label = panel.cards[item_id].findChild(QLabel, f"itemName_{item_id}")
+                    metrics = QFontMetrics(label.font())
+                    longest = max(max(metrics.horizontalAdvance(word), metrics.boundingRect(word).width())
+                                  for word in definition.name.split())
+                    self.assertLessEqual(longest, label.contentsRect().width())
+                    self.assertLessEqual(label.heightForWidth(label.width()), label.height())
+                    self.assertEqual(label.font().pixelSize(), 12)
 
     def test_packaged_resource_root_and_shared_dialog_sprites_keep_callbacks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -185,6 +214,7 @@ class ItemCatalogueTests(unittest.TestCase):
             image.fill(Qt.green)
             for item_id in ITEM_CATALOGUE:
                 self.assertTrue(image.save(str(icons / f"{item_id}.png")))
+            self.assertTrue(image.save(str(icons / "soul_transfusion.png")))
             choose, reroll, skip, use = Mock(), Mock(), Mock(), Mock()
             with patch.object(sys, "_MEIPASS", directory, create=True):
                 offer = DraftOffer("offer", "Kitchen", ("banana", "muffle", "spare_paper"))
@@ -218,7 +248,7 @@ class ItemCatalogueTests(unittest.TestCase):
                 self.app.processEvents()
                 point = widget.mapTo(panel, QPoint(widget.width() - 2, widget.height() - 2))
                 image = panel.grab().toImage()
-                self.assertEqual(image.pixelColor(point).name(), "#252525")
+                self.assertEqual(image.pixelColor(point).name(), "#0b0b0b")
         self.callback.side_effect = ProfileError("Could not save preferences.")
         checkbox.setChecked(False)
         self.app.processEvents()

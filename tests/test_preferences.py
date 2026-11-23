@@ -94,6 +94,39 @@ class PreferencesTests(unittest.TestCase):
         self.assertTrue(preferences.save_dictation_binding(binding))
         self.assertEqual(Preferences().dictation_binding(), binding)
 
+    def test_microphone_selection_roundtrips_without_overwriting_other_settings(self):
+        preferences = Preferences()
+        self.assertEqual(preferences.microphone_name(), "")
+        self.assertTrue(preferences.save_player_name("Alex"))
+        self.assertTrue(preferences.save_dictation_binding(InputBinding.for_mouse("mouse4")))
+        preferences.settings.setValue("future/option", "retained")
+        preferences.settings.sync()
+        for name in ("Microphone (USB Audio)", ""):
+            self.assertTrue(preferences.save_microphone_name(name))
+            reopened = Preferences()
+            self.assertEqual(reopened.microphone_name(), name)
+            self.assertEqual(reopened.last_player_name(), "Alex")
+            self.assertEqual(reopened.dictation_binding(), InputBinding.for_mouse("mouse4"))
+            self.assertEqual(reopened.settings.value("future/option"), "retained")
+
+    def test_invalid_microphone_preference_falls_back_without_rewriting(self):
+        preferences = Preferences()
+        preferences.settings.setValue("audio/microphone", 12)
+        preferences.settings.sync()
+        original = self.path.read_bytes()
+        self.assertEqual(preferences.microphone_name(), "")
+        with self.assertRaises(TypeError):
+            preferences.save_microphone_name(None)
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_microphone_save_can_retry_after_the_path_is_repaired(self):
+        self.path.mkdir()
+        preferences = Preferences()
+        self.assertFalse(preferences.save_microphone_name("Microphone (USB Audio)"))
+        self.path.rmdir()
+        self.assertTrue(preferences.save_microphone_name("Microphone (USB Audio)"))
+        self.assertEqual(Preferences().microphone_name(), "Microphone (USB Audio)")
+
 
 if __name__ == "__main__":
     unittest.main()

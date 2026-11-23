@@ -69,6 +69,7 @@ class ExpandedItemRulesTests(unittest.TestCase):
                     kwargs["drafts"] = DraftState("owner", tuple(ITEM_CATALOGUE))
                 events = rules.use_item(inventory.grant(item_id).instance_id, context, target, **kwargs)
                 approved = {
+                    "revolver": ("Alex fires a revolver at Jerry.", None),
                     "throw_voice": (None, 'You heard your own voice say: "I heard the window open." You did not say those words.'),
                     "divine_revelation": (None, 'You hear a voice inside your mind that seems to come from a higher power: "I heard the window open."'),
                     "dark_whisper": ('Everyone hears the unmistakeable voice of the dead Hank, loudly and clearly they speak:\n\n"I heard the window open."', None),
@@ -373,7 +374,8 @@ class ExpandedItemRulesTests(unittest.TestCase):
         self.assertTrue(events[0].death_decision.killed)
         self.assertEqual(events[0].death_decision.cause, DeathCause.ATTACK)
         self.assertEqual(self.rules.execution_stays, ("j",))
-        self.assert_mechanical(events)
+        self.assertEqual(events[0].public_text, "Alex fires a revolver at Jerry.")
+        self.assert_mechanical(events[1:])
 
     def test_coin_reuses_inventory_and_caches_each_random_activation(self):
         self.grant_use("guardian_angel")

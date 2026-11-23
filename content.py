@@ -12,26 +12,25 @@ UNLOCK_GOALS = {
     "love": "Give someone a Banana of Friendship.",
     "blackmagic": "Have two innocent suspects executed in one run.",
     "stopwatch": "Survive a vote while a living witness has seen you kill.",
-    "voodoo": "Use Soul Transfusion.",
-    "guardian_angel": "Survive a vote.",
+    "voodoo": "Use Soul Transfusion, then kill your former body the following night.",
+    "guardian_angel": "Survive using an (Un)Lucky Coin, then finish that run alive.",
     "booby_trap": "Kill the suspect marked with Watch This Drive in the next action phase.",
     "presidential_decree": "Survive a vote where your Spare Paper copies counted.",
     "occult_ritual": "Kill a suspect in the room you assigned them with Room Reservation.",
     "spin_the_dagger": "Win a run after using three different item types.",
     "revolver": "Kill three victims in one run.",
     "mass_discombobulator": "Use five different item types in one run.",
-    "lucky_coin": "Survive a Guardian Angel intervention and finish that run alive.",
+    "lucky_coin": "Available from the start.",
 }
 
 ITEM_UNLOCK_RULES = {
-    "guardian_angel": UnlockRule("survived_vote", 1),
+    "guardian_angel": UnlockRule("coin_survived_run_alive", 1),
     "booby_trap": UnlockRule("marked_kill_completed", 1),
     "presidential_decree": UnlockRule("survived_spare_paper_vote", 1),
     "occult_ritual": UnlockRule("reserved_room_kill", 1),
     "spin_the_dagger": UnlockRule("three_item_types_victory", 1),
     "revolver": UnlockRule("three_kills_one_run", 1),
     "mass_discombobulator": UnlockRule("five_item_types_used", 1),
-    "lucky_coin": UnlockRule("guardian_intervention_run_survived", 1),
 }
 
 CONTENT_CATALOGUE = (
@@ -42,7 +41,7 @@ CONTENT_CATALOGUE = (
     ContentDefinition("love", "weapon", unlock_rule=UnlockRule("banana_given", 1)),
     ContentDefinition("blackmagic", "weapon", unlock_rule=UnlockRule("two_innocents_executed", 1)),
     ContentDefinition("stopwatch", "weapon", unlock_rule=UnlockRule("survived_witnessed_vote", 1)),
-    ContentDefinition("voodoo", "weapon", unlock_rule=UnlockRule("soul_transfusion_used", 1)),
+    ContentDefinition("voodoo", "weapon", unlock_rule=UnlockRule("former_body_killed_following_night", 1)),
 ) + tuple(
     ContentDefinition(item_id, "item", default=item.default,
                       unlock_rule=None if item.default else ITEM_UNLOCK_RULES[item_id])

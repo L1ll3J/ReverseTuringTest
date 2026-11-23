@@ -4,14 +4,14 @@ from dataclasses import FrozenInstanceError
 import random
 import unittest
 
-from items import DraftState, Inventory, InventoryError, InventorySnapshot, eligible_item_pool
+from items import ITEM_CATALOGUE, RARITY_WEIGHTS, DraftState, Inventory, InventoryError, InventorySnapshot, eligible_item_pool
 
 
 class InventoryTests(unittest.TestCase):
     def test_default_pool_cannot_be_disabled_and_unlocks_require_permission(self):
         defaults = ("banana", "muffle", "spare_paper", "throw_voice", "dark_whisper", "love_potion", "forged_note",
                     "divine_revelation", "mail_in_ballot", "watch_this_drive", "room_reservation", "lucky_match", "deep_pockets",
-                    "pocket_gavel", "listening_glass", "stay_of_execution")
+                    "pocket_gavel", "listening_glass", "stay_of_execution", "lucky_coin", "soul")
         with_guardian = (*defaults[:3], "guardian_angel", *defaults[3:])
         self.assertEqual(eligible_item_pool(), defaults)
         self.assertEqual(eligible_item_pool((), ("guardian_angel",)), defaults)
@@ -287,7 +287,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_reroll_excludes_held_alternatives_and_preserves_charge_if_exhausted(self):
         inventory = Inventory("player")
-        drafts = DraftState("player", ("banana", "muffle", "spare_paper", "guardian_angel"), random.Random(3))
+        drafts = DraftState("player", ("banana", "muffle", "spare_paper", "forged_note"), random.Random(3))
         offer = drafts.enter_room("Kitchen", inventory.snapshot())
         alternative = next(item_id for item_id in drafts.eligible_item_ids if item_id not in offer.options)
         held = inventory.grant(alternative)
@@ -351,6 +351,107 @@ class InventoryTests(unittest.TestCase):
         inventory.consume(first.instance_id)
         inventory.consume(second.instance_id)
         self.assertEqual(drafts.enter_room("Library", inventory.snapshot()).picks_remaining, 2)
+
+
+class ScriptedRng:
+    """Exact boundary rolls with deterministic within-tier selection."""
+    def __init__(self, *rolls):
+        self.rolls = iter(rolls)
+        self.choices = []
+
+    def random(self):
+        return next(self.rolls)
+
+    def choice(self, values):
+        self.choices.append(tuple(values))
+        return values[0]
+
+
+class RarityDraftTests(unittest.TestCase):
+    def test_catalogue_uses_the_approved_tier_assignments(self):
+        expected = {
+            "green": {"banana", "muffle", "spare_paper", "forged_note", "room_reservation",
+                      "lucky_match", "deep_pockets", "pocket_gavel"},
+            "blue": {"throw_voice", "dark_whisper", "love_potion", "divine_revelation", "mail_in_ballot",
+                     "watch_this_drive", "listening_glass", "stay_of_execution", "lucky_coin"},
+            "purple": {"booby_trap", "spin_the_dagger", "presidential_decree", "occult_ritual", "revolver"},
+            "gold": {"guardian_angel", "mass_discombobulator", "soul"},
+        }
+        actual = {tier: {item_id for item_id, item in ITEM_CATALOGUE.items() if item.rarity == tier}
+                  for tier in RARITY_WEIGHTS}
+        self.assertEqual(actual, expected)
+
+    def test_exact_tier_boundaries_and_within_tier_candidates(self):
+        self.assertEqual(dict(RARITY_WEIGHTS), {"green": 40, "blue": 30, "purple": 20, "gold": 10})
+        pool = ("banana", "muffle", "throw_voice", "dark_whisper", "booby_trap", "revolver", "guardian_angel")
+        for roll, tier, candidates in ((0, "green", ("banana", "muffle")),
+                                       (.399999, "green", ("banana", "muffle")),
+                                       (.4, "blue", ("throw_voice", "dark_whisper")),
+                                       (.699999, "blue", ("throw_voice", "dark_whisper")),
+                                       (.7, "purple", ("booby_trap", "revolver")),
+                                       (.899999, "purple", ("booby_trap", "revolver")),
+                                       (.9, "gold", ("guardian_angel",)),
+                                       (.999999, "gold", ("guardian_angel",))):
+            with self.subTest(roll=roll):
+                rng = ScriptedRng(roll, 0, 0)
+                draft = DraftState("player", pool, rng)
+                offer = draft.enter_room("Kitchen", Inventory("player").snapshot())
+                self.assertEqual(ITEM_CATALOGUE[offer.options[0]].rarity, tier)
+                self.assertEqual(rng.choices[0], candidates)
+                self.assertEqual(len(set(offer.options)), 3)
+
+    def test_empty_tiers_normalize_remaining_weights(self):
+        pool = ("throw_voice", "dark_whisper", "love_potion", "guardian_angel")
+        # Blue and gold retain relative weights 30:10 after green/purple vanish.
+        for roll, expected in ((.749999, "blue"), (.75, "gold")):
+            with self.subTest(roll=roll):
+                draft = DraftState("player", pool, ScriptedRng(roll, 0, 0))
+                offer = draft.enter_room("Kitchen", Inventory("player").snapshot())
+                self.assertEqual(ITEM_CATALOGUE[offer.options[0]].rarity, expected)
+
+    def test_depleted_tiers_are_removed_between_slots_and_held_types_excluded(self):
+        inventory = Inventory("player")
+        inventory.grant("muffle")
+        rng = ScriptedRng(0, 0, 0)
+        draft = DraftState("player", ("muffle", "banana", "throw_voice", "guardian_angel"), rng)
+        offer = draft.enter_room("Kitchen", inventory.snapshot())
+        self.assertEqual(offer.options, ("banana", "throw_voice", "guardian_angel"))
+        self.assertEqual(rng.choices, [("banana",), ("throw_voice",), ("guardian_angel",)])
+
+    def test_reroll_has_same_tier_and_locked_slot_does_not_spend_charge(self):
+        inventory = Inventory("player")
+        draft = DraftState("player", ("banana", "muffle", "spare_paper", "forged_note", "guardian_angel"),
+                           ScriptedRng(.99, 0, 0))
+        offer = draft.enter_room("Kitchen", inventory.snapshot())
+        self.assertEqual(offer.options[0], "guardian_angel")
+        self.assertFalse(draft.reroll_alternatives(offer.offer_id, inventory.snapshot(), slot_index=0))
+        self.assertTrue(draft.reroll_alternatives(offer.offer_id, inventory.snapshot(), slot_index=1))
+        with self.assertRaises(InventoryError):
+            draft.reroll(offer.offer_id, 0, inventory.snapshot())
+        self.assertEqual(draft.rerolls_remaining, 1)
+        self.assertIs(draft.pending_offer, offer)
+        replacement = draft.reroll(offer.offer_id, 1, inventory.snapshot())
+        self.assertEqual(ITEM_CATALOGUE[replacement.options[1]].rarity, "green")
+        self.assertEqual((replacement.options[0], replacement.options[2]), (offer.options[0], offer.options[2]))
+        self.assertNotEqual(replacement.offer_id, offer.offer_id)
+        self.assertEqual(draft.rerolls_remaining, 0)
+
+    def test_consumed_pick_cannot_return_during_same_multi_pick_offer(self):
+        inventory = Inventory("player")
+        draft = DraftState("player", ("banana", "muffle", "spare_paper", "forged_note"), ScriptedRng(0, 0, 0))
+        draft.arm_extra_pick()
+        offer = draft.enter_room("Kitchen", inventory.snapshot())
+        picked = draft.choose(offer.offer_id, 0, inventory)
+        inventory.consume(picked.instance_id)
+        remaining = draft.pending_offer
+        self.assertEqual(remaining.picks_remaining, 2)
+        self.assertEqual(draft.reroll_alternatives(remaining.offer_id, inventory.snapshot(), slot_index=0), ("forged_note",))
+        updated = draft.reroll(remaining.offer_id, 0, inventory.snapshot())
+        self.assertEqual(updated.picked_item_ids, (picked.item_id,))
+        self.assertEqual(updated.picks_remaining, 2)
+        self.assertNotIn(picked.item_id, updated.options)
+        with self.assertRaises(InventoryError):
+            draft.choose(remaining.offer_id, 0, inventory)
 
 
 if __name__ == "__main__":

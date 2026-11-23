@@ -4,7 +4,11 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+import test_runtime_regressions as runtime_fixtures
 from test_runtime_regressions import RuntimeRegressionTests
+from test_item_integration import ArrivalFixtureRng, keep_completed_night_weapon
+from night_arrivals import NightArrivals
+import main as game
 from PyQt5.QtCore import QPoint, QPointF, Qt
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QLabel
@@ -13,16 +17,26 @@ from PyQt5.QtGui import QFontInfo
 
 class HouseIntegrationTests(unittest.TestCase):
     setUpClass = RuntimeRegressionTests.__dict__['setUpClass']
-    setUp = RuntimeRegressionTests.setUp
+    def setUp(self):
+        runtime_fixtures.RuntimeRegressionTests.setUp(self)
+        self.patches.enter_context(patch.object(self.window, "finish_night", side_effect=
+            keep_completed_night_weapon(self.window, self.window.finish_night)))
     tearDown = RuntimeRegressionTests.tearDown
 
-    def start_night(self, normal=True):
+    def start_night(self, normal=True, assignments=None, initial_count=1):
         self.window.show_room_allocations = normal
         self.window.player_name_input.setText("Alex")
         self.window.start_game()
         self.window.selected_weapon = next(w for w in self.window.weapons if w['id'] == 'bare')
         self.window.message_log.show()
-        with patch('main.random.choice', side_effect=lambda choices: choices[0]):
+        assignments = assignments or {
+            "Attic": ["Jerry", "Dave"], "Kitchen": ["Hank", "Owen"],
+            "Library": ["Debra"], "Basement": [], "Cellar": [],
+        }
+        placements = {self.window.body_id(name): room for room, names in assignments.items() for name in names}
+        with patch.object(game, "assign_guest_rooms", return_value=placements), patch.object(
+                game, "NightArrivals", side_effect=lambda night, planned: NightArrivals(
+                    night, planned, rng=ArrivalFixtureRng(), initial_count=min(initial_count, len(planned)))):
             self.window.select_weapon_and_start(self.window.selected_weapon)
         self.window.showNormal()
         self.window.activateWindow()
@@ -53,7 +67,7 @@ class HouseIntegrationTests(unittest.TestCase):
                 self.assertLessEqual(transcript.height(), 56)
                 self.assertLessEqual(transcript.width(), 220)
                 self.assertTrue(transcript.isVisible())
-                self.assertEqual(transcript.font().pixelSize(), 14)
+                self.assertEqual(transcript.font().pixelSize(), 12)
                 self.assertGreaterEqual(transcript.width(), transcript.fontMetrics().horizontalAdvance(transcript.text()) + 20)
                 self.assertGreaterEqual(transcript.height(), transcript.fontMetrics().height() + 20)
                 self.assertTrue(self.window.rect().contains(art))
@@ -103,14 +117,16 @@ class HouseIntegrationTests(unittest.TestCase):
 
     def test_normal_projection_replaces_live_dump_and_retains_transcript(self):
         self.start_night()
-        self.assertNotIn('Room Assignments;', self.window.output_area.toPlainText())
-        self.assertTrue(any('Room Assignments;' in r.text for r in self.window.history_records))
+        self.assertNotIn('Initial room arrivals;', self.window.output_area.toPlainText())
+        self.assertTrue(any('Initial room arrivals;' in r.text for r in self.window.history_records))
+        self.assertIn(self.window.night_arrivals.initial_count, (1, 2, 3))
         for key, record in self.window.house_view.observations.items():
             room = self.window.house_view.buttons[key].text()
             self.assertEqual(record.known_names, tuple(self.window.room_assignments[room]))
             self.assertFalse(record.unknown_remainder)
             self.assertIsNone(record.light_on)
-            self.assertIsNone(record.observed_at)
+            expected = [event.time for event in self.window.night_arrivals.initial if event.room == room]
+            self.assertEqual(record.observed_at, expected[-1] if expected else None)
 
     def test_hard_projection_accessibility_and_render_ignore_hidden_assignments(self):
         self.start_night(normal=False)
@@ -129,7 +145,6 @@ class HouseIntegrationTests(unittest.TestCase):
 
     def test_known_empty_resolution_is_public_but_hover_does_not_reveal(self):
         self.start_night(normal=False)
-        self.window.room_assignments['Cellar'] = []
         self.window.house_view.buttons['cellar'].setFocus()
         self.assertTrue(self.window.house_view.observations['cellar'].unknown_remainder)
         self.window.finish_room_choice('Cellar')
@@ -139,8 +154,10 @@ class HouseIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.room_buttons_widget.isVisible())
 
     def test_occupied_target_choice_reveals_only_accepted_room_and_resets_next_night(self):
-        self.start_night(normal=False)
-        self.window.room_assignments['Kitchen'] = ['Jerry', 'Dave']
+        self.start_night(normal=False, assignments={
+            'Kitchen': ['Jerry', 'Dave'], 'Attic': ['Hank'], 'Library': ['Debra'],
+            'Basement': ['Owen'], 'Cellar': [],
+        })
         self.window.finish_room_choice('Kitchen')
         self.assertEqual(self.window.house_view.observations['kitchen'].known_names, ('Jerry', 'Dave'))
         self.assertFalse(self.window.house_view.observations['kitchen'].unknown_remainder)
@@ -159,7 +176,6 @@ class HouseIntegrationTests(unittest.TestCase):
         from items import DraftState
         self.start_night(normal=False)
         self.window.item_drafts = DraftState(self.window.player_owner_id, ("banana", "muffle", "spare_paper"))
-        self.window.room_assignments['Cellar'] = []
         self.window.choose_room('Cellar')
         offer = self.window.item_drafts.pending_offer
         page = self.window.draft_page
@@ -168,7 +184,9 @@ class HouseIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.weapon_action_panel.isHidden())
         self.assertEqual(self.window.layout.indexOf(page) + 1,
                          self.window.layout.indexOf(self.window.room_buttons_widget))
-        self.assertTrue(self.window.house_view.observations['cellar'].unknown_remainder)
+        self.assertFalse(self.window.house_view.observations['cellar'].unknown_remainder)
+        self.assertEqual(self.window.night_arrivals.committed_room, 'Cellar')
+        self.assertTrue(self.window.night_arrivals.complete)
         page.leave_button.click()
         self.assertIsNone(self.window.pending_room_action)
         self.assertTrue(self.window.room_buttons_widget.isVisible())

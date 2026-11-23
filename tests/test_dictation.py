@@ -60,6 +60,9 @@ class FakeAudio(QObject):
         self.stops += 1
         self.stateChanged.emit(QAudio.StoppedState)
 
+    def bytesReady(self):
+        return len(self.source.pending)
+
     def error(self):
         return self.audio_error
 
@@ -121,6 +124,70 @@ class DictationTests(unittest.TestCase):
         self.assertIsNone(recorder._audio)
         recorder.stop()
         self.assertEqual(audio.stops, 1)
+
+    def test_device_selection_enumerates_without_opening_and_resolves_at_start(self):
+        self.device.deviceName.return_value = "USB microphone"
+        with patch("dictation.QAudioDeviceInfo.availableDevices", return_value=[self.device, self.device]):
+            recorder = self.recorder()
+            self.assertEqual(recorder.input_devices(), [("USB microphone", "USB microphone")])
+            self.assertEqual(recorder.device_name, "")
+            recorder.set_device_name("USB microphone")
+            self.assertEqual(recorder.device_name, "USB microphone")
+            self.provider.assert_not_called()
+            recorder.start()
+            self.provider.assert_not_called()
+            with self.assertRaises(DictationError):
+                recorder.set_device_name("")
+            recorder.cancel()
+            recorder.set_device_name("")
+            recorder.start()
+            self.provider.assert_called_once()
+
+    def test_unavailable_selection_never_silently_uses_another_device(self):
+        recorder = self.recorder(device_name="unplugged microphone")
+        with patch("dictation.QAudioDeviceInfo.availableDevices", return_value=[]):
+            with self.assertRaises(DictationError):
+                recorder.set_device_name("unknown microphone")
+            recorder.start()
+        self.assertEqual(len(self.failed), 1)
+        self.assertEqual(self.audio, [])
+        self.provider.assert_not_called()
+        self.assertEqual(recorder.device_name, "unplugged microphone")
+
+    def test_backend_pending_bytes_are_drained_when_pull_source_reports_zero(self):
+        recorder = self.recorder(max_audio_bytes=52)
+        diagnostics = []
+        recorder.diagnostic.connect(diagnostics.append)
+        recorder.start()
+        source = self.audio[-1].source
+        source.bytesAvailable = Mock(return_value=0)
+        source.isOpen = Mock(return_value=True)
+        source.isReadable = Mock(return_value=True)
+        source.feed(b"\x01\x00" * 20)
+        self.assertEqual(source.read_sizes, [8])
+        self.assertEqual(len(source.pending), 32)
+        self.assertFalse(recorder.is_recording)
+        self.assertEqual(self.failed, [])
+        with wave.open(io.BytesIO(self.ready[0][1]), "rb") as wav:
+            self.assertEqual(wav.readframes(4), b"\x01\x00" * 4)
+        stopped = diagnostics[-1]
+        self.assertEqual(stopped["source_bytes_available"], 0)
+        self.assertEqual(stopped["backend_bytes_ready"], 32)
+        self.assertEqual(stopped["ready_read_events"], 1)
+        self.assertTrue(stopped["source_open"])
+        self.assertTrue(stopped["source_readable"])
+
+    def test_stop_flushes_backend_pcm_without_a_ready_read_signal(self):
+        recorder = self.recorder()
+        recorder.start()
+        source = self.audio[-1].source
+        source.bytesAvailable = Mock(return_value=0)
+        pcm = b"\x01\x00" * 8
+        source.pending.extend(pcm)
+        recorder.stop()
+        self.assertEqual(self.failed, [])
+        with wave.open(io.BytesIO(self.ready[0][1]), "rb") as wav:
+            self.assertEqual(wav.readframes(8), pcm)
 
     def test_missing_and_incompatible_device_fail_without_constructing_audio(self):
         for missing in (True, False):

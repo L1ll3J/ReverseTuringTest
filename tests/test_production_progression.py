@@ -31,9 +31,11 @@ class ProductionProgressionTests(unittest.TestCase):
         result = self.store.record(ProgressEvent("run-a", 1, "three_kills_one_run"))
         self.assertIn("c4", result.profile.unlocked)
         result = self.store.record(ProgressEvent("run-a", 2, "soul_transfusion_used"))
+        self.assertNotIn("voodoo", result.profile.unlocked)
+        result = self.store.record(ProgressEvent("run-a", 3, "former_body_killed_following_night"))
         self.assertIn("voodoo", result.profile.unlocked)
         self.assertEqual(UNLOCK_GOALS["c4"], "Kill three victims in one run.")
-        self.assertEqual(UNLOCK_GOALS["voodoo"], "Use Soul Transfusion.")
+        self.assertEqual(UNLOCK_GOALS["voodoo"], "Use Soul Transfusion, then kill your former body the following night.")
 
     def test_existing_owners_keep_unlocks_without_new_achievement(self):
         self.path.write_text(json.dumps({

@@ -79,6 +79,19 @@ class MessageViewTests(unittest.TestCase):
         QTest.mouseClick(self.editor.viewport(), Qt.LeftButton, pos=point)
         self.assertEqual(list(clicked), [["opaque-body-id"]])
 
+    def test_detective_event_heading_is_literal_and_not_a_speaker_link(self):
+        def header(record):
+            fmt = QTextCharFormat()
+            fmt.setAnchor(True)
+            fmt.setAnchorHref("npc:wrong")
+            return fmt
+        self.view.name_format = header
+        self.view.append_record(DisplayRecord("camera", "event", "Dave's photograph & <evidence>.", speaker="Detective"))
+        self.assertEqual(self.editor.toPlainText(), "Detective\nDave's photograph & <evidence>.")
+        cursor = self.editor.document().find("Detective")
+        self.assertFalse(cursor.charFormat().isAnchor())
+        self.assertEqual(cursor.charFormat().anchorHref(), "")
+
     def test_tail_follows_append_without_moving_a_selection(self):
         self.fill()
         bar = self.editor.verticalScrollBar()

@@ -34,13 +34,33 @@ class FakeRecorder(QObject):
     cancelled = pyqtSignal(int)
     diagnostic = pyqtSignal(dict)
 
-    def __init__(self, parent):
+    def __init__(self, parent=None, *, device_name=""):
         super().__init__(parent)
+        if not isinstance(device_name, str):
+            raise ValueError("Microphone device name must be a string")
+        self._device_name = device_name
         self.generation = 0
         self.is_recording = False
         self.closed = False
         self.start_error = None
         self.clip = b"private audio sentinel"
+
+    @staticmethod
+    def input_devices():
+        return [("fake-microphone", "Fake microphone")]
+
+    @property
+    def device_name(self):
+        return self._device_name
+
+    def set_device_name(self, name):
+        if self.closed or self.is_recording:
+            raise game.DictationError("Cannot change microphone while recording or closed")
+        if not isinstance(name, str):
+            raise ValueError("Microphone device name must be a string")
+        if name and name not in dict(self.input_devices()):
+            raise game.DictationError("The selected microphone is no longer available")
+        self._device_name = name
 
     def is_current(self, generation):
         return not self.closed and generation == self.generation
@@ -79,7 +99,9 @@ class DictationIntegrationTests(unittest.TestCase):
 
     def setUp(self):
         self.patches = contextlib.ExitStack()
+        self.addCleanup(self.patches.close)
         self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
         self.patches.enter_context(patch.dict(os.environ, {
             "ALIBAI_DEV_MODE": "0", "ALIBAI_PROFILE_PATH": str(Path(self.directory.name) / "profile.json"),
             "ALIBAI_SETTINGS_PATH": str(Path(self.directory.name) / "preferences.ini"),
@@ -439,6 +461,43 @@ class DictationIntegrationTests(unittest.TestCase):
         self.wait_for(lambda: not self.window.active_workers)
         self.assertEqual(self.window.interject_input.text(), "Spoken words.")
         self.assertEqual(len(self.window.public_dialogue), 1)
+
+
+class DictationFixtureCleanupTests(unittest.TestCase):
+    def test_failed_setup_restores_patches_and_removes_temporary_directory(self):
+        original_transcribe = game.AIRuntime.transcribe
+        original_recorder = game.DictationRecorder
+        original_connect = socket.socket.connect
+        previous_settings = os.environ.get("ALIBAI_SETTINGS_PATH")
+        fixture = DictationIntegrationTests("test_record_stop_appends_editable_draft_without_sending")
+        with patch.object(fixture, "make_window", side_effect=RuntimeError("Injected setup failure")):
+            result = unittest.TestResult()
+            fixture.run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("Injected setup failure", result.errors[0][1])
+        self.assertIs(game.AIRuntime.transcribe, original_transcribe)
+        self.assertIs(game.DictationRecorder, original_recorder)
+        self.assertIs(socket.socket.connect, original_connect)
+        self.assertEqual(os.environ.get("ALIBAI_SETTINGS_PATH"), previous_settings)
+        self.assertFalse(Path(fixture.directory.name).exists())
+
+    def test_fake_device_selection_matches_recorder_without_audio(self):
+        recorder = FakeRecorder(device_name="fake-microphone")
+        self.assertEqual(recorder.device_name, "fake-microphone")
+        self.assertEqual(dict(recorder.input_devices()), {"fake-microphone": "Fake microphone"})
+        recorder.set_device_name("")
+        self.assertEqual(recorder.device_name, "")
+        with self.assertRaises(game.DictationError):
+            recorder.set_device_name("missing")
+        recorder.start()
+        with self.assertRaises(game.DictationError):
+            recorder.set_device_name("fake-microphone")
+        recorder.cancel()
+        recorder.set_device_name("fake-microphone")
+        recorder.close()
+        with self.assertRaises(game.DictationError):
+            recorder.set_device_name("")
 
 
 if __name__ == "__main__":

@@ -92,15 +92,13 @@ def observation_text(observation: RoomObservation) -> str:
     if observation.observed_at is not None:
         lines.append("Seen at " + observation.observed_at)
     if observation.known_names:
-        lines.append("Observed: " + ", ".join(observation.known_names))
+        lines.append(", ".join(observation.known_names))
     elif observation.unknown_remainder:
         lines.append("Occupants unknown.")
     else:
         lines.append("No one was observed.")
     if observation.unknown_remainder and observation.known_names:
         lines.append("Others may be present.")
-    elif not observation.unknown_remainder:
-        lines.append("Complete observation at that time.")
     if observation.light_on is not None:
         lines.append("Light observed " + ("on." if observation.light_on else "off."))
     if not observation.available:
@@ -189,15 +187,11 @@ class RoomButton(QAbstractButton):
         observation = self.owner.observations[self.room_id]
         if observation.light_on is not None:
             p.fillPath(self.local_path, QColor(255, 255, 255, 15) if observation.light_on else QColor(0, 0, 0, 28))
-        active = self.hovered or self.hasFocus() or self.owner.selected_room == self.room_id
+        active = self.isEnabled() and (self.hovered or self.hasFocus() or self.owner.selected_room == self.room_id)
         if active:
-            p.fillPath(self.local_path, QColor(255, 255, 255, 12))
-            p.setPen(QPen(QColor("#ededed" if self.isEnabled() else "#888888"), 1,
-                          Qt.DotLine if self.hasFocus() else Qt.SolidLine))
-            p.drawPath(self.local_path)
+            p.fillPath(self.local_path, QColor(255, 255, 255, 32 if self.hasFocus() else 22))
         elif not self.isEnabled():
-            p.setPen(QPen(QColor("#666666"), 1, Qt.DashLine))
-            p.drawPath(self.local_path)
+            p.fillPath(self.local_path, QColor(0, 0, 0, 45))
 
 
 class HouseView(QWidget):

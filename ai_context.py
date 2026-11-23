@@ -39,16 +39,53 @@ class DialogueLine:
     addressee: str | None = None
 
 
+APPEARANCE_LABELS = """<appearance_labels>
+  Several people may share an identical appearance. References distinguish
+  the people currently present for addressing and voting. They are not part
+  of anyone's name, and do not reveal who is the original.
+  Speak using people's names and what you actually perceived.
+</appearance_labels>"""
+
+
+@dataclass(frozen=True)
+class PersonPresent:
+    name: str
+    reference: str
+
+    def __post_init__(self):
+        if any(not isinstance(value, str) or not value.strip() for value in (self.name, self.reference)):
+            raise ValueError("A present person requires an appearance name and current reference")
+
+
 @dataclass(frozen=True)
 class PublicState:
     round_number: int
     alive: tuple[str, ...]
     dead: tuple[str, ...]
     available_rooms: tuple[str, ...]
+    people_present: tuple[PersonPresent, ...] = ()
 
     def __post_init__(self):
-        for name in ("alive", "dead", "available_rooms"):
+        for name in ("alive", "dead", "available_rooms", "people_present"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        if any(not isinstance(person, PersonPresent) for person in self.people_present):
+            raise ValueError("Present people must be typed snapshots")
+        references = tuple(person.reference for person in self.people_present)
+        if references and (len(set(references)) != len(references)
+                           or len(self.alive) != len(references) or set(references) != set(self.alive)):
+            raise ValueError("Present references must identify each living person exactly once")
+
+
+@dataclass(frozen=True)
+class SelfIdentity:
+    name: str
+    body: str
+    reference: str
+
+    def __post_init__(self):
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (self.name, self.body, self.reference)):
+            raise ValueError("Self identity requires original name, body name and current reference")
 
 
 @dataclass(frozen=True)
@@ -61,10 +98,17 @@ class CharacterContext:
     public_events: tuple[MemoryRecord, ...]
     dialogue: tuple[DialogueLine, ...]
     current_feelings: tuple[CurrentFeeling, ...] = ()
+    self_identity: SelfIdentity | None = None
+
+    @property
+    def reference(self) -> str:
+        return self.self_identity.reference if self.self_identity is not None else self.character
 
     def __post_init__(self):
         for name in ("persona", "experiences", "dispositions", "public_events", "dialogue", "current_feelings"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        if self.self_identity is not None and not isinstance(self.self_identity, SelfIdentity):
+            raise ValueError("Self identity must be a typed snapshot")
         if any(not isinstance(feeling, CurrentFeeling) for feeling in self.current_feelings):
             raise ValueError("Current feelings must be typed snapshots")
 
@@ -76,6 +120,11 @@ class SpeechProposal:
 
 
 def _append_public_state(parent: ET.Element, state: PublicState) -> None:
+    if state.people_present:
+        parent.append(ET.fromstring(APPEARANCE_LABELS))
+        people = ET.SubElement(parent, "people_present")
+        for person in state.people_present:
+            ET.SubElement(people, "person", {"name": person.name, "reference": person.reference})
     element = ET.SubElement(parent, "public_state", {"round": str(state.round_number)})
     for tag, names in (("alive", state.alive), ("dead", state.dead)):
         group = ET.SubElement(element, tag)
@@ -120,17 +169,21 @@ def _append_dialogue(parent: ET.Element, dialogue: tuple[DialogueLine, ...]) -> 
 def render_character_context(context: CharacterContext) -> str:
     root = ET.Element(
         "character_context",
-        {"character": context.character, "round": str(context.state.round_number)},
+        {"character": context.reference, "round": str(context.state.round_number)},
     )
+    if context.self_identity is not None:
+        identity = context.self_identity
+        ET.SubElement(root, "self", {"name": identity.name, "body": identity.body,
+                                    "reference": identity.reference})
     persona = ET.SubElement(root, "persona")
     for trait in context.persona:
         ET.SubElement(persona, "trait").text = trait
     _append_public_state(root, context.state)
     _append_records(
-        root, "private_experiences", context.experiences, "experience", context.character
+        root, "private_experiences", context.experiences, "experience", context.reference
     )
     _append_records(
-        root, "dispositions", context.dispositions, "disposition", context.character
+        root, "dispositions", context.dispositions, "disposition", context.reference
     )
     _append_records(root, "public_events", context.public_events, "public_event")
     _append_dialogue(root, context.dialogue)

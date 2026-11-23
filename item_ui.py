@@ -3,27 +3,97 @@
 from pathlib import Path
 import sys
 
-from PyQt5.QtCore import QPoint, Qt
+from PyQt5.QtCore import QPoint, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QPixmap, QPolygon
 from PyQt5.QtWidgets import (
-    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+    QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
 )
 
 
-def item_sprite(item_id, parent=None, *, icon_root=None):
+_ITEM_SPRITE_NAMES = {"soul": "soul_transfusion"}
+
+
+def item_sprite(item_id, parent=None, *, icon_root=None, size=64):
     """Return a bounded sprite label using source or packaged resources."""
     root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     directory = Path(icon_root) if icon_root is not None else root / "icons" / "items"
     label = QLabel(parent)
     label.setObjectName(f"itemIcon_{item_id}")
     label.setTextFormat(Qt.PlainText)
-    label.setFixedSize(64, 64)
+    label.setFixedSize(size, size)
     label.setAlignment(Qt.AlignCenter)
-    pixmap = QPixmap(str(directory / f"{item_id}.png"))
+    sprite_name = _ITEM_SPRITE_NAMES.get(item_id, item_id)
+    pixmap = QPixmap(str(directory / f"{sprite_name}.png"))
     if not pixmap.isNull():
-        label.setPixmap(pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.FastTransformation))
+        label.setPixmap(pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.FastTransformation))
     return label
+
+
+RARITY_COLORS = {"green": "#91bc91", "blue": "#9dbfe5", "purple": "#c5a5dc", "gold": "#dfc383"}
+
+
+class ItemCardButton(QPushButton):
+    """Native keyboard activation with a clickable illustrated surface."""
+    inspected = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAutoDefault(False)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def sizeHint(self):
+        return self.layout().sizeHint() if self.layout() else super().sizeHint()
+
+    def minimumSizeHint(self):
+        return QSize(0, self.sizeHint().height())
+
+    def enterEvent(self, event):
+        self.inspected.emit()
+        super().enterEvent(event)
+
+    def focusInEvent(self, event):
+        self.inspected.emit()
+        super().focusInEvent(event)
+
+
+class ResponsiveItemGrid(QWidget):
+    """Reflow existing cards without replacing their signal connections."""
+    def __init__(self, minimum_card_width=220, maximum_columns=None, parent=None):
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self._minimum_card_width = minimum_card_width
+        self._maximum_columns = maximum_columns
+        self.cards = []
+        self.columns = 0
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(12)
+
+    def add_card(self, card):
+        self.cards.append(card)
+        self._arrange()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._arrange()
+
+    def _arrange(self):
+        spacing = self.grid.spacing()
+        columns = max(1, (self.width() + spacing) // (self._minimum_card_width + spacing))
+        columns = min(columns, self._maximum_columns or max(1, len(self.cards)))
+        if columns == self.columns and self.grid.count() == len(self.cards):
+            return
+        old_columns = self.columns
+        self.columns = columns
+        while self.grid.count():
+            self.grid.takeAt(0)
+        for column in range(max(columns, old_columns)):
+            self.grid.setColumnStretch(column, 1 if column < columns else 0)
+        for index, card in enumerate(self.cards):
+            self.grid.addWidget(card, index // columns, index % columns)
+        self.updateGeometry()
 
 
 class ItemDraftDialog(QDialog):
@@ -78,7 +148,7 @@ class ItemDraftDialog(QDialog):
             self._skip()
 
 
-class _TargetComboBox(QComboBox):
+class GameComboBox(QComboBox):
     """Keep native combo-box behavior with a contrasting game-style chevron."""
 
     def paintEvent(self, event):
@@ -203,7 +273,7 @@ class InventoryPage(QWidget):
             controls = QHBoxLayout()
             target = None
             if definition.target_kind != "self":
-                target = _TargetComboBox()
+                target = GameComboBox()
                 target.setObjectName(f"inventoryTarget_{entry.instance_id}")
                 target.setAccessibleName(f"Recipient for {definition.name}")
                 target.setFocusPolicy(Qt.StrongFocus)
@@ -216,7 +286,7 @@ class InventoryPage(QWidget):
                 controls.addStretch()
             room_target = None
             if definition.target_kind == "living_npc_room":
-                room_target = _TargetComboBox()
+                room_target = GameComboBox()
                 room_target.setObjectName(f"inventoryRoom_{entry.instance_id}")
                 room_target.setAccessibleName(f"Room for {definition.name}")
                 self._font(room_target, self._body_font)
@@ -321,20 +391,19 @@ class InlineItemDraftPage(QWidget):
             self._title_font.setBold(True)
         self.setFont(self._body_font)
         self.setStyleSheet('''
-            QWidget#inlineItemDraftPage { background: #1e1e1e; color: #e0e0e0; }
-            QFrame#inlineItemCard { background: #252525; border: 1px solid #555; }
-            QWidget#inlineItemContents { background: transparent; }
+            QWidget#inlineItemDraftPage { background: #000000; color: #e0e0e0; }
+            QWidget#inlineItemContents { background: #000000; }
             QWidget#inlineItemDraftPage QLabel {
                 color: #e0e0e0; background: transparent; border: none;
             }
             QWidget#inlineItemDraftPage QScrollArea { background: transparent; border: none; }
             QWidget#inlineItemDraftPage QPushButton {
-                color: #e0e0e0; background: #2a2a2a; border: 1px solid #777;
+                color: #e0e0e0; background: #0b0b0b; border: 1px solid #444;
                 padding: 9px 16px; min-height: 24px;
             }
-            QWidget#inlineItemDraftPage QPushButton:hover { background: #3a3a3a; border-color: #dedede; }
+            QWidget#inlineItemDraftPage QPushButton:hover { background: #161616; border-color: #dedede; }
             QWidget#inlineItemDraftPage QPushButton:focus { border: 2px solid #dedede; }
-            QWidget#inlineItemDraftPage QPushButton:pressed { background: #444; }
+            QWidget#inlineItemDraftPage QPushButton:pressed { background: #202020; }
             QWidget#inlineItemDraftPage QPushButton:disabled { color: #777; border-color: #555; }
         ''')
         self.take_buttons = {}
@@ -375,49 +444,66 @@ class InlineItemDraftPage(QWidget):
         self.help_button.toggled.connect(self.help_label.setVisible)
         rows.addWidget(self.help_label)
         offer_id = offer.offer_id
+        self.offer_grid = ResponsiveItemGrid(220, maximum_columns=3)
+        rows.addWidget(self.offer_grid)
         for slot, item_id in enumerate(offer.options):
             definition = definitions[item_id]
-            card = QFrame()
-            card.setObjectName("inlineItemCard")
-            row = QVBoxLayout(card)
-            row.setContentsMargins(14, 14, 14, 14)
-            row.setSpacing(12)
-            description = QHBoxLayout()
-            description.setSpacing(14)
-            sprite = item_sprite(item_id)
+            take = ItemCardButton()
+            InventoryPage._font(take, self._title_font)
+            take.setObjectName(f"inlineItemTake_{slot}")
+            take.setAccessibleName(f"Take {definition.name}")
+            take.setAccessibleDescription(definition.description + " " + definition.flavour)
+            take.setMinimumHeight(380)
+            color = RARITY_COLORS.get(getattr(definition, "rarity", "green"), RARITY_COLORS["green"])
+            selector = f"QPushButton#{take.objectName()}"
+            take.setStyleSheet(selector + " { " + take.styleSheet() + f" padding: 0; background: #0b0b0b; border: 1px solid #333; border-top: 2px solid {color}; }}"
+                               + selector + ":hover, " + selector + ":focus { border: 2px solid white; background: #161616; }"
+                               + selector + ":pressed { background: #202020; }")
+            contents = QVBoxLayout(take)
+            contents.setContentsMargins(24, 24, 24, 20)
+            contents.setSpacing(12)
+            sprite = item_sprite(item_id, size=128)
+            sprite.setAttribute(Qt.WA_TransparentForMouseEvents)
             sprite.setAccessibleName(definition.name)
-            description.addWidget(sprite, 0, Qt.AlignTop)
-            text = QVBoxLayout()
-            text.setSpacing(8)
+            contents.addWidget(sprite, 0, Qt.AlignHCenter)
             name = self._label(definition.name, self._title_font)
             name.setObjectName(f"inlineItemName_{slot}")
-            text.addWidget(name)
+            name.setStyleSheet(name.styleSheet() + f"color: {color};")
+            name.setAlignment(Qt.AlignCenter)
+            contents.addWidget(name)
             detail = self._label(definition.description, self._body_font)
             detail.setObjectName(f"inlineItemDescription_{slot}")
-            text.addWidget(detail)
+            contents.addWidget(detail)
             if definition.flavour:
                 flavour = self._label(definition.flavour, self._body_font)
                 flavour.setObjectName(f"inlineItemFlavour_{slot}")
-                text.addWidget(flavour)
-            description.addLayout(text, 1)
-            row.addLayout(description)
-            controls = QHBoxLayout()
-            controls.addStretch()
-            take = self._button("Take", f"inlineItemTake_{slot}", f"Take {definition.name}")
+                flavour.setStyleSheet(flavour.styleSheet() + "color: #999999;")
+                contents.addWidget(flavour)
+            for label in take.findChildren(QLabel):
+                label.setAttribute(Qt.WA_TransparentForMouseEvents)
+                label.setTextInteractionFlags(Qt.NoTextInteraction)
+                label.setFocusPolicy(Qt.NoFocus)
+            contents.addStretch()
             take.clicked.connect(lambda _checked=False, index=slot: on_take(offer_id, index))
             self.take_buttons[slot] = take
-            controls.addWidget(take)
-            reroll = self._button("Reroll", f"inlineItemReroll_{slot}", f"Reroll {definition.name}")
-            reroll.setEnabled(reroll_count > 0 and can_reroll)
+            reroll = self._button("\u21bb", f"inlineItemReroll_{slot}", f"Reroll {definition.name}")
+            available = can_reroll.get(slot, False) if hasattr(can_reroll, "get") else can_reroll
+            reroll.setEnabled(reroll_count > 0 and available)
+            reroll.setFixedSize(40, 40)
+            reroll_font = QFont(self._body_font)
+            reroll_font.setPixelSize(24)
+            InventoryPage._font(reroll, reroll_font)
+            reroll.setStyleSheet(reroll.styleSheet() + "padding: 0; min-height: 0;")
             if reroll_count <= 0:
                 reroll.setToolTip("No rerolls remaining.")
-            elif not can_reroll:
+            elif not available:
                 reroll.setToolTip("No alternative items are available for this offer.")
+            else:
+                reroll.setToolTip(f"Reroll {definition.name}")
             reroll.clicked.connect(lambda _checked=False, index=slot: on_reroll(offer_id, index))
             self.reroll_buttons[slot] = reroll
-            controls.addWidget(reroll)
-            row.addLayout(controls)
-            rows.addWidget(card)
+            contents.addWidget(reroll, 0, Qt.AlignRight)
+            self.offer_grid.add_card(take)
         self.leave_button = self._button(
             "Leave these behind", "inlineItemLeave", "Leave the remaining items behind",
         )
@@ -426,6 +512,10 @@ class InlineItemDraftPage(QWidget):
         rows.addStretch()
         self.scroll.setWidget(content)
         layout.addWidget(self.scroll)
+
+    def sizeHint(self):
+        natural = super().sizeHint()
+        return QSize(1280, natural.height())
 
     def _label(self, text, font):
         label = QLabel(text)

@@ -30,13 +30,24 @@ class Preferences:
     def save_dictation_binding(self, binding):
         if not isinstance(binding, InputBinding):
             raise TypeError("The dictation binding must be an InputBinding")
+        return self._save_setting("input/dictation_binding", binding.to_json())
+
+    def microphone_name(self):
+        value = self.settings.value("audio/microphone", "")
+        return value if isinstance(value, str) else ""
+
+    def save_microphone_name(self, name):
+        if not isinstance(name, str):
+            raise TypeError("The microphone name must be text")
+        return self._save_setting("audio/microphone", name)
+
+    def _save_setting(self, key, value):
         # QSettings retains its first error. A fresh writer permits a later retry
         # after the user repairs the path, while changing only this preference.
         writer = QSettings(self.settings.fileName(), self.settings.format())
-        key = "input/dictation_binding"
         had_value = writer.contains(key)
         previous = writer.value(key)
-        writer.setValue(key, binding.to_json())
+        writer.setValue(key, value)
         writer.sync()
         if writer.status() == QSettings.NoError:
             return True

@@ -76,6 +76,7 @@ class RuntimeRegressionTests(unittest.TestCase):
             "Jerry": character(), "Dave": character(), "Hank": character(),
             "Debra": character(False),
         }
+        self.window.rooms_visited = []
 
     def tearDown(self):
         for worker in self.window.active_workers:
@@ -116,7 +117,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertIs(self.window.menu_stack.currentWidget(), self.window.play_page)
         self.window.items_tab_button.click()
         self.assertEqual(self.window.phase, "start")
-        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue_page)
         self.assertTrue(self.window.item_catalogue.isVisible())
         self.assertFalse(self.window.player_name_input.isVisible())
         self.assertTrue(self.window.items_tab_button.isChecked())
@@ -144,7 +145,7 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.assertFalse(rectangle.intersects(self.window.how_to_play_button.geometry()))
 
     def test_browsing_item_catalogue_preserves_existing_profile_data(self):
-        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "coin_survived_run_alive"))
         original = self.window.profile_store.path.read_bytes()
         with patch.object(self.window.profile_store, "set_item_enabled") as toggle:
             for _ in range(2):
@@ -155,7 +156,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(self.window.profile_store.path.read_bytes(), original)
 
     def test_item_menu_pool_toggle_persists_then_freezes_at_run_start(self):
-        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "coin_survived_run_alive"))
         self.window.items_tab_button.click()
         self.window.item_catalogue.checkboxes["guardian_angel"].setChecked(False)
         self.assertIn("guardian_angel", self.window.profile_store.read().disabled_items)
@@ -184,13 +185,13 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(self.window.phase, "action")
 
     def test_item_menu_save_failure_preserves_checkbox_and_shows_error_on_items_page(self):
-        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "coin_survived_run_alive"))
         self.window.items_tab_button.click()
         original = self.window.profile_store.path.read_bytes()
         with patch.object(self.window.profile_store, "set_item_enabled", side_effect=ProfileError("Disk is unavailable.")):
             self.window.item_catalogue.checkboxes["guardian_angel"].setChecked(False)
         self.assertTrue(self.window.item_catalogue.checkboxes["guardian_angel"].isChecked())
-        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue_page)
         self.assertTrue(self.window.progress_notice.isVisible())
         self.assertIn("Disk is unavailable", self.window.progress_notice.text())
         self.assertTrue(self.window.item_catalogue.error_label.isVisible())
@@ -201,13 +202,13 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertTrue(self.window.item_catalogue.error_label.isHidden())
 
     def test_items_page_load_error_preserves_corrupt_file_and_retry_refreshes_same_page(self):
-        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "coin_survived_run_alive"))
         original = self.window.profile_store.path.read_bytes()
         self.window.profile_store.path.write_bytes(b"broken profile")
         self.window.items_tab_button.click()
         self.assertTrue(self.window.progress_notice.isVisible())
         self.assertIn("invalid", self.window.progress_notice.text())
-        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue_page)
         self.assertFalse(self.window.item_catalogue.checkboxes)
         self.assertEqual(self.window.profile_store.path.read_bytes(), b"broken profile")
         self.window.progress_retry_button.click()
@@ -216,7 +217,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.window.profile_store.path.write_bytes(original)
         self.window.progress_retry_button.click()
         self.assertTrue(self.window.progress_retry_button.isHidden())
-        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue_page)
         self.assertIn("guardian_angel", self.window.item_catalogue.checkboxes)
         self.assertEqual(self.window.profile_store.path.read_bytes(), original)
 
@@ -391,7 +392,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.window.phase = "conversation"
         literal = "Jerry's <b>note</b> & a literal &#x27;\nA second line."
         self.window.add_public_event(literal)
-        self.assertEqual(self.window.output_area.toPlainText(), literal)
+        self.assertEqual(self.window.output_area.toPlainText(), "Detective\n" + literal)
         self.assertEqual(self.window.public_events[-1].text, literal)
         self.assertEqual(self.window.history_records[-1].text, literal)
 
@@ -581,14 +582,14 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertTrue(scroll.isVisible())
         self.assertLessEqual(scroll.width(), self.window.width())
         self.assertEqual(self.window.weapon_grid.count(), len(self.window.weapons))
-        self.assertGreater(scroll.verticalScrollBar().maximum(), 0)
         self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
-        last_card = self.window.weapon_grid.itemAt(len(self.window.weapons) - 1).widget()
-        scroll.ensureWidgetVisible(last_card)
-        self.app.processEvents()
-        self.assertTrue(scroll.viewport().rect().intersects(
-            last_card.rect().translated(last_card.mapTo(scroll.viewport(), last_card.rect().topLeft()))
-        ))
+        for index in range(self.window.weapon_grid.count()):
+            card = self.window.weapon_grid.itemAt(index).widget()
+            scroll.ensureWidgetVisible(card)
+            self.app.processEvents()
+            self.assertTrue(scroll.viewport().rect().contains(
+                card.rect().translated(card.mapTo(scroll.viewport(), card.rect().topLeft()))
+            ))
 
     def test_source_resources_load_outside_working_directory(self):
         original_cwd = os.getcwd()
@@ -712,29 +713,41 @@ class RuntimeRegressionTests(unittest.TestCase):
             self.window, "run_conversation_phase"
         ) as conversation:
             self.window.choose_room("Attic")
+            self.assertIsNotNone(self.window.weapon_aftermath_panel)
+            self.window.keep_weapon_button.click()
         self.assertEqual(self.window.new_crime_scenes, [])
         self.assertEqual(self.window.rooms_visited, ["Attic"])
         memories.assert_called_once_with(None)
         conversation.assert_called_once()
 
+    def assert_shared_pen_signature(self, roll, signature):
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "pen")
+        placements = {self.window.body_id(name): room for name, room in
+                      (("Dave", "Attic"), ("Jerry", "Kitchen"), ("Hank", "Library"))}
+        with patch.object(game, "assign_guest_rooms", return_value=placements):
+            self.window.run_action_phase()
+        self.window.item_drafts = None
+        self.window.pending_pen_note_text = "Trust nobody"
+        self.window.apply_weapon_gating()
+        with patch.object(game.random, "random", return_value=roll) as random_roll, patch.object(
+            self.window, "run_conversation_loop"
+        ):
+            self.window.choose_room("Attic")
+            self.assertIsNotNone(self.window.weapon_aftermath_panel)
+            self.window.keep_weapon_button.click()
+        random_roll.assert_called_once()
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        notes = [next(event.text for event in self.window.build_character_context(name).public_events
+                      if "note was found" in event.text) for name in self.window.characters]
+        self.assertEqual(len(set(notes)), 1)
+        self.assertIn("Trust nobody - Signed: " + signature, notes[0])
+        self.assertEqual(sum("note was found" in event.text for event in self.window.public_events), 1)
+
     def test_pen_reveals_one_shared_signature_to_every_character(self):
-        for roll, signature in ((0.01, "Alex"), (0.99, "Debra")):
-            with self.subTest(roll=roll):
-                self.window.selected_weapon = {"id": "pen"}
-                self.window.pending_pen_note_text = "Trust nobody"
-                self.window.victims_last_night = ["Debra"]
-                self.window.new_crime_scenes = []
-                self.window.public_events = []
-                with patch.object(game.random, "random", return_value=roll) as random_roll, patch.object(
-                    self.window, "run_conversation_loop"
-                ):
-                    self.window.run_conversation_phase()
-                random_roll.assert_called_once()
-                notes = [next(event.text for event in self.window.build_character_context(name).public_events
-                              if "note was found" in event.text) for name in self.window.characters]
-                self.assertEqual(len(set(notes)), 1)
-                self.assertIn("Trust nobody - Signed: " + signature, notes[0])
-                self.assertEqual(sum("note was found" in event.text for event in self.window.public_events), 1)
+        self.assert_shared_pen_signature(0.99, "Dave")
+
+    def test_pen_backfire_reveals_one_shared_attacker_signature_to_every_character(self):
+        self.assert_shared_pen_signature(0.01, "Alex")
 
     def test_pen_without_victim_does_not_reveal_a_note(self):
         self.window.selected_weapon = {"id": "pen"}
@@ -1006,7 +1019,6 @@ class RuntimeRegressionTests(unittest.TestCase):
             self.assertFalse(self.window.retry_button.isHidden())
             self.assertIn("Temporary failure", self.window.secondary_output_area.text())
             self.assertEqual(tuple(self.window.public_dialogue), before)
-            self.window.remember("Jerry", "experience", "A later observation")
             self.window.retry_button.click()
             self.wait_for(lambda: not self.window.ai_busy and not self.window.active_workers)
         self.assertIs(seen[0], seen[1])
@@ -1014,6 +1026,26 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(self.window.public_dialogue[-1].text, "Recovered reply")
         self.assertTrue(self.window.retry_button.isHidden())
         self.assertIsNone(self.window.retry_action)
+
+    def test_failed_speech_retry_rejects_changed_memory_and_leaves_decision_controls_usable(self):
+        self.window.phase = "conversation"
+        self.window.append_speech("Detective", "A question.")
+        self.speech.side_effect = game.AIRequestError("Temporary failure. Please retry.")
+        self.window.run_single_response("Jerry")
+        self.wait_for(lambda: self.window.retry_action is not None and not self.window.active_workers)
+        before = tuple(self.window.public_dialogue)
+        self.window.remember("Jerry", "experience", "A later observation")
+        self.window.retry_button.click()
+        self.assertEqual(self.speech.call_count, 1)
+        self.assertEqual(tuple(self.window.public_dialogue), before)
+        self.assertFalse(self.window.ai_busy)
+        self.assertFalse(self.window.active_workers)
+        self.assertIsNone(self.window.retry_action)
+        self.assertTrue(self.window.retry_button.isHidden())
+        self.assertTrue(self.window.pass_button.isEnabled())
+        self.assertTrue(self.window.interject_button.isEnabled())
+        self.assertTrue(self.window.interject_input.isEnabled())
+        self.assertTrue(self.window.say_button.isEnabled())
 
     def test_failed_vote_batch_keeps_player_ballot_and_retries_atomically(self):
         self.prepare_vote_call()
@@ -1077,7 +1109,7 @@ class RuntimeRegressionTests(unittest.TestCase):
                 worker.wait(3000)
             self.app.processEvents()
 
-    def test_camera_equipment_is_action_information_without_revealing_rooms_in_hard_mode(self):
+    def test_camera_equipment_never_leaks_before_morning_in_hard_mode(self):
         self.window.show_room_allocations = False
         self.window.player_name_input.setText("Alex")
         camera = game.NPCItemState({"Hank": "camera"})
@@ -1086,27 +1118,33 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertTrue(self.window.npc_equipment_label.isHidden())
         bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.select_weapon_and_start(bare)
-        self.assertTrue(self.window.npc_equipment_label.isVisible())
-        self.assertEqual(self.window.npc_equipment_label.text(), "Known equipment\nHank: Camera")
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+        self.assertEqual(self.window.npc_equipment_label.text(), "")
         self.assertFalse(any(room in self.window.npc_equipment_label.text() for room in self.window.rooms))
         text = self.window.output_area.toPlainText()
         self.assertNotIn("Known equipment", text)
         self.assertNotIn("Room Assignments", text)
         self.assertNotIn("Visible room:", text)
         context = self.window.build_character_context("Jerry")
-        self.assertTrue(any(event.source == "Visible equipment" for event in context.public_events))
+        self.assertFalse(any(event.source == "Visible equipment" for event in context.public_events))
         self.assertFalse(any(event.source == "Photograph" for event in context.public_events))
 
-    def test_camera_captures_before_attack_and_presents_once_after_owner_dies(self):
+    def begin_camera_night(self, weapon_id):
         self.window.npc_items = game.NPCItemState({"Hank": "camera"})
-        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
-        with patch.object(game.random, "choice", side_effect=lambda choices: choices[0]):
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == weapon_id)
+        placements = {self.window.body_id(name): room for name, room in
+                      (("Hank", "Kitchen"), ("Jerry", "Attic"), ("Dave", "Attic"))}
+        with patch.object(game, "assign_guest_rooms", return_value=placements):
             self.window.run_action_phase()
-        photos = self.window.npc_items.capture_night(1, {}, ())
-        self.assertEqual(len(photos), 1)
-        photo = photos[0]
+        self.assertNotIn(1, self.window.npc_items._photos_by_night)
+        self.assertTrue(self.window.prepare_room_entry("Kitchen"))
+        photo, = self.window.npc_items._photos_by_night[1]
+        self.assertEqual(set(photo.occupants), {"Alex", "Hank"})
+        return photo
+
+    def test_camera_captures_before_attack_and_presents_once_after_owner_dies(self):
+        photo = self.begin_camera_night("bare")
         self.assertEqual(photo.owner, "Hank")
-        self.assertNotIn("Alex", photo.occupants)
         self.assertFalse(any(event.source == "Photograph" for event in self.window.public_events))
         with patch.object(self.window, "run_conversation_loop"):
             self.window.choose_room(photo.room)
@@ -1121,24 +1159,21 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(sum(event.source == "Photograph" for event in self.window.public_events), 1)
         self.assertEqual(self.window.output_area.toPlainText().count("genuine photograph"), 1)
         self.window.run_action_phase()
-        self.assertEqual(self.window.npc_items.capture_night(2, {}, ()), ())
+        self.window.prepare_room_entry(self.window.night_rooms[0])
+        self.assertEqual(self.window.npc_items._photos_by_night[2], ())
 
     def test_possession_does_not_rewrite_photo_or_continue_the_npc_camera(self):
-        self.window.npc_items = game.NPCItemState({"Hank": "camera"})
-        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "voodoo")
-        with patch.object(game.random, "choice", side_effect=lambda choices: choices[0]):
-            self.window.run_action_phase()
-        photo, = self.window.npc_items.capture_night(1, {}, ())
+        photo = self.begin_camera_night("voodoo")
         original = photo.public_description()
         with patch.object(self.window, "run_conversation_loop"):
             self.window.choose_room(photo.room)
         self.assertEqual(self.window.player_name, "Hank")
         self.assertNotIn("Hank", self.window.characters)
         self.assertEqual(photo.public_description(), original)
-        self.assertIn("Visible people: Hank", original)
-        self.assertNotIn("Alex", original)
+        self.assertEqual(set(photo.occupants), {"Alex", "Hank"})
         self.window.run_action_phase()
-        self.assertEqual(self.window.npc_items.capture_night(2, {}, ()), ())
+        self.window.prepare_room_entry(self.window.night_rooms[0])
+        self.assertEqual(self.window.npc_items._photos_by_night[2], ())
 
     def test_final_morning_still_presents_a_dead_owners_photo(self):
         self.window.round_number = 1

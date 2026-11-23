@@ -16,6 +16,7 @@ from ai_context import (
     MemoryRecord,
     PublicState,
     SpeechProposal,
+    SelfIdentity,
     render_character_context,
     render_selector_context,
 )
@@ -58,6 +59,24 @@ class ContextTests(unittest.TestCase):
         )
         fields.update(overrides)
         return CharacterContext(**fields)
+
+    def test_private_self_identity_is_exact_typed_xml_without_changing_body_route(self):
+        original = self.context()
+        own = SelfIdentity('Dave & "original"', "Jerry", "Jerry #2")
+        supplied = replace(original, self_identity=own)
+        root = ET.fromstring(render_character_context(supplied))
+        self.assertEqual(root.find("self").attrib,
+                         {"name": own.name, "body": "Jerry", "reference": "Jerry #2"})
+        self.assertEqual(root.get("character"), "Jerry #2")
+        self.assertEqual(root.find("private_experiences").get("recipient"), "Jerry #2")
+        self.assertEqual(root.find("public_dialogue/utterance").get("speaker"), "Alex")
+        self.assertIsNone(ET.fromstring(render_character_context(original)).find("self"))
+        self.assertNotIn(own.name, render_selector_context(self.state, (), (), {}))
+        self.assertNotEqual(supplied, original)
+        with self.assertRaises(ValueError):
+            replace(original, self_identity={"name": "Dave"})
+        with self.assertRaises(ValueError):
+            SelfIdentity("", "Jerry", "Jerry #2")
 
     def test_personal_knowledge_keeps_source_round_and_category(self):
         root = ET.fromstring(render_character_context(self.context()))
