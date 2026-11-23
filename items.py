@@ -119,9 +119,9 @@ ITEM_CATALOGUE = MappingProxyType({
         flavour="A postponement can feel remarkably like a pardon.", rarity="blue",
     ),
     "booby_trap": ItemDefinition(
-        "booby_trap", "Booby Trap", "Prepare a room trap for next night. The next entering group triggers it once.",
+        "booby_trap", "Booby Trap", "Prepare a room trap for next night. The next person to enter triggers it once.",
         "room", False,
-        flavour="Do come in. Everyone at once.", rarity="purple",
+        flavour="Do come in. Mind the step.", rarity="purple",
     ),
     "lucky_coin": ItemDefinition(
         "lucky_coin", "(Un)Lucky Coin", "Flip between your death and a chosen living body's death. Reusable.",
