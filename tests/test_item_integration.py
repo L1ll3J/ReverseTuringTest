@@ -16,10 +16,11 @@ if sys.platform == "win32":
     os.environ.setdefault("QT_QPA_FONTDIR", str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PyQt5.QtCore import QCoreApplication, QEvent
+from PyQt5 import sip
+from PyQt5.QtCore import QCoreApplication, QEvent, QPoint, Qt
 from PyQt5.QtTest import QTest
 from PyQt5.QtGui import QFont, QFontInfo
-from PyQt5.QtWidgets import QApplication, QLabel, QTextEdit
+from PyQt5.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QTextEdit
 
 import main as game
 from content import CONTENT_CATALOGUE
@@ -62,8 +63,6 @@ class ItemIntegrationTests(unittest.TestCase):
         for worker in list(self.window.active_workers):
             worker.wait(3000)
         self.app.processEvents()
-        if self.window.draft_dialog:
-            self.window.draft_dialog.resolve()
         self.window.overlay_host.close_page()
         self.window.close()
         self.window.deleteLater()
@@ -84,9 +83,9 @@ class ItemIntegrationTests(unittest.TestCase):
         offer = self.window.item_drafts.pending_offer
         self.assertIsNotNone(offer)
         if item_id is None:
-            self.window.skip_item_offer(offer.offer_id)
+            self.window.draft_page.leave_button.click()
         else:
-            self.window.choose_item_offer(offer.offer_id, offer.options.index(item_id))
+            self.window.draft_page.take_buttons[offer.options.index(item_id)].click()
 
     def conversation(self):
         self.window.phase = "conversation"
@@ -128,10 +127,17 @@ class ItemIntegrationTests(unittest.TestCase):
         self.night()
         self.window.choose_room("Basement")
         self.app.processEvents()
-        dialog = self.window.draft_dialog
-        labels = dialog.findChildren(QLabel)
-        self.assertTrue(all(QFontInfo(label.font()).family() != self.window.pixel_font_family for label in labels))
-        self.assertTrue(labels[1].wordWrap())
+        page = self.window.draft_page
+        labels = page.findChildren(QLabel)
+        descriptions = [label for label in labels if label.objectName().startswith("inlineItemDescription_")]
+        names = [label for label in labels if label.objectName().startswith("inlineItemName_")]
+        self.assertEqual(len(descriptions), 3)
+        self.assertEqual(len(names), 3)
+        self.assertTrue(all(QFontInfo(label.font()).family() != self.window.pixel_font_family
+                            for label in descriptions))
+        self.assertTrue(all(QFontInfo(label.font()).family() == self.window.pixel_font_family for label in names))
+        self.assertTrue(all(QFontInfo(button.font()).family() == self.window.pixel_font_family
+                            for button in page.findChildren(QPushButton)))
         for label in labels:
             if label.wordWrap():
                 self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()))
@@ -164,11 +170,32 @@ class ItemIntegrationTests(unittest.TestCase):
 
     def test_room_offer_blocks_action_until_resolved_and_stale_clicks_cannot_reenter(self):
         self.night()
+        windows = set(self.app.topLevelWidgets())
         self.window.choose_room("Library")
         offer = self.window.item_drafts.pending_offer
+        page = self.window.draft_page
+        self.assertFalse(page.isWindow())
+        self.assertNotIsInstance(page, QDialog)
+        self.assertEqual(set(self.app.topLevelWidgets()), windows)
+        self.assertIs(page.parentWidget(), self.window.centralWidget())
+        self.assertEqual(self.window.layout.indexOf(page) + 1,
+                         self.window.layout.indexOf(self.window.room_buttons_widget))
+        self.assertTrue(self.window.room_buttons_widget.isHidden())
+        self.assertTrue(self.window.weapon_action_panel.isHidden())
         self.assertTrue(self.window.characters["Debra"]["alive"])
         self.assertEqual(len(set(offer.options)), 3)
+        self.window.apply_weapon_gating()
+        self.window.set_room_buttons_enabled(True)
+        self.window.position_weapon_panel()
+        self.assertTrue(all(not button.isEnabled() for button in self.window.room_buttons.values()))
+        self.assertTrue(self.window.weapon_action_panel.isHidden())
         self.window.choose_room("Attic")
+        self.window.finish_room_choice("Attic")
+        for configure in (self.window.open_pen_editor, self.window.open_blackmagic_dialog,
+                          self.window.open_knife_dialog, self.window.open_c4_dialog):
+            configure()
+        self.assertTrue(all(surface is None for surface in self.window._weapon_windows.values()))
+        self.assertEqual(self.window.rooms_visited, [])
         self.assertEqual(self.window.item_drafts.pending_offer, offer)
         self.settle_offer("banana")
         self.assertFalse(self.window.characters["Debra"]["alive"])
@@ -176,33 +203,216 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.choose_item_offer(offer.offer_id, 0)
         self.assertEqual(len(self.window.inventory.entries), 1)
 
-    def test_closing_offer_skips_permanently_and_continues_accepted_action(self):
+    def test_leave_button_skips_permanently_and_continues_accepted_action_once(self):
         self.night()
         self.window.choose_room("Basement")
-        self.window.draft_dialog.reject()
+        page = self.window.draft_page
+        page.leave_button.click()
+        page.leave_button.click()
+        page.take_buttons[0].click()
         self.assertIsNone(self.window.item_drafts.pending_offer)
+        self.assertIsNone(self.window.draft_page)
         self.assertEqual(self.window.rooms_visited, ["Basement"])
         self.assertIsNone(self.window.item_drafts.enter_room("Basement"))
         self.assertFalse(self.window.inventory.entries)
+        self.assertFalse(self.window.room_buttons_widget.isHidden())
+        self.assertFalse(self.window.weapon_action_panel.isHidden())
+        self.assertFalse(self.window.room_buttons["Basement"].isEnabled())
+        self.assertTrue(self.window.room_buttons["Cellar"].isEnabled())
+        self.assertEqual(sum(record.text == "You left the items behind."
+                             for record in self.window.history_records), 1)
 
     def test_offer_reroll_invalidates_old_buttons_and_only_spends_with_alternative(self):
         self.night()
         self.window.choose_room("Basement")
         offer = self.window.item_drafts.pending_offer
-        self.window.reroll_item_offer(offer.offer_id, 0)
+        self.assertFalse(self.window.draft_page.reroll_buttons[0].isEnabled())
+        self.window.draft_page.reroll_buttons[0].click()
         self.assertEqual(self.window.item_drafts.rerolls_remaining, 1)
         self.assertEqual(self.window.item_drafts.pending_offer, offer)
         self.settle_offer()
         self.window.item_drafts = DraftState("player", tuple(game.ITEM_CATALOGUE))
-        self.window.offer_room_item("Cellar", Mock())
+        continuation = Mock()
+        self.window.offer_room_item("Cellar", continuation)
         old = self.window.item_drafts.pending_offer
-        self.window.reroll_item_offer(old.offer_id, 1)
+        old_page = self.window.draft_page
+        old_page.reroll_buttons[1].click()
         updated = self.window.item_drafts.pending_offer
+        self.assertIsNot(self.window.draft_page, old_page)
+        self.assertTrue(old_page.isHidden())
         self.assertNotEqual(updated.offer_id, old.offer_id)
         self.assertEqual(self.window.item_drafts.rerolls_remaining, 0)
-        self.window.choose_item_offer(old.offer_id, 1)
+        old_page.take_buttons[1].click()
+        old_page.leave_button.click()
+        old_page.reroll_buttons[1].click()
+        self.assertIs(self.window.item_drafts.pending_offer, updated)
+        continuation.assert_not_called()
         self.assertFalse(self.window.inventory.entries)
         self.settle_offer()
+        continuation.assert_called_once_with()
+
+    def test_help_transcript_pause_and_escape_preserve_pending_inline_offer(self):
+        self.night()
+        self.window.choose_room("Basement")
+        page = self.window.draft_page
+        offer = self.window.item_drafts.pending_offer
+        self.window.show_transcript()
+        transcript = self.window.overlay_host.current_page
+        self.assertIs(transcript, self.window.transcript_page)
+        self.window.show_how_to_play()
+        self.window.open_inventory()
+        self.assertIs(self.window.overlay_host.current_page, transcript)
+        QTest.keyClick(self.window.overlay_host, Qt.Key_Escape)
+        self.window.show_how_to_play()
+        self.assertIs(self.window.overlay_host.current_page, self.window.help_page)
+        self.window.overlay_host.close_page()
+        page.scroll.ensureWidgetVisible(page.help_button)
+        QTest.mouseClick(page.help_button, Qt.LeftButton)
+        self.assertTrue(page.help_label.isVisible())
+        QTest.keyClick(page.help_button, Qt.Key_Escape)
+        self.assertEqual(self.window.overlay_host.current_title, "Menu")
+        self.assertEqual(sum(dialog.isVisible() for dialog in self.window.findChildren(QDialog)), 1)
+        QTest.keyClick(self.window.overlay_host, Qt.Key_Escape)
+        self.assertIsNone(self.window.overlay_host.current_page)
+        self.assertIs(self.window.draft_page, page)
+        self.assertIs(self.window.item_drafts.pending_offer, offer)
+        self.assertEqual(self.window.rooms_visited, [])
+        self.assertEqual(self.window.inventory.entries, ())
+        self.assertFalse(any(record.text == "You left the items behind."
+                             for record in self.window.history_records))
+
+    def test_stale_phase_callbacks_cannot_mutate_offer_or_resume_room(self):
+        self.night()
+        continuation = Mock()
+        self.window.offer_room_item("Basement", continuation)
+        offer = self.window.item_drafts.pending_offer
+        page = self.window.draft_page
+        history = tuple(self.window.history_records)
+        self.window.phase = "conversation"
+        page.take_buttons[0].click()
+        page.leave_button.click()
+        self.window.reroll_item_offer(offer.offer_id, 1)
+        self.assertIs(self.window.item_drafts.pending_offer, offer)
+        self.assertEqual(self.window.inventory.entries, ())
+        self.assertEqual(tuple(self.window.history_records), history)
+        continuation.assert_not_called()
+
+    def test_phase_transitions_cancel_obsolete_page_without_loot_or_continuation(self):
+        for transition in (self.window.run_conversation_phase, self.window.run_action_phase,
+                           self.window.show_weapon_select_screen,
+                           lambda: self.window.end_game_screen(0)):
+            with self.subTest(transition=transition):
+                self.window.show_weapon_select_screen()
+                self.night()
+                continuation = Mock()
+                self.window.offer_room_item("Basement", continuation)
+                page = self.window.draft_page
+                offer = self.window.item_drafts.pending_offer
+                transition()
+                self.assertIsNone(self.window.pending_room_action)
+                self.assertIsNone(self.window.item_drafts.pending_offer)
+                self.assertIsNone(self.window.draft_page)
+                self.assertTrue(page.isHidden())
+                self.window.choose_item_offer(offer.offer_id, 0)
+                self.window.skip_item_offer(offer.offer_id)
+                self.window.reroll_item_offer(offer.offer_id, 1)
+                self.assertEqual(self.window.inventory.entries, ())
+                continuation.assert_not_called()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+                self.assertTrue(sip.isdeleted(page))
+
+    def test_close_cancels_inline_offer_and_old_callbacks_without_accepting_action(self):
+        self.night()
+        continuation = Mock()
+        self.window.offer_room_item("Basement", continuation)
+        page = self.window.draft_page
+        offer = self.window.item_drafts.pending_offer
+        self.window.close()
+        self.assertIsNone(self.window.draft_page)
+        self.assertIsNone(self.window.pending_room_action)
+        self.assertIsNone(self.window.item_drafts.pending_offer)
+        self.window.choose_item_offer(offer.offer_id, 0)
+        self.window.skip_item_offer(offer.offer_id)
+        self.window.reroll_item_offer(offer.offer_id, 0)
+        self.assertEqual(self.window.inventory.entries, ())
+        continuation.assert_not_called()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertTrue(sip.isdeleted(page))
+
+    def test_laptop_offer_scrolls_below_corner_controls_and_leave_works_by_keyboard(self):
+        self.window.showNormal()
+        self.night()
+        self.window.transcript_button.show()
+        self.window.choose_room("Basement")
+        page = self.window.draft_page
+        self.app.processEvents()
+        viewport = page.scroll.viewport()
+        top = viewport.mapTo(self.window, QPoint(0, 0)).y()
+        self.assertGreater(top, self.window.transcript_button.geometry().bottom())
+        self.assertGreater(page.scroll.verticalScrollBar().maximum(), 0)
+        self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
+        page.take_buttons[0].setFocus()
+        QTest.keyClick(page.take_buttons[0], Qt.Key_Tab)
+        self.assertTrue(page.take_buttons[1].hasFocus())
+        page.scroll.ensureWidgetVisible(page.leave_button)
+        page.leave_button.setFocus()
+        self.app.processEvents()
+        position = page.leave_button.mapTo(viewport, QPoint(0, 0))
+        self.assertGreaterEqual(position.y(), 0)
+        self.assertLessEqual(position.y() + page.leave_button.height(), viewport.height())
+        QTest.keyClick(page.leave_button, Qt.Key_Space)
+        self.assertIsNone(self.window.draft_page)
+        self.assertEqual(self.window.rooms_visited, ["Basement"])
+
+    def test_restart_retires_old_offer_before_new_window_and_rejects_late_actions(self):
+        self.night()
+        continuation = Mock()
+        self.window.offer_room_item("Basement", continuation)
+        page = self.window.draft_page
+        offer = self.window.item_drafts.pending_offer
+        had_main_window = hasattr(self.app, "_main_window")
+        previous_main_window = getattr(self.app, "_main_window", None)
+        previous_quit = self.app.quitOnLastWindowClosed()
+        original_init = game.GameWindow.__init__
+        created = []
+
+        def record_init(window):
+            original_init(window)
+            created.append(window)
+
+        try:
+            with patch.object(game.GameWindow, "__init__", new=record_init):
+                self.window.restart_game()
+                self.assertIsNone(self.window.draft_page)
+                self.assertIsNone(self.window.pending_room_action)
+                self.assertIsNone(self.window.item_drafts.pending_offer)
+                self.window.choose_item_offer(offer.offer_id, 0)
+                self.window.skip_item_offer(offer.offer_id)
+                self.window.reroll_item_offer(offer.offer_id, 0)
+                deadline = monotonic() + 3
+                while not created and monotonic() < deadline:
+                    QTest.qWait(5)
+            self.assertEqual(len(created), 1)
+            self.assertIs(self.app._main_window, created[0])
+            self.assertEqual(created[0].phase, "start")
+            self.assertIsNone(created[0].draft_page)
+            self.assertEqual(created[0].inventory.entries, ())
+            self.assertEqual(self.window.inventory.entries, ())
+            continuation.assert_not_called()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            self.assertTrue(sip.isdeleted(page))
+            QTest.qWait(60)
+        finally:
+            self.app.setQuitOnLastWindowClosed(False)
+            for replacement in created:
+                replacement.close()
+                replacement.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            if had_main_window:
+                self.app._main_window = previous_main_window
+            elif hasattr(self.app, "_main_window"):
+                del self.app._main_window
+            self.app.setQuitOnLastWindowClosed(previous_quit)
 
     def test_inventory_preserves_composing_draft_when_used(self):
         self.night()

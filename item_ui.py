@@ -7,7 +7,7 @@ from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QPixmap, QPolygon
 from PyQt5.QtWidgets import (
     QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
 )
 
 
@@ -235,3 +235,151 @@ class InventoryPage(QWidget):
         label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self._font(label, font)
         return label
+
+
+class InlineItemDraftPage(QWidget):
+    """Room reward content for an existing layout, with caller-owned draft rules.
+
+    Each page represents one immutable offer snapshot. Callbacks receive that
+    exact offer ID and, for item actions, its slot index. The caller applies the
+    action and replaces the page when the offer changes.
+    """
+
+    def __init__(self, offer, definitions, on_take, on_reroll, on_leave, *,
+                 reroll_count, can_reroll, picks_remaining=1,
+                 body_font=None, title_font=None, parent=None):
+        super().__init__(parent)
+        if not all(callable(callback) for callback in (on_take, on_reroll, on_leave)):
+            raise TypeError("Room rewards require take, reroll and leave callbacks")
+        self.setObjectName("inlineItemDraftPage")
+        self.setAccessibleName(f"Items found in {offer.room_id}")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self._body_font = QFont(body_font if body_font is not None else
+                                QFontDatabase.systemFont(QFontDatabase.GeneralFont))
+        if body_font is None:
+            self._body_font.setPixelSize(18)
+        self._title_font = QFont(title_font if title_font is not None else self._body_font)
+        if title_font is None:
+            self._title_font.setBold(True)
+        self.setFont(self._body_font)
+        self.setStyleSheet('''
+            QWidget#inlineItemDraftPage { background: #1e1e1e; color: #e0e0e0; }
+            QFrame#inlineItemCard { background: #252525; border: 1px solid #555; }
+            QWidget#inlineItemContents { background: transparent; }
+            QWidget#inlineItemDraftPage QLabel {
+                color: #e0e0e0; background: transparent; border: none;
+            }
+            QWidget#inlineItemDraftPage QScrollArea { background: transparent; border: none; }
+            QWidget#inlineItemDraftPage QPushButton {
+                color: #e0e0e0; background: #2a2a2a; border: 1px solid #777;
+                padding: 9px 16px; min-height: 24px;
+            }
+            QWidget#inlineItemDraftPage QPushButton:hover { background: #3a3a3a; border-color: #dedede; }
+            QWidget#inlineItemDraftPage QPushButton:focus { border: 2px solid #dedede; }
+            QWidget#inlineItemDraftPage QPushButton:pressed { background: #444; }
+            QWidget#inlineItemDraftPage QPushButton:disabled { color: #777; border-color: #555; }
+        ''')
+        self.take_buttons = {}
+        self.reroll_buttons = {}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content = QWidget()
+        content.setObjectName("inlineItemContents")
+        rows = QVBoxLayout(content)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(12)
+        heading = QHBoxLayout()
+        title = self._label(f"Found in the {offer.room_id}", self._title_font)
+        title.setObjectName("inlineItemHeading")
+        heading.addWidget(title, 1)
+        self.help_button = self._button("?", "inlineItemHelpToggle", "Help with room items")
+        self.help_button.setCheckable(True)
+        heading.addWidget(self.help_button, 0, Qt.AlignTop)
+        rows.addLayout(heading)
+        count = "item" if picks_remaining == 1 else "items"
+        status = self._label(
+            f"Choose {picks_remaining} {count}. Rerolls remaining: {reroll_count}.",
+            self._body_font,
+        )
+        status.setObjectName("inlineItemStatus")
+        rows.addWidget(status)
+        self.help_label = self._label(
+            "Take an item to keep for a later discussion. Reroll replaces one item "
+            "when another item is available. Leave these behind to continue without "
+            "taking the remaining items.", self._body_font,
+        )
+        self.help_label.setObjectName("inlineItemHelp")
+        self.help_label.hide()
+        self.help_button.toggled.connect(self.help_label.setVisible)
+        rows.addWidget(self.help_label)
+        offer_id = offer.offer_id
+        for slot, item_id in enumerate(offer.options):
+            definition = definitions[item_id]
+            card = QFrame()
+            card.setObjectName("inlineItemCard")
+            row = QVBoxLayout(card)
+            row.setContentsMargins(14, 14, 14, 14)
+            row.setSpacing(12)
+            description = QHBoxLayout()
+            description.setSpacing(14)
+            sprite = item_sprite(item_id)
+            sprite.setAccessibleName(definition.name)
+            description.addWidget(sprite, 0, Qt.AlignTop)
+            text = QVBoxLayout()
+            text.setSpacing(8)
+            name = self._label(definition.name, self._title_font)
+            name.setObjectName(f"inlineItemName_{slot}")
+            text.addWidget(name)
+            detail = self._label(definition.description, self._body_font)
+            detail.setObjectName(f"inlineItemDescription_{slot}")
+            text.addWidget(detail)
+            description.addLayout(text, 1)
+            row.addLayout(description)
+            controls = QHBoxLayout()
+            controls.addStretch()
+            take = self._button("Take", f"inlineItemTake_{slot}", f"Take {definition.name}")
+            take.clicked.connect(lambda _checked=False, index=slot: on_take(offer_id, index))
+            self.take_buttons[slot] = take
+            controls.addWidget(take)
+            reroll = self._button("Reroll", f"inlineItemReroll_{slot}", f"Reroll {definition.name}")
+            reroll.setEnabled(reroll_count > 0 and can_reroll)
+            if reroll_count <= 0:
+                reroll.setToolTip("No rerolls remaining.")
+            elif not can_reroll:
+                reroll.setToolTip("No alternative items are available for this offer.")
+            reroll.clicked.connect(lambda _checked=False, index=slot: on_reroll(offer_id, index))
+            self.reroll_buttons[slot] = reroll
+            controls.addWidget(reroll)
+            row.addLayout(controls)
+            rows.addWidget(card)
+        self.leave_button = self._button(
+            "Leave these behind", "inlineItemLeave", "Leave the remaining items behind",
+        )
+        self.leave_button.clicked.connect(lambda _checked=False: on_leave(offer_id))
+        rows.addWidget(self.leave_button)
+        rows.addStretch()
+        self.scroll.setWidget(content)
+        layout.addWidget(self.scroll)
+
+    def _label(self, text, font):
+        label = QLabel(text)
+        label.setTextFormat(Qt.PlainText)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        label.setFocusPolicy(Qt.ClickFocus)
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        InventoryPage._font(label, font)
+        return label
+
+    def _button(self, text, object_name, accessible_name):
+        button = QPushButton(text)
+        button.setObjectName(object_name)
+        button.setAccessibleName(accessible_name)
+        button.setFocusPolicy(Qt.StrongFocus)
+        button.setAutoDefault(False)
+        InventoryPage._font(button, self._title_font)
+        return button
