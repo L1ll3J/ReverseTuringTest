@@ -77,9 +77,16 @@ class ItemCataloguePanel(QWidget):
         rows.setContentsMargins(0, 0, 0, 0)
         rows.setSpacing(12)
         self.grids = []
+        title_metrics = QFontMetrics(self._title_font)
+        longest_word = max((max(title_metrics.horizontalAdvance(word),
+                                title_metrics.boundingRect(word).width())
+                            for definition in self._definitions.values()
+                            for word in definition.name.split()), default=0)
+        # Keep whole words inside the existing card margins and focused border.
+        minimum_card_width = max(180, longest_word + 2 * 12 + 2 * 2)
         for default, heading in ((True, "Default items"), (False, "Optional items")):
             rows.addWidget(self._label(heading, self._title_font))
-            grid = ResponsiveItemGrid(180)
+            grid = ResponsiveItemGrid(minimum_card_width)
             self.grids.append(grid)
             for item_id, definition in self._definitions.items():
                 if definition.default != default:

@@ -13,7 +13,7 @@ if sys.platform == "win32":
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PyQt5.QtCore import QCoreApplication, QEvent, QPoint, Qt
-from PyQt5.QtGui import QFont, QFontDatabase, QFontInfo, QPalette, QPixmap
+from PyQt5.QtGui import QFont, QFontDatabase, QFontInfo, QFontMetrics, QPalette, QPixmap
 from PyQt5.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton, QWidget
 
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS
@@ -174,6 +174,26 @@ class ItemCatalogueTests(unittest.TestCase):
             elif label is not panel.detail_name and not label.objectName().startswith("itemIcon_"):
                 self.assertEqual(QFontInfo(label.font()).family(), QFontInfo(self.font).family())
                 self.assertEqual(QFontInfo(label.font()).pixelSize(), 18)
+
+    def test_pixel_names_fit_each_card_at_small_and_bounded_large_widths(self):
+        font_id = QFontDatabase.addApplicationFont(str(
+            Path(__file__).resolve().parents[1] / "fonts" / "PressStart2P-Regular.ttf"))
+        self.assertNotEqual(font_id, -1)
+        title_font = QFont(QFontDatabase.applicationFontFamilies(font_id)[0])
+        title_font.setPixelSize(12)
+        panel = self.panel(title_font=title_font)
+        for width in (760, 1240, 1440):
+            panel.resize(width, 580)
+            self.app.processEvents()
+            for item_id, definition in ITEM_CATALOGUE.items():
+                with self.subTest(width=width, item=item_id):
+                    label = panel.cards[item_id].findChild(QLabel, f"itemName_{item_id}")
+                    metrics = QFontMetrics(label.font())
+                    longest = max(max(metrics.horizontalAdvance(word), metrics.boundingRect(word).width())
+                                  for word in definition.name.split())
+                    self.assertLessEqual(longest, label.contentsRect().width())
+                    self.assertLessEqual(label.heightForWidth(label.width()), label.height())
+                    self.assertEqual(label.font().pixelSize(), 12)
 
     def test_packaged_resource_root_and_shared_dialog_sprites_keep_callbacks(self):
         with tempfile.TemporaryDirectory() as directory:
