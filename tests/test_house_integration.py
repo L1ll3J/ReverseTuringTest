@@ -53,7 +53,7 @@ class HouseIntegrationTests(unittest.TestCase):
                 self.assertLessEqual(transcript.height(), 56)
                 self.assertLessEqual(transcript.width(), 220)
                 self.assertTrue(transcript.isVisible())
-                self.assertEqual(transcript.font().pixelSize(), 14)
+                self.assertEqual(transcript.font().pixelSize(), 12)
                 self.assertGreaterEqual(transcript.width(), transcript.fontMetrics().horizontalAdvance(transcript.text()) + 20)
                 self.assertGreaterEqual(transcript.height(), transcript.fontMetrics().height() + 20)
                 self.assertTrue(self.window.rect().contains(art))

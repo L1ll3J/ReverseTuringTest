@@ -127,8 +127,14 @@ class ItemCataloguePanel(QWidget):
         super().resizeEvent(event)
         self._size_details()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._size_details()
+
     def _size_details(self):
         """Reserve the tallest detail at this width so inspection cannot move cards."""
+        if not self.isVisible():
+            return
         width = max(1, self.width() - 50)
         title_metrics = QFontMetrics(self._title_font)
         body_metrics = QFontMetrics(self._body_font)
