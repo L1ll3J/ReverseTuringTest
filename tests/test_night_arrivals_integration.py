@@ -311,15 +311,24 @@ class NightArrivalIntegrationTests(unittest.TestCase):
         box, = editor.findChildren(game.QComboBox)
         self.assertEqual(box.findData(self.window.body_id('Dave')), -1)
 
-    def test_bonus_room_choice_never_restarts_arrivals_or_creates_another_reward(self):
+    def test_bonus_new_room_offers_first_reward_without_restarting_arrivals(self):
         state = self.open_night()
-        self.assertTrue(self.window.prepare_room_entry('Kitchen'))
-        cursor = state.cursor
-        self.window.bonus_action_pending = True
-        with patch.object(self.window, 'offer_room_item') as reward, patch.object(self.window, 'finish_room_choice') as finish:
-            self.window.choose_room('Library')
-        reward.assert_not_called()
-        finish.assert_called_once_with('Library')
+        with patch.object(self.window.npc_items, 'capture_night', wraps=self.window.npc_items.capture_night) as capture:
+            self.assertTrue(self.window.prepare_room_entry('Kitchen'))
+            cursor = state.cursor
+            self.window.bonus_action_pending = True
+            with patch.object(self.window, 'finish_room_choice') as finish:
+                self.window.choose_room('Library')
+                offer = self.window.item_drafts.pending_offer
+                self.assertIsNotNone(offer)
+                self.assertEqual(offer.room_id, 'Library')
+                self.window.skip_item_offer(offer.offer_id)
+                finish.assert_called_once_with('Library')
+                self.window.choose_room('Library')
+                self.assertIsNone(self.window.item_drafts.pending_offer)
+                self.assertIsNone(self.window.draft_page)
+                self.assertEqual(finish.call_count, 2)
+            self.assertEqual(capture.call_count, 1)
         self.assertEqual(state.cursor, cursor)
         self.assertEqual(sum(map(len, self.window.room_assignments.values())), 5)
 

@@ -3121,10 +3121,7 @@ class GameWindow(QMainWindow):
         try:
             if not self.prepare_room_entry(selected_room):
                 return
-            if self.bonus_action_pending:
-                self.finish_room_choice(selected_room)
-            else:
-                self.offer_room_item(selected_room, lambda: self.finish_room_choice(selected_room))
+            self.offer_room_item(selected_room, lambda: self.finish_room_choice(selected_room))
         finally:
             self._room_choice_in_progress = False
 

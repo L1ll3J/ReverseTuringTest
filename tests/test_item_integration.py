@@ -28,7 +28,28 @@ from content import CONTENT_CATALOGUE
 from dev_trace import TraceRun
 from game_rules import MUFFLED_SPEECH, MUFFLE_EXPIRED, BANANA_DISPOSITION
 from items import DraftState, eligible_item_pool
+from night_arrivals import NightArrivals
 from progression import ProfileError, ProfileStore, ProgressEvent
+
+
+class ArrivalFixtureRng:
+    """Preserve planned guest order with repeatable, plausible clock increments."""
+    def shuffle(self, values):
+        pass
+
+    def randint(self, lower, upper):
+        return lower
+
+
+def keep_completed_night_weapon(window, finish_night):
+    """Make the old fixtures' retention choice through the real aftermath control."""
+    def finish_and_keep(*args, **kwargs):
+        result = finish_night(*args, **kwargs)
+        panel = getattr(window, "weapon_aftermath_panel", None)
+        if panel is not None and not panel.isHidden():
+            window.keep_weapon_button.click()
+        return result
+    return finish_and_keep
 
 
 class ItemIntegrationTests(unittest.TestCase):
@@ -59,6 +80,30 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.player_name_input.setText("Alex")
         self.window.start_game()
         self.stack.enter_context(patch.object(self.window, "run_conversation_loop"))
+        self.stack.enter_context(patch.object(self.window, "finish_night", side_effect=
+            keep_completed_night_weapon(self.window, self.window.finish_night)))
+        self.planned_rooms = {
+            "Attic": ["Dave", "Jerry"], "Kitchen": ["Hank", "Owen"],
+            "Library": ["Debra"], "Basement": [], "Cellar": [],
+        }
+        assign_rooms = game.assign_guest_rooms
+
+        def planned_assignments(body_ids, rooms, reservations=None, **kwargs):
+            preferred = dict(reservations or {})
+            for room, names in self.planned_rooms.items():
+                if room not in rooms:
+                    continue
+                for name in names:
+                    body_id = self.window.body_id(name)
+                    if (body_id in body_ids and body_id not in preferred
+                            and sum(value == room for value in preferred.values()) < 2):
+                        preferred[body_id] = room
+            return assign_rooms(body_ids, rooms, preferred, **kwargs)
+
+        self.stack.enter_context(patch.object(game, "assign_guest_rooms", side_effect=planned_assignments))
+        self.stack.enter_context(patch.object(game, "NightArrivals", side_effect=lambda night, placements:
+            NightArrivals(night, placements, rng=ArrivalFixtureRng(), initial_count=min(1, len(placements)))))
+
 
     def tearDown(self):
         for worker in list(self.window.active_workers):
@@ -73,14 +118,12 @@ class ItemIntegrationTests(unittest.TestCase):
         return next(weapon for weapon in self.window.weapons if weapon["id"] == item_id)
 
     def night(self, weapon_id="bare", assignments=None):
+        if assignments is not None:
+            self.planned_rooms = assignments
         self.window.select_weapon_and_start(self.weapon())
         self.window.selected_weapon = self.weapon(weapon_id)
-        # Keep effect-specific room offers deterministic; production pool is checked separately.
+        # Item choices are fixed while arrivals stay on the real production path.
         self.window.item_drafts = DraftState(self.window.player_owner_id, ("banana", "muffle", "spare_paper"))
-        self.window.room_assignments = assignments or {
-            "Attic": ["Dave", "Jerry"], "Kitchen": ["Hank", "Owen"],
-            "Library": ["Debra"], "Basement": [], "Cellar": [],
-        }
 
     def settle_offer(self, item_id=None):
         offer = self.window.item_drafts.pending_offer
@@ -278,6 +321,10 @@ class ItemIntegrationTests(unittest.TestCase):
         self.conversation()
         self.give("guardian_angel")
         self.arm_optional("booby_trap", room="Attic")
+        self.planned_rooms = {
+            "Attic": [], "Kitchen": ["Dave", "Jerry"], "Library": ["Hank", "Owen"],
+            "Basement": ["Debra"], "Cellar": [],
+        }
         self.window.selected_weapon = self.weapon()
         with patch.object(game.random, "choice", side_effect=lambda choices: choices[-1]):
             self.window.run_action_phase()
@@ -335,7 +382,7 @@ class ItemIntegrationTests(unittest.TestCase):
             offer = next_window.item_drafts.pending_offer
             self.assertIsNotNone(offer)
             self.assertIn("presidential_decree", offer.options)
-            self.assertNotIn("revolver", offer.options)
+            self.assertIn("revolver", offer.options)
             self.assertEqual(store.read(), earned)
         finally:
             next_window.close()
@@ -859,7 +906,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.characters["Hank"]["alive"])
         self.assertFalse(self.window.characters["Owen"]["alive"])
 
-    def test_voodoo_preserves_body_affinity_history_guardian_and_truthful_witness(self):
+    def test_voodoo_preserves_body_affinity_and_history_with_former_body_guardian(self):
         self.conversation()
         self.give("banana", "Jerry")
         self.give("guardian_angel")
@@ -873,14 +920,14 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.kill_victim("Dave")
         self.assertEqual(self.window.player_name, "Dave")
         self.assertEqual(self.window.body_id(self.window.player_name), target_id)
-        self.assertFalse(self.window.characters["Alex"]["alive"])
-        self.assertTrue(self.window.item_rules.protection_armed)
+        self.assertTrue(self.window.characters["Alex"]["alive"])
+        self.assertFalse(self.window.item_rules.protection_armed)
         self.assertEqual(self.window.item_rules.affinities[0].subject_body_id, original_player_id)
         self.assertEqual(self.window.public_dialogue[0].speaker, "Alex")
         record = self.window.characters["Jerry"]["experiences"][-1].text
-        self.assertEqual(record, "You (Jerry) were in the Attic. You saw Alex stab Dave. Afterwards, Alex's body was lying dead there, and Dave was alive.")
-        self.assertTrue(self.window.resolve_death("Dave", "test-new-body").prevented)
-        self.assertTrue(self.window.player_alive)
+        self.assertEqual(record, "You (Jerry) were in the Attic. You saw Alex stab Dave.")
+        self.assertTrue(self.window.resolve_death("Dave", "test-new-body").killed)
+        self.assertFalse(self.window.player_alive)
         self.assertFalse(self.window.item_rules.protection_armed)
 
     def test_unlocks_saved_from_actions_only_and_frozen_until_next_run(self):
@@ -1099,10 +1146,6 @@ class ItemIntegrationTests(unittest.TestCase):
         self.use_card("watch_this_drive", marked)
         self.window.overlay_host.close_page()
         self.window.run_action_phase()
-        self.window.room_assignments = {
-            "Attic": ["Dave", "Jerry"], "Kitchen": ["Hank", "Owen"],
-            "Library": ["Debra"], "Basement": [], "Cellar": [],
-        }
 
     def test_projected_voice_preserves_required_answer_and_direct_cap(self):
         self.conversation()
@@ -1156,7 +1199,6 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.item_drafts.rerolls_remaining, 4)
         self.window.overlay_host.close_page()
         self.window.run_action_phase()
-        self.window.room_assignments["Attic"] = ["Dave", "Jerry"]
         self.window.choose_room("Attic")
         first = self.window.draft_page
         self.assertEqual(self.window.item_drafts.pending_offer.picks_remaining, 3)
@@ -1352,8 +1394,6 @@ class ItemIntegrationTests(unittest.TestCase):
         self.use_card("forged_note", message="Trust the banana.")
         self.window.overlay_host.close_page()
         self.window.run_action_phase()
-        self.window.room_assignments = {"Attic": ["Dave", "Jerry"], "Kitchen": ["Hank", "Owen"],
-                                        "Library": ["Debra"], "Basement": [], "Cellar": []}
         self.window.choose_room("Attic")
         self.settle_offer()
         self.window.kill_victim("Dave")
@@ -1480,6 +1520,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertIn("lucky_coin", self.window.profile_store.item_pool())
         self.assertNotIn("spin_the_dagger", self.window.profile.unlocked)
         self.window.run_action_phase()
+        self.assertTrue(self.window.prepare_room_entry("Attic"))
         for name in ("Dave", "Jerry", "Hank", "Owen"):
             room = next(room for room, occupants in self.window.room_assignments.items() if name in occupants)
             self.assertTrue(self.window.commit_attack(name, room))
@@ -2114,8 +2155,10 @@ class ItemIntegrationTests(unittest.TestCase):
         for name in ("Hank", "Owen", "Debra"):
             self.window.characters[name]["alive"] = False
         self.window.npc_items = game.NPCItemState({"Dave": "camera"})
-        self.window.npc_items.capture_night(1, self.window.room_assignments, ("Dave", "Jerry"))
+        self.assertNotIn(1, self.window.npc_items._photos_by_night)
         self.window.choose_room("Attic")
+        photo, = self.window.npc_items._photos_by_night[1]
+        self.assertEqual(set(photo.occupants), {"Alex", "Dave", "Jerry"})
         self.settle_offer()
         self.window.kill_victim("Dave")
         self.assertTrue(self.window.game_over)

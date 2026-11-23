@@ -8,12 +8,25 @@ from PyQt5.QtCore import QEvent
 from PyQt5.QtWidgets import QApplication, QComboBox, QPushButton
 import test_love_potion_integration as fixtures
 from npc_items import NPCItemState
+from night_arrivals import NightArrivals
+from test_item_integration import ArrivalFixtureRng, keep_completed_night_weapon
+import main as game
 from presentation_aliases import PresentationAliases
 
 
 class AppearanceRoutingTests(unittest.TestCase):
     setUpClass = fixtures.LovePotionIntegrationTests.__dict__["setUpClass"]
-    setUp = fixtures.LovePotionIntegrationTests.setUp
+    def setUp(self):
+        fixtures.LovePotionIntegrationTests.setUp(self)
+        self.stack.enter_context(patch.object(self.window, "finish_night", side_effect=
+            keep_completed_night_weapon(self.window, self.window.finish_night)))
+
+    def start_planned_night(self, assignments, initial_count=1):
+        placements = {self.window.body_id(name): room for room, names in assignments.items() for name in names}
+        with patch.object(game, "assign_guest_rooms", return_value=placements), patch.object(
+                game, "NightArrivals", side_effect=lambda night, planned: NightArrivals(
+                    night, planned, rng=ArrivalFixtureRng(), initial_count=min(initial_count, len(planned)))):
+            self.window.run_action_phase()
     tearDown = fixtures.LovePotionIntegrationTests.tearDown
 
     def clone(self, actor, target="Debra"):
@@ -220,11 +233,10 @@ class AppearanceRoutingTests(unittest.TestCase):
     def test_multi_occupant_love_captures_perceived_player_in_vouches_and_memories(self):
         self.clone("Alex")
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "love")
-        self.window.run_action_phase()
-        self.window.room_assignments = {
+        self.start_planned_night({
             "Kitchen": ["Dave", "Jerry"], "Attic": ["Hank"],
             "Library": ["Debra"], "Basement": ["Owen"], "Cellar": [],
-        }
+        })
         self.window.finish_room_choice("Kitchen")
         for observer, companion in (("Dave", "Jerry"), ("Jerry", "Dave")):
             disposition = self.window.characters[observer]["dispositions"][-1]
@@ -242,9 +254,9 @@ class AppearanceRoutingTests(unittest.TestCase):
         self.clone("Dave")
         self.window.show_room_allocations = False
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
-        self.window.run_action_phase()
+        self.start_planned_night({"Kitchen": ["Dave", "Debra"], "Attic": ["Jerry"],
+                                  "Library": ["Hank"], "Basement": ["Owen"], "Cellar": []})
         self.assertTrue(all(not observation.known_names for observation in self.window.house_view.observations.values()))
-        self.window.room_assignments = {"Kitchen": ["Dave", "Debra"]}
         self.window.finish_room_choice("Kitchen")
         observation = self.window.house_view.observations["kitchen"]
         labels = tuple(button.text().removeprefix("Kill ")
@@ -274,7 +286,8 @@ class AppearanceRoutingTests(unittest.TestCase):
         self.window.show_room_allocations = True
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.rooms_visited = ["Kitchen"]
-        self.window.run_action_phase()
+        self.start_planned_night({"Kitchen": ["Dave", "Debra"], "Attic": ["Jerry"],
+                                  "Library": ["Hank"], "Basement": ["Owen"], "Cellar": []}, initial_count=2)
         observation = self.window.house_view.observations["kitchen"]
         self.assertEqual(set(observation.known_names), {"Debra #1", "Debra #2"})
         self.assertFalse(observation.unknown_remainder)
@@ -285,9 +298,8 @@ class AppearanceRoutingTests(unittest.TestCase):
         prior = self.window.history_records[-1]
         self.clone("Dave")
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "c4")
-        self.window.run_action_phase()
-        self.window.room_assignments = {"Kitchen": ["Dave", "Debra"], "Attic": [],
-                                        "Library": ["Jerry"], "Basement": ["Hank"], "Cellar": ["Owen"]}
+        self.start_planned_night({"Kitchen": ["Dave", "Debra"], "Attic": [],
+                                  "Library": ["Jerry"], "Basement": ["Hank"], "Cellar": ["Owen"]})
         self.window.c4_target_room = "Kitchen"
         self.window.apply_weapon_gating()
         start = len(self.window.history_records)
