@@ -184,3 +184,34 @@ class AppearanceRoutingTests(unittest.TestCase):
         self.assertIn("You witnessed Debra kill Hank", memory)
         self.assertNotIn("Alex", memory)
         self.assertNotIn("#", memory)
+
+    def test_local_identical_victims_have_stable_aliases_and_body_id_callbacks(self):
+        self.clone("Dave")
+        self.window.phase = "action"
+        self.window.rooms_visited = ["Kitchen"]
+        self.window.room_assignments = {"Kitchen": ["Dave", "Debra"]}
+        self.window.display_victim_selection(["Dave", "Debra"])
+        buttons = {button.property("target_body_id"): button
+                   for button in self.window.victim_buttons_widget.findChildren(QPushButton)}
+        labels = {body: button.text() for body, button in buttons.items()}
+        self.assertEqual(set(labels.values()), {"Kill Debra #1", "Kill Debra #2"})
+        self.window.display_victim_selection(["Debra", "Dave"])
+        reopened = {button.property("target_body_id"): button.text()
+                    for button in self.window.victim_buttons_widget.findChildren(QPushButton)}
+        self.assertEqual(reopened, labels)
+        with patch.object(self.window, "finish_primary_kill") as kill:
+            buttons[self.window.body_id("Dave")].click()
+            kill.assert_called_once_with("Dave", "Kitchen")
+        self.window.round_number += 1
+        with patch.object(self.window, "finish_primary_kill") as kill:
+            buttons[self.window.body_id("Debra")].click()
+            kill.assert_not_called()
+        self.window._night_memories_written = False
+        self.window.rooms_visited = []
+        self.window.night_attacks = []
+        self.window.update_witness_memories(None)
+        self.assertNotIn("#", self.window.characters["Dave"]["experiences"][-1].text)
+        photo = NPCItemState({"Dave": "camera"}).capture_night(
+            1, {"Kitchen": ["Dave", "Debra"]}, ("Dave", "Debra"),
+            appearance_names={"Dave": "Debra", "Debra": "Debra"})[0]
+        self.assertNotIn("#", photo.public_description())

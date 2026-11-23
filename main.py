@@ -2797,7 +2797,22 @@ class GameWindow(QMainWindow):
             self.display_victim_selection(living)
 
     def display_victim_selection(self, occupants):
+        if self.phase != "action" or not self.rooms_visited:
+            return
+        room, night = self.rooms_visited[-1], self.round_number
+        self.ensure_identity_state()
+        present = [self.body_id(handle) for handle in self.room_assignments.get(room, ())
+                   if self.characters.get(handle, {}).get("alive") and handle != self.player_name]
+        if self.player_alive:
+            present.append(self.body_id(self.player_name))
+        aliases = self.presentation_aliases.for_presence(
+            f"{self.run_id}:{night}:room:{room}", self.identity_state, present)
         # Display buttons for choosing the victim in the room
+        previous = getattr(self, "victim_buttons_widget", None)
+        if previous is not None:
+            previous.hide()
+            self.layout.removeWidget(previous)
+            previous.deleteLater()
         self.victim_buttons_widget = QWidget()
         victim_layout = QVBoxLayout()
 
@@ -2807,7 +2822,7 @@ class GameWindow(QMainWindow):
         conversation_button_font_size = max(int(32 *(screen_width/2560)), 18)
 
         for occupant in occupants:
-            victim_button = QPushButton(f"Kill {self.perceived_actor(occupant)}", self)
+            victim_button = QPushButton(f"Kill {aliases.label_for_body(self.body_id(occupant))}", self)
             victim_button.setProperty("target_body_id", self.body_id(occupant))
             victim_button.setStyleSheet(f"""
                 QPushButton {{
@@ -2819,11 +2834,18 @@ class GameWindow(QMainWindow):
                     color: #808080;
                 }}
             """)
-            victim_button.clicked.connect(lambda _, o=occupant: self.kill_victim(o))
+            victim_button.clicked.connect(
+                lambda _, body=self.body_id(occupant), location=room, day=night:
+                self.kill_victim_body(body, room=location, night=day))
             victim_layout.addWidget(victim_button)
 
         self.victim_buttons_widget.setLayout(victim_layout)
         self.centralWidget().layout().addWidget(self.victim_buttons_widget)
+
+    def kill_victim_body(self, body_id, *, room, night):
+        if (self.round_number != night or not self.rooms_visited or self.rooms_visited[-1] != room):
+            return
+        self.kill_victim(self.label_for_body(body_id))
 
     def kill_victim(self, victim):
         if (self.phase != "action" or self.game_over or self.pending_room_action is not None
