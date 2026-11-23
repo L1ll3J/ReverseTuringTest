@@ -215,3 +215,24 @@ class AppearanceRoutingTests(unittest.TestCase):
             1, {"Kitchen": ["Dave", "Debra"]}, ("Dave", "Debra"),
             appearance_names={"Dave": "Debra", "Debra": "Debra"})[0]
         self.assertNotIn("#", photo.public_description())
+
+    def test_multi_occupant_love_captures_perceived_player_in_vouches_and_memories(self):
+        self.clone("Alex")
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "love")
+        self.window.run_action_phase()
+        self.window.room_assignments = {
+            "Kitchen": ["Dave", "Jerry"], "Attic": ["Hank"],
+            "Library": ["Debra"], "Basement": ["Owen"], "Cellar": [],
+        }
+        self.window.finish_room_choice("Kitchen")
+        for observer, companion in (("Dave", "Jerry"), ("Jerry", "Dave")):
+            disposition = self.window.characters[observer]["dispositions"][-1]
+            memory = self.window.characters[observer]["experiences"][-1]
+            self.assertIn(f"You VOUCH for {companion} and Debra.", disposition.text)
+            self.assertIn(f"You and {companion} and Debra shared", memory.text)
+            for record in (disposition, memory):
+                self.assertNotIn("Alex", record.text)
+                self.assertNotIn("#", record.text)
+        captured = self.window.characters["Dave"]["dispositions"][-1]
+        self.clone("Alex", "Hank")
+        self.assertIn("You VOUCH for Jerry and Debra.", captured.text)

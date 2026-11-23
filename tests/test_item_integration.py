@@ -928,6 +928,39 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertIn("stopwatch", self.window.profile.unlocked)
         self.assertEqual(self.window.profile.counters["survived_witnessed_vote"], 1)
 
+    def prepare_exchanged_witness(self):
+        self.night()
+        self.window.choose_room("Attic")
+        self.settle_offer()
+        self.window.kill_victim("Dave")
+        original_player_body = self.window.body_id("Alex")
+        witness_body = self.window.body_id("Jerry")
+        witness_data = self.window.characters["Jerry"]
+        memories = tuple(witness_data["experiences"])
+        self.assertEqual(self.window.witness_body_ids, {witness_body})
+        self.window.exchange_player_mind(witness_body)
+        self.assertIs(self.window.characters["Alex"], witness_data)
+        self.assertEqual(tuple(witness_data["experiences"]), memories)
+        self.assertEqual(self.window.witness_body_ids, {original_player_body})
+        self.assertNotIn(self.window.body_id(self.window.player_name), self.window.witness_body_ids)
+
+    def test_living_witness_mind_still_unlocks_stopwatch_after_exchange(self):
+        self.prepare_exchanged_witness()
+        ballots = {name: "NONE" for name, data in self.window.characters.items() if data["alive"]}
+        ballots[self.window.player_name] = "NONE"
+        self.vote(ballots)
+        self.assertIn("stopwatch", self.window.profile.unlocked)
+        self.assertEqual(self.window.profile.counters["survived_witnessed_vote"], 1)
+
+    def test_exchanged_witness_must_still_be_alive_to_unlock_stopwatch(self):
+        self.prepare_exchanged_witness()
+        self.window.resolve_death("Alex", "exchanged-witness-death")
+        ballots = {name: "NONE" for name, data in self.window.characters.items() if data["alive"]}
+        ballots[self.window.player_name] = "NONE"
+        self.vote(ballots)
+        self.assertNotIn("stopwatch", self.window.profile.unlocked)
+        self.assertNotIn("survived_witnessed_vote", self.window.profile.counters)
+
     def test_unused_inventory_is_retained_across_multiple_nights(self):
         self.night()
         self.window.choose_room("Library")

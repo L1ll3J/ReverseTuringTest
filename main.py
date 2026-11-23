@@ -344,6 +344,9 @@ class GameWindow(QMainWindow):
         target_data["alive"] = True
         self.characters[old_label] = target_data
         self.night_memory_views = memory_views
+        witness_minds = {old_state.mind_for_body(body_id) for body_id in self.witness_body_ids}
+        self.witness_body_ids = {new_state.body_for_mind(mind_id) for mind_id in witness_minds
+                                 if mind_id is not None and mind_id != self.player_owner_id}
         self.identity_state = new_state
         self.player_name = target.label
         self.invalidate_prepared_turn("identity_changed", changed=True)
@@ -2691,7 +2694,7 @@ class GameWindow(QMainWindow):
                                 self.remember(occ, "disposition", f"You and {self.perceived_actor(self.player_name)} shared a wonderful, intimate night in the {selected_room} on a previous night. It was a beautiful dance of passion and devotion and you're eager to spend more time with them. You VOUCH for {self.perceived_actor(self.player_name)}.")
                             else: 
                                 others = [self.perceived_actor(o) for o in occupants if o != occ and self.characters[o]["alive"]]
-                                others.append(self.player_name)
+                                others.append(self.perceived_actor(self.player_name))
                                 self.remember(occ, "disposition", f"You and " + " and ".join(others) + f" shared a wonderful, intimate night in the {selected_room} on a previous night. It was a beautiful dance of passion and devotion, espcially due to {self.perceived_actor(self.player_name)}, and you're eager to spend more time with them. You VOUCH for " + " and ".join(others) +".")
 
                 # No crime scenes; straight to convo
