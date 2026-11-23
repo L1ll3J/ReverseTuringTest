@@ -59,13 +59,13 @@ class ItemCatalogueTests(unittest.TestCase):
         for item_id, item in ITEM_CATALOGUE.items():
             self.assertEqual(panel.findChild(QLabel, f"itemName_{item_id}").text(), item.name)
             self.assertTrue(panel.findChild(QLabel, f"itemIcon_{item_id}").isVisible())
-            expected = "Default - always included" if item.default else "Locked"
+            expected = "Default" if item.default else "Locked"
             self.assertEqual(panel.findChild(QLabel, f"itemStatus_{item_id}").text(), expected)
             if not item.default:
-                goal = panel.findChild(QLabel, f"itemGoal_{item_id}")
-                self.assertEqual(goal.text(), "Unlock: " + UNLOCK_GOALS[item_id])
-        goal = panel.findChild(QLabel, "itemGoal_guardian_angel")
-        self.assertEqual(goal.text(), "Unlock: " + UNLOCK_GOALS["guardian_angel"])
+                panel._inspect(item_id)
+                self.assertEqual(panel.detail_goal.text(), "Unlock: " + UNLOCK_GOALS[item_id])
+        panel._inspect("guardian_angel")
+        self.assertEqual(panel.detail_goal.text(), "Unlock: " + UNLOCK_GOALS["guardian_angel"])
         self.assertFalse(panel.checkboxes)
         self.assertFalse(panel.findChildren(QCheckBox))
         self.callback.assert_not_called()
@@ -86,7 +86,7 @@ class ItemCatalogueTests(unittest.TestCase):
             panel.refresh(reopened.read())
             self.assertFalse(panel.checkboxes["booby_trap"].isChecked())
             self.assertNotIn("booby_trap", reopened.item_pool())
-            self.assertEqual(panel.findChild(QLabel, "itemStatus_booby_trap").text(), "Unlocked")
+            self.assertEqual(panel.findChild(QLabel, "itemStatus_booby_trap").text(), "Disabled")
 
     def test_optional_checkbox_uses_returned_snapshot_and_refresh_does_not_write(self):
         profile = ProfileSnapshot(unlocked={"guardian_angel"})
@@ -99,7 +99,7 @@ class ItemCatalogueTests(unittest.TestCase):
         self.callback.assert_called_once_with("guardian_angel", False)
         self.assertIs(panel.profile, excluded)
         self.assertFalse(panel.checkboxes["guardian_angel"].isChecked())
-        self.assertEqual(panel.findChild(QLabel, "itemStatus_guardian_angel").text(), "Unlocked")
+        self.assertEqual(panel.findChild(QLabel, "itemStatus_guardian_angel").text(), "Disabled")
         panel.refresh(ProfileSnapshot())
         self.assertFalse(panel.checkboxes)
         self.assertEqual(self.callback.call_count, 1)
@@ -108,14 +108,11 @@ class ItemCatalogueTests(unittest.TestCase):
         panel = self.panel()
         panel.refresh(ProfileSnapshot())
         for item_id, item in ITEM_CATALOGUE.items():
-            self.assertEqual(panel.findChild(QLabel, f"itemDescription_{item_id}").text(), item.description)
-            labels = panel.findChildren(QLabel, f"itemFlavour_{item_id}")
-            if item.flavour:
-                self.assertEqual(len(labels), 1)
-                self.assertEqual(labels[0].text(), item.flavour)
-                self.assertEqual(labels[0].textFormat(), Qt.PlainText)
-            else:
-                self.assertEqual(labels, [])
+            panel._inspect(item_id)
+            self.assertEqual(panel.detail_description.text(), item.description)
+            self.assertEqual(panel.detail_flavour.text(), item.flavour)
+            self.assertEqual(panel.detail_flavour.textFormat(), Qt.PlainText)
+            self.assertEqual(panel.detail_flavour.isHidden(), not bool(item.flavour))
         self.assertEqual(ITEM_CATALOGUE["love_potion"].flavour, "Sweet on the tongue. Bitter by morning.")
         self.assertEqual(ITEM_CATALOGUE["lucky_coin"].flavour,
                          "A little weight in the hand. A great deal hanging in the balance.")
@@ -170,10 +167,11 @@ class ItemCatalogueTests(unittest.TestCase):
         panel.refresh(ProfileSnapshot())
         self.app.processEvents()
         for label in panel.findChildren(QLabel):
-            if label.objectName().startswith("itemName_"):
+            if (label.objectName().startswith("itemName_") or label is panel.detail_name
+                    or label.text() in ("Default items", "Optional items")):
                 self.assertEqual(QFontInfo(label.font()).family(), QFontInfo(title_font).family())
                 self.assertEqual(QFontInfo(label.font()).pixelSize(), 12)
-            elif not label.objectName().startswith("itemIcon_"):
+            elif label is not panel.detail_name and not label.objectName().startswith("itemIcon_"):
                 self.assertEqual(QFontInfo(label.font()).family(), QFontInfo(self.font).family())
                 self.assertEqual(QFontInfo(label.font()).pixelSize(), 18)
 

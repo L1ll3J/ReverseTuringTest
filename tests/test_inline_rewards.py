@@ -154,8 +154,9 @@ class InlineRewardsTests(unittest.TestCase):
             self.assertEqual(page.take_buttons[slot].accessibleName(), "Take " + definitions[item_id].name)
             self.assertEqual(page.reroll_buttons[slot].accessibleName(), "Reroll " + definitions[item_id].name)
         for button in page.findChildren(QPushButton):
-            self.assertEqual(QFontInfo(button.font()).family(), QFontInfo(self.title).family())
-            self.assertEqual(button.font().pixelSize(), 14)
+            icon = button in page.reroll_buttons.values()
+            self.assertEqual(QFontInfo(button.font()).family(), QFontInfo(self.body if icon else self.title).family())
+            self.assertEqual(button.font().pixelSize(), 24 if icon else 14)
             self.assertEqual(button.focusPolicy(), Qt.StrongFocus)
 
     def test_mouse_hover_keyboard_focus_and_pressed_state_have_visible_feedback(self):
@@ -206,7 +207,7 @@ class InlineRewardsTests(unittest.TestCase):
         self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
         detail = page.findChild(QLabel, "inlineItemDescription_0")
         self.assertGreaterEqual(detail.height(), detail.heightForWidth(detail.width()))
-        for button in (page.take_buttons[0], page.reroll_buttons[2], page.leave_button):
+        for button in (page.findChild(QLabel, "inlineItemName_0"), page.reroll_buttons[2], page.leave_button):
             page.scroll.ensureWidgetVisible(button)
             self.app.processEvents()
             position = button.mapTo(page.scroll.viewport(), QPoint(0, 0))

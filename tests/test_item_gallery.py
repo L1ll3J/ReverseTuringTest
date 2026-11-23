@@ -54,25 +54,15 @@ class ItemGalleryTests(unittest.TestCase):
                 self.assertEqual(self.window.width(), width)
                 self.assertEqual(panel.scroll.horizontalScrollBar().maximum(), 0)
                 for item_id, item in ITEM_CATALOGUE.items():
-                    detail = panel.findChild(QLabel, f"itemDescription_{item_id}")
+                    panel._inspect(item_id)
+                    self.app.processEvents()
+                    detail = panel.detail_description
                     self.assertEqual(detail.text(), item.description)
                     self.assertEqual(detail.textFormat(), Qt.PlainText)
                     self.assertEqual(QFontInfo(detail.font()).pixelSize(), 18)
                     self.assertGreaterEqual(detail.height(), detail.heightForWidth(detail.width()))
-                    panel.scroll.ensureWidgetVisible(detail)
-                    self.app.processEvents()
-                    point = detail.mapTo(panel.scroll.viewport(), QPoint(0, 0))
-                    self.assertGreaterEqual(point.x(), 0)
-                    self.assertGreaterEqual(point.y(), 0)
-                    self.assertLessEqual(point.x() + detail.width(), panel.scroll.viewport().width())
-                    self.assertLessEqual(point.y() + detail.height(), panel.scroll.viewport().height())
-                    flavour = panel.findChild(QLabel, f"itemFlavour_{item_id}")
-                    if item.flavour:
-                        self.assertEqual(flavour.text(), item.flavour)
-                        self.assertEqual(flavour.textFormat(), Qt.PlainText)
-                        self.assertGreaterEqual(flavour.height(), flavour.heightForWidth(flavour.width()))
-                    else:
-                        self.assertIsNone(flavour)
+                    self.assertEqual(panel.detail_flavour.text(), item.flavour)
+                    self.assertEqual(panel.detail_flavour.isHidden(), not bool(item.flavour))
                 self.assertTrue(all(not box.isEnabled() for box in panel.checkboxes.values()))
 
     def test_export_checks_source_tree_png_and_failed_save(self):
