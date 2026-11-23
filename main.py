@@ -4,7 +4,7 @@ from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fingerprint, development_mode
-from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal, SelfIdentity
+from ai_context import CharacterContext, DialogueLine, MemoryRecord, PersonPresent, PublicState, SelfIdentity, SpeechProposal
 from ai_runtime import AIRuntime, AIRequestError
 from dictation import DictationRecorder, DictationError
 from preferences import Preferences
@@ -1159,13 +1159,38 @@ class GameWindow(QMainWindow):
         if display and self.phase in ("conversation", "voting"):
             self.message_log.append_record(record)
 
-    def public_state(self):
+    def living_actor_handles(self):
         alive = {char for char, data in self.characters.items() if data["alive"]}
         if self.player_name and self.player_alive:
             alive.add(self.player_name)
-        dead = tuple(char for char, data in self.characters.items()
+        return tuple(sorted(alive))
+
+    def ai_reference_routes(self):
+        return {self.display_actor(handle): handle for handle in self.living_actor_handles()}
+
+    @staticmethod
+    def routed_ai_proposal(proposal, reference_routes):
+        addressee = reference_routes.get(proposal.addressee) if proposal.addressee is not None else None
+        return SpeechProposal(addressee, proposal.speech)
+
+    def ai_snapshot_is_current(self, snapshot):
+        try:
+            return self.group_turn_snapshot() == snapshot
+        except (ItemRuleError, ValueError, KeyError):
+            # An inconsistent identity/context cannot validate an in-flight result.
+            return False
+
+    def public_state(self):
+        self.ensure_identity_state()
+        handles = self.living_actor_handles()
+        copresent = self.phase in {"conversation", "voting"}
+        visible = sorted((self.display_actor(handle) if copresent else self.perceived_actor(handle),
+                          self.perceived_actor(handle)) for handle in handles)
+        alive = tuple(reference for reference, _name in visible)
+        people = tuple(PersonPresent(name, reference) for reference, name in visible) if copresent else ()
+        dead = tuple(self.perceived_actor(char) for char, data in self.characters.items()
                      if not data["alive"] and char != self.player_name)
-        return PublicState(self.round_number, tuple(sorted(alive)), dead, self.night_rooms)
+        return PublicState(self.round_number, alive, dead, self.night_rooms, people)
 
     def recalled_public_events(self):
         return tuple(self.public_events[self.npc_recall_public_event_start:])
@@ -1195,18 +1220,16 @@ class GameWindow(QMainWindow):
         self.invalidate_prepared_turn("npc_recollections_cleared", changed=True)
 
     def build_character_context(self, character):
+        self.ensure_identity_state()
         data = self.characters[character]
         private = data.get("love_history", LovePotionHistory()).experiences.project()
         experiences = tuple(data["experiences"][data.get("recall_experience_start", 0):])
         dispositions = tuple(data["dispositions"][data.get("recall_disposition_start", 0):])
-        self.ensure_identity_state()
-        original_name = self.identity_state.mind_name(self.mind_id(character)) if self.identity_state else None
-        identity = (SelfIdentity(original_name, self.perceived_actor(character), self.display_actor(character))
-                    if original_name is not None else None)
         return CharacterContext(character, tuple(data["profile"]), self.public_state(),
                                 (*experiences, *private.experiences), dispositions,
                                 self.recalled_public_events(), self.recalled_dialogue(), private.current_feelings,
-                                identity)
+                                SelfIdentity(self.identity_state.mind_name(self.mind_id(character)),
+                                             self.perceived_actor(character), self.display_actor(character)))
 
     def advance_love_histories(self, *, discussion):
         changed = False
@@ -3233,7 +3256,7 @@ class GameWindow(QMainWindow):
         overrides = ()
         effects = (self.item_rules.protection_armed, self.item_rules.pending_ballot_bonus,
                    self.item_rules.muffles, self.item_rules.affinities, self.inventory.entries,
-                   self.player_owner_id, self.player_alive)
+                   self.player_owner_id, self.player_alive, self.identity_state)
         runtime = self.ai_runtime
         return GroupTurnSnapshot(self.conversation_revision, self.round_number, self.player_name,
                                  contexts, self.public_state(), self.recalled_public_events(),
@@ -3292,6 +3315,8 @@ class GameWindow(QMainWindow):
                                                   "revision": snapshot.revision}, scope=scope)
         runtime = self.ai_runtime
         fixed = dict(snapshot.overrides)
+        routes = self.ai_reference_routes()
+        references = {handle: reference for reference, handle in routes.items()}
         unblocked = tuple(context for context in snapshot.contexts if context.character not in fixed)
 
         def propose():
@@ -3313,20 +3338,23 @@ class GameWindow(QMainWindow):
                           "ticket": ticket.identifier})
             self.prepared_scope = (ticket.identifier, selector_scope)
 
+            public_proposals = {references[handle]: proposal for handle, proposal in proposals.items()}
+
             def select():
                 if ticket.cancelled.is_set():
                     return None
-                return call_with_trace(runtime.select_reply, *snapshot.selector_args, proposals,
+                return call_with_trace(runtime.select_reply, *snapshot.selector_args, public_proposals,
                                        trace_scope=selector_scope)
 
-            def selected(speaker):
+            def selected(reference):
+                speaker = routes.get(reference)
                 if not self.preparation_is_current(ticket):
                     self.discard_preparation(ticket, "stale_selection", selector_scope)
                     return
                 if speaker not in proposals:
                     self.preparation_failed(ticket, "The conversation could not continue. Please retry.", selector_scope)
                     return
-                state.publish(ticket, snapshot, speaker, proposals[speaker])
+                state.publish(ticket, snapshot, speaker, self.routed_ai_proposal(proposals[speaker], routes))
                 self.trace.record("preparation_ready", {"ticket": ticket.identifier,
                                   "speaker": speaker, "proposal": proposals[speaker]}, scope=selector_scope)
                 if self.awaiting_preparation == ticket.identifier:
@@ -3339,7 +3367,8 @@ class GameWindow(QMainWindow):
     def preparation_is_current(self, ticket):
         return (self.phase == "conversation" and not self.game_over
                 and not self.player_reply_required() and self.interject_input.isHidden()
-                and self.turn_preparation.current(ticket, self.group_turn_snapshot()))
+                and self.ai_snapshot_is_current(ticket.snapshot)
+                and self.turn_preparation.current(ticket, ticket.snapshot))
 
     def start_preparation_worker(self, ticket, operation, on_success, scope):
         self.turn_preparation.worker_started(ticket)
@@ -3673,10 +3702,22 @@ class GameWindow(QMainWindow):
             self.tally_votes()
             return
         runtime = self.ai_runtime
+        routes = self.ai_reference_routes()
+        identity, state = self.identity_state, self.public_state()
+        def current():
+            if self.phase != "voting" or self.game_over or self.identity_state != identity:
+                return False
+            try:
+                return self.public_state() == state
+            except (ItemRuleError, ValueError, KeyError):
+                return False
+        def commit_votes(votes):
+            for character, vote in votes.items():
+                self.collect_ai_vote(character, vote, reference_routes=routes)
         self.start_ai_request(
             lambda scope=None: parallel_requests(runtime.vote, contexts, trace_scope=scope),
-            self.handle_ai_votes,
-            "The group is deciding how to vote...", **self.trace_job_options("votes"),
+            commit_votes,
+            "The group is deciding how to vote...", context_guard=current, **self.trace_job_options("votes"),
         )
         # We will wait for the player's vote before tallying
 
@@ -3780,13 +3821,15 @@ class GameWindow(QMainWindow):
         # Once player votes, tally all votes
         self.tally_votes()
 
-    def collect_ai_vote(self, character, vote):
+    def collect_ai_vote(self, character, vote, *, reference_routes=None):
         if (self.phase != "voting" or self.voting_resolved
                 or character not in self.expected_voters or character == self.player_name
                 or character in self.votes or character in self.proxy_voters):
             return
+        routes = self.ai_reference_routes() if reference_routes is None else reference_routes
+        target = routes.get(vote, "NONE") if isinstance(vote, str) and vote != "NONE" else "NONE"
         self.votes[character] = validate_vote(
-            character, vote, self.characters, self.player_name
+            character, target, self.characters, self.player_name
         )
         self.trace.record("ballot_received", {"voter": character, "target": self.votes[character],
                                              "round": self.round_number, "source": "character"},
@@ -4129,7 +4172,7 @@ class GameWindow(QMainWindow):
         self.advance_love_histories(discussion=True)
         self.current_conversation = []
         self.most_recent_messageS = []
-        self.alive_characters = list(self.public_state().alive)
+        self.alive_characters = list(self.living_actor_handles())
         self.NPCs = [char for char, data in self.characters.items() if data["alive"]]
         item_crime_scenes = (record.room_id for record in self.item_deaths.values()
                              if record.day == self.round_number and record.room_id is not None)
@@ -4155,12 +4198,12 @@ class GameWindow(QMainWindow):
             self.add_public_event("The Detective reveals that a note was found by the body, it reads: " + note)
         bloodlust = (self.selected_weapon or {}).get("id") == "knife" and self.knife_used_bloodlust
         if bloodlust:
-            self.add_public_event(f"The Detective points out to everyone that {self.player_name} is covered in blood!")
+            self.add_public_event(f"The Detective points out to everyone that {self.perceived_actor(self.player_name)} is covered in blood!")
         first = self.player_name if bloodlust else random.choice(self.alive_characters)
         if bloodlust:
-            speech = f"{first}, you're covered in blood! Where were you last night?!"
+            speech = f"{self.perceived_actor(first)}, you're covered in blood! Where were you last night?!"
         else:
-            speech = f"{first}, let's start with you. Where were you last night?"
+            speech = f"{self.perceived_actor(first)}, let's start with you. Where were you last night?"
         self.append_speech("Detective", speech, first)
         self.trace_state("conversation_started")
         self.run_conversation_loop()
@@ -4186,6 +4229,8 @@ class GameWindow(QMainWindow):
             self.pending_direct_reply = (latest, body_id)
         context = self.build_character_context(mentioned)
         snapshot = self.group_turn_snapshot()
+        routes = self.ai_reference_routes()
+        identity = self.identity_state
         style = data.get("muffle_style", "fallback")
         def current():
             return (self.phase == "conversation" and not self.game_over
@@ -4193,8 +4238,9 @@ class GameWindow(QMainWindow):
                     and self.body_id(mentioned) == body_id
                     and self.item_rules.is_muffled(body_id) == muted
                     and data.get("muffle_style", "fallback") == style
-                    and (not muted or (self.build_character_context(mentioned) == context
-                                       and self.group_turn_snapshot() == snapshot)))
+                    and self.identity_state == identity
+                    and self.ai_snapshot_is_current(snapshot)
+                    and self.build_character_context(mentioned) == context)
         runtime = self.ai_runtime
         if muted:
             def choose_tone(scope=None):
@@ -4210,15 +4256,18 @@ class GameWindow(QMainWindow):
                                   **self.trace_job_options("muffled_tone", mentioned))
             return
         self.start_ai_request(lambda scope=None: call_with_trace(runtime.speech, context, trace_scope=scope),
-                              lambda proposal: self.handle_single_response(mentioned, proposal, direct_reply=direct_reply),
+                              lambda proposal: self.handle_single_response(mentioned, proposal, direct_reply=direct_reply,
+                                                                           reference_routes=routes),
                               f"{mentioned} is responding...", context_guard=current,
                               **self.trace_job_options("speech", mentioned))
 
-    def handle_single_response(self, mentioned, response, *, direct_reply=False):
+    def handle_single_response(self, mentioned, response, *, direct_reply=False, reference_routes=None):
         if (self.phase != "conversation" or self.game_over
                 or not self.characters.get(mentioned, {}).get("alive", False)
                 or self.item_rules.is_muffled(self.body_id(mentioned))):
             return
+        routes = self.ai_reference_routes() if reference_routes is None else reference_routes
+        response = self.routed_ai_proposal(response, routes)
         self.append_speech(mentioned, response.speech, response.addressee, direct_reply=direct_reply)
         self.run_conversation_loop()
     
@@ -4241,7 +4290,7 @@ class GameWindow(QMainWindow):
         runtime = self.ai_runtime
         def generate(scope=None):
             return parallel_requests(runtime.speech, contexts, trace_scope=scope)
-        context_guard = lambda: self.group_turn_snapshot() == snapshot
+        context_guard = lambda: self.ai_snapshot_is_current(snapshot)
         options = self.trace_job_options("proposals")
         if context_guard is not None:
             options["context_guard"] = context_guard
@@ -4254,8 +4303,10 @@ class GameWindow(QMainWindow):
         if self.phase != "conversation" or self.game_over:
             return
         runtime = self.ai_runtime
-        proposals = {speaker: proposal for speaker, proposal in responses.items()
-                     if speaker != self.player_name and self.characters.get(speaker, {}).get("alive", False)
+        routes = self.ai_reference_routes()
+        references = {handle: reference for reference, handle in routes.items()}
+        proposals = {references[speaker]: proposal for speaker, proposal in responses.items()
+                     if speaker in references and speaker != self.player_name and self.characters.get(speaker, {}).get("alive", False)
                      and not self.item_rules.is_muffled(self.body_id(speaker))}
         if not proposals:
             self.no_open_speaker()
@@ -4264,19 +4315,22 @@ class GameWindow(QMainWindow):
         if context_guard is not None:
             options["context_guard"] = context_guard
         self.start_ai_request(lambda scope=None: call_with_trace(runtime.select_reply, *selector_snapshot, proposals, trace_scope=scope),
-                              lambda speaker: self.handle_best_response(proposals[speaker], speaker),
+                              lambda reference: self.handle_best_response(proposals[reference], routes[reference],
+                                                                           reference_routes=routes),
                               "The conversation is continuing...", **options)
 
     def cleanup_worker(self):
         self.active_workers = [worker for worker in self.active_workers if not worker.isFinished()]
 
-    def handle_best_response(self, best_response, speaker):
+    def handle_best_response(self, best_response, speaker, *, reference_routes=None):
         if (self.phase != "conversation" or self.game_over
                 or not self.characters.get(speaker, {}).get("alive", False)
                 or self.item_rules.is_muffled(self.body_id(speaker))):
             return
         self.trace.record("proposal_selected", {"speaker": speaker, "proposal": best_response},
                           scope=self.trace_callback_scope)
+        if reference_routes is not None:
+            best_response = self.routed_ai_proposal(best_response, reference_routes)
         self.append_speech(speaker, best_response.speech, best_response.addressee)
         self.run_conversation_loop()
 
