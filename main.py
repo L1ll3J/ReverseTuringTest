@@ -377,9 +377,11 @@ class GameWindow(QMainWindow):
         self.request_serial += 1
         self.retry_action = None
         self.required_reply_anchor = None
+        self.pending_direct_reply = None
         self.prepared_retry_snapshot = None
         self.cancel_dictation()
-        self.interject_input.clear()
+        self.interject_input.hide()
+        self.say_button.hide()
         self.retire_weapon_editors()
         self.pending_pen_note_text = None
         self.black_magic_controller = None
@@ -788,6 +790,9 @@ class GameWindow(QMainWindow):
         self.request_serial += 1
         self.retry_action = None
         self.retry_button.hide()
+        soul_recipient = next((event.recipient_mind_id for event in events
+                               if event.event_type == "soul_exchange_requested"
+                               and event.event_id not in self.applied_item_events), None)
         death_applied = self.apply_item_events(events)
         self.trace_action("inventory_item_used", events=events)
         if death_applied:
@@ -803,6 +808,13 @@ class GameWindow(QMainWindow):
         if self.game_over:
             return True
         self.restore_conversation_decision()
+        if soul_recipient is not None:
+            self.overlay_host.close_page()
+            recipient = self.label_for_mind(soul_recipient)
+            if (self.characters.get(recipient, {}).get("alive", False)
+                    and not self.item_rules.is_muffled(self.body_id(recipient))):
+                self.run_single_response(recipient)
+            return True
         if any(event.event_type == "early_vote_requested" for event in events):
             self.overlay_host.close_page()
             self.call_vote()
@@ -3940,8 +3952,8 @@ class GameWindow(QMainWindow):
                 and anchor[1] == self.body_id(self.player_name)):
             return True
         latest = self.public_dialogue[-1]
-        if (self.last_speech_origin is not None and self.last_speech_origin[0] is latest
-                and self.last_speech_origin[1] != "ordinary"):
+        # Known speech uses the reply obligation captured before any later body exchange.
+        if self.last_speech_origin is not None and self.last_speech_origin[0] is latest:
             return False
         return (latest.round_number == self.round_number and latest.addressee == self.player_name
                 and latest.speaker != self.player_name
@@ -4009,7 +4021,6 @@ class GameWindow(QMainWindow):
         self.retry_button.hide()
         self.retry_action = None
         self.secondary_output_area.clear()
-        self.interject_input.clear()
         self.interject_input.show()
         self.say_button.show()
         self.pass_button.setEnabled(False)
