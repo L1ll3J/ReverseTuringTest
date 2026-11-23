@@ -220,6 +220,24 @@ class OverlayHostTests(unittest.TestCase):
         self.assertEqual(factory.call_count, 1)
         self.assertEqual(self.host.current_title, "Unlock")
 
+    def test_open_and_close_before_pending_timer_keeps_unlock_queue_in_order(self):
+        first = Mock(side_effect=lambda: QLabel("First unlock"))
+        second = Mock(side_effect=lambda: QLabel("Second unlock"))
+        self.host.enqueue_unlock(first, title="First")
+        self.host.enqueue_unlock(second, title="Second")
+        page, _ = self.page()
+        self.host.open_page(page, title="Inventory")
+        self.host.close_page()
+        self.events()
+        self.assertEqual(first.call_count, 1)
+        second.assert_not_called()
+        self.assertEqual(self.host.current_title, "First")
+        self.host.close_page()
+        self.events()
+        self.assertEqual(second.call_count, 1)
+        self.assertEqual(self.host.current_title, "Second")
+        self.assertEqual(self.host.pending_unlock_count, 0)
+
     def test_parent_close_cancels_scheduled_old_run_notification(self):
         factory = Mock(side_effect=lambda: QLabel("Stale unlock"))
         self.host.enqueue_unlock(factory, title="Old run")

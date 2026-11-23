@@ -89,6 +89,32 @@ class MessageViewTests(unittest.TestCase):
         self.assertEqual(self.view.unread_count, 0)
         self.assertTrue(self.view.latest_button.isHidden())
 
+    def test_wrapping_populated_editor_preserves_history_reading_after_resize(self):
+        editor = QTextEdit()
+        editor.resize(500, 300)
+        editor.setPlainText("\n".join(f"Witness account {i}." for i in range(100)))
+        editor.show()
+        self.app.processEvents()
+        cursor = editor.document().find("Witness account 4.")
+        editor.setTextCursor(cursor)
+        editor.verticalScrollBar().setValue(0)
+        before = (cursor.anchor(), cursor.position(), cursor.selectedText())
+        self.assertGreater(editor.verticalScrollBar().maximum(), 0)
+        wrapper = MessageLog(editor)
+        try:
+            wrapper.resize(520, 320)
+            wrapper.show()
+            self.app.processEvents()
+            wrapper.resize(450, 280)
+            self.app.processEvents()
+            self.assertFalse(wrapper.follows_tail)
+            self.assertEqual(editor.verticalScrollBar().value(), 0)
+            after = editor.textCursor()
+            self.assertEqual((after.anchor(), after.position(), after.selectedText()), before)
+        finally:
+            wrapper.close()
+            wrapper.deleteLater()
+
     def test_scrolled_reading_position_and_selection_survive_new_records(self):
         self.fill()
         cursor = self.editor.document().find("Line 4:")

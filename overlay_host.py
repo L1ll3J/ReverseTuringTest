@@ -304,8 +304,12 @@ class OverlayHost(QDialog):
 
     def _schedule_next(self):
         if (self._cancelled or self._draining or self._current_page is not None
-                or not self._queue or self._queue_timer.isActive()):
+                or not self._queue):
             return
+        if self._queue_timer.isActive():
+            if self._queue_generation == self._generation:
+                return
+            self._queue_timer.stop()
         self._queue_generation = self._generation
         self._queue_timer.start(0)
 

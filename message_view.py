@@ -66,7 +66,8 @@ class MessageLog(QWidget):
         self._by_id = {}
         self._unread_count = 0
         self._rendering = False
-        self._follow_tail = True
+        bar = editor.verticalScrollBar()
+        self._follow_tail = bar.maximum() - bar.value() <= 1
 
         editor.setReadOnly(True)
         editor.setAcceptRichText(False)
