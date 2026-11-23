@@ -995,15 +995,14 @@ class ItemIntegrationTests(unittest.TestCase):
         catalogue["presidential_decree"] = replace(catalogue["presidential_decree"], default=True)
         return patch.object(game, "ITEM_CATALOGUE", catalogue)
 
-    def test_decree_remains_blocked_in_production_inventory_and_callback(self):
+    def test_decree_is_available_in_production_inventory_and_callback(self):
         self.conversation()
         entry = self.window.inventory.grant("presidential_decree")
         self.window.open_inventory()
-        with patch.object(self.window.item_rules, "use_item", side_effect=AssertionError("Unavailable item")):
-            self.assertFalse(self.window.inventory_page.use_buttons[entry.instance_id].isEnabled())
-            self.assertFalse(self.window.use_inventory_item(entry.instance_id))
-        self.assertIn(entry, self.window.inventory.entries)
-        self.assertFalse(self.window.item_rules.skip_next_vote)
+        self.assertTrue(self.window.inventory_page.use_buttons[entry.instance_id].isEnabled())
+        self.assertTrue(self.window.use_inventory_item(entry.instance_id))
+        self.assertNotIn(entry, self.window.inventory.entries)
+        self.assertTrue(self.window.item_rules.skip_next_vote)
 
     def test_decree_skips_without_ballots_or_achievements_and_preserves_next_actual_vote(self):
         self.conversation()
@@ -1465,7 +1464,8 @@ class ItemIntegrationTests(unittest.TestCase):
         entry = self.window.inventory.grant("revolver")
         catalogue = dict(game.ITEM_CATALOGUE)
         catalogue["revolver"] = replace(catalogue["revolver"], default=True)
-        with patch.object(game, "ITEM_CATALOGUE", catalogue):
+        with patch.object(game, "ITEM_CATALOGUE", catalogue), patch.object(
+                game, "OPTIONAL_ITEM_NARRATION_PENDING", frozenset()):
             self.assertTrue(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
         self.assertTrue(self.window.game_over)
         self.assertEqual(self.window.items_used, 3)
@@ -1491,7 +1491,7 @@ class ItemIntegrationTests(unittest.TestCase):
     def test_all_death_items_stay_unavailable_before_rule_execution(self):
         self.conversation()
         entries = [self.window.inventory.grant(item_id)
-                   for item_id in ("revolver", "lucky_coin", "spin_the_dagger")]
+                   for item_id in ("revolver",)]
         self.window.open_inventory()
         with patch.object(self.window.item_rules, "use_item", side_effect=AssertionError("Unavailable item")):
             for entry in entries:
@@ -1509,6 +1509,146 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.inventory_page.use_buttons[entry.instance_id].isEnabled())
         self.assertFalse(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
         self.assertTrue(self.window.characters["Dave"]["alive"])
+
+    def arm_optional(self, item_id, target=None, room=None):
+        entry = self.window.inventory.grant(item_id)
+        events = self.window.item_rules.use_item(
+            entry.instance_id, self.window.item_use_context(),
+            self.window.body_id(target) if target else None, room_id=room)
+        self.window.apply_item_events(events)
+        return events
+
+    def test_assigned_group_trap_kills_once_without_attack_witnesses(self):
+        self.conversation()
+        self.arm_optional("booby_trap", room="Attic")
+        self.window.phase = "action"
+        self.window.round_number = 2
+        entrants = {self.window.body_id(name) for name in ("Dave", "Jerry")}
+        self.window.resolve_room_entry_items("assigned-group", "Attic", entrants)
+        self.window.resolve_room_entry_items("assigned-group", "Attic", entrants)
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertFalse(self.window.characters["Jerry"]["alive"])
+        self.assertEqual(self.window.run_player_kills, 2)
+        self.assertEqual(len(self.window.item_deaths), 2)
+        self.assertEqual(self.window.night_attacks, [])
+        self.assertEqual(self.window.victims_last_night, [])
+        self.assertEqual(self.window.characters["Hank"]["experiences"], [])
+        self.window.publish_item_bodies()
+        self.window.publish_item_bodies()
+        self.assertEqual(sum("body was found in the Attic" in event.text
+                             for event in self.window.public_events), 2)
+
+    def test_trap_binds_prepared_note_and_marked_bonus_once(self):
+        self.conversation()
+        self.arm_optional("booby_trap", room="Attic")
+        self.give("watch_this_drive", "Dave")
+        entry = self.window.inventory.grant("forged_note")
+        self.assertTrue(self.window.use_inventory_item(entry.instance_id, message="Prepared words."))
+        self.window.phase = "action"
+        self.window.round_number = 2
+        entrants = {self.window.body_id("Dave")}
+        self.window.resolve_room_entry_items("assigned", "Attic", entrants)
+        self.window.resolve_room_entry_items("assigned", "Attic", entrants)
+        self.assertEqual(self.window.item_rules.bonus_actions, 1)
+        self.assertEqual(self.window.profile.counters["marked_kill_completed"], 1)
+        self.assertEqual(len(self.window.morning_item_notes), 1)
+        self.assertEqual(self.window.morning_item_notes[0][1:], ("Dave", "Prepared words."))
+        self.assertEqual(self.window.run_player_kills, 1)
+
+    def test_empty_room_player_entry_trap_uses_guardian_once(self):
+        self.conversation()
+        self.give("guardian_angel")
+        self.arm_optional("booby_trap", room="Attic")
+        self.window.phase = "action"
+        self.window.round_number = 2
+        self.window.resolve_room_entry_items("empty-assignment", "Attic", set())
+        self.assertEqual(len(self.window.item_rules.traps), 1)
+        self.window.resolve_room_entry_items("player-entry", "Attic", {self.window.body_id("Alex")})
+        self.assertTrue(self.window.player_alive)
+        self.assertEqual(len(self.window.item_rules.traps), 0)
+        self.assertTrue(self.window.guardian_intervened_this_run)
+        self.window.resolve_room_entry_items("player-entry", "Attic", {self.window.body_id("Alex")})
+        self.assertEqual(sum("Against all expectation" in event.text
+                             for event in self.window.public_events), 1)
+        self.assertEqual(self.window.run_player_kills, 0)
+
+    def test_empty_room_player_trap_death_ends_game(self):
+        self.conversation()
+        self.arm_optional("booby_trap", room="Attic")
+        self.window.phase = "action"
+        self.window.round_number = 2
+        self.assertTrue(self.window.resolve_room_entry_items(
+            "player-entry", "Attic", {self.window.body_id("Alex")}))
+        self.assertTrue(self.window.game_over)
+        self.assertFalse(self.window.player_alive)
+        self.assertEqual(self.window.run_player_kills, 0)
+        self.assertNotIn("hanged for your crimes", self.window.output_area.toPlainText())
+
+    def test_curse_due_boundary_preserves_unknown_location_and_actual_kill(self):
+        self.conversation()
+        self.arm_optional("occult_ritual", target="Dave")
+        self.window.phase = "action"
+        self.window.round_number = 2
+        self.window.resolve_action_curses()
+        self.assertTrue(self.window.characters["Dave"]["alive"])
+        self.window.round_number = 3
+        self.window.resolve_action_curses()
+        self.window.resolve_action_curses()
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertEqual(self.window.run_player_kills, 1)
+        record, = self.window.item_deaths.values()
+        self.assertIsNone(record.room_id)
+        self.assertEqual(record.cause, game.DeathCause.CURSE)
+        self.window.new_crime_scenes = []
+        self.window.run_conversation_phase()
+        self.assertFalse(any("no murder occurred" in event.text for event in self.window.public_events))
+        self.assertFalse(any("body was found" in event.text for event in self.window.public_events))
+        self.assertEqual(self.window.night_attacks, [])
+
+    def test_action_phase_resolves_due_curse_before_assigning_living_bodies(self):
+        self.conversation()
+        self.arm_optional("occult_ritual", target="Dave")
+        self.window.round_number = 2
+        self.window.selected_weapon = self.weapon()
+        self.window.run_action_phase()
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertFalse(any("Dave" in names for names in self.window.room_assignments.values()))
+        self.assertEqual(self.window.run_player_kills, 1)
+
+    def test_narration_gate_blocks_revolver_without_consumption(self):
+        self.conversation()
+        self.assertEqual(game.OPTIONAL_ITEM_NARRATION_PENDING, {"revolver"})
+        for item_id in game.OPTIONAL_ITEM_NARRATION_PENDING:
+            entry = self.window.inventory.grant(item_id)
+            with patch.object(self.window.item_rules, "use_item", side_effect=AssertionError("Gate required")):
+                self.assertFalse(self.window.use_inventory_item(entry.instance_id))
+            self.assertIn(entry, self.window.inventory.entries)
+
+    def test_enabled_gambles_update_canonical_context_without_new_npc_prose(self):
+        self.conversation()
+        for item_id, name in (("lucky_coin", "Dave"), ("spin_the_dagger", "Jerry")):
+            loser = next(body for body in self.window.body_states() if body.label == name)
+            entry = self.window.inventory.grant(item_id)
+            before = list(self.window.public_events)
+            with patch.object(self.window.item_rules._rng, "choice", return_value=loser):
+                self.assertTrue(self.window.use_inventory_item(
+                    entry.instance_id, self.window.body_id(name) if item_id == "lucky_coin" else None))
+            self.assertIn(name, self.window.public_state().dead)
+            self.assertEqual(self.window.public_events, before)
+            self.assertTrue(any(name in record.text and "killed" in record.text
+                                for record in self.window.history_records))
+        self.assertEqual(self.window.run_player_kills, 2)
+
+    def test_enabled_decree_skips_without_vote_progress_or_false_public_abstention(self):
+        self.conversation()
+        self.give("spare_paper")
+        self.give("presidential_decree")
+        before = list(self.window.public_events)
+        self.vote({name: "NONE" for name in (*self.window.characters, "Alex")})
+        self.assertEqual(self.window.item_rules.pending_ballot_bonus, 2)
+        self.assertEqual(self.window.public_events, before)
+        self.assertNotIn("survived_vote", self.window.profile.counters)
+        self.assertTrue(any("vote was skipped" in record.text for record in self.window.history_records))
 
     def test_final_attack_publishes_camera_before_awarding_bare_no_items_victory(self):
         self.night()

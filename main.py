@@ -2,7 +2,7 @@ import os
 import random
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fingerprint
 from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal
 from ai_runtime import AIRuntime, AIRequestError
@@ -31,6 +31,21 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout,
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
 from PyQt5.QtGui import QColor, QTextCursor, QTextCharFormat, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+
+# Mechanics are integrated separately from approval of NPC-facing narration.
+OPTIONAL_ITEM_NARRATION_PENDING = frozenset({
+    "revolver",
+})
+
+
+@dataclass(frozen=True)
+class ItemDeathRecord:
+    attempt_id: str
+    body_id: str
+    day: int
+    cause: DeathCause
+    room_id: str | None
+
 
 def resource_path(relative_path):
     root = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -198,6 +213,8 @@ class GameWindow(QMainWindow):
         self.used_item_types = set()
         self.applied_item_events = set()
         self.applied_death_attempts = set()
+        self.item_deaths = {}
+        self.published_item_deaths = set()
         self.morning_item_notes = []
         self.night_memory_views = ()
         self.guardian_intervened_this_run = False
@@ -603,8 +620,7 @@ class GameWindow(QMainWindow):
             "room": [(room, room) for room in self.night_rooms if room not in self.old_crime_scenes],
         }
         unavailable = {item_id: "Not available in this development build yet."
-                       for item_id, definition in ITEM_CATALOGUE.items()
-                       if not definition.default and item_id != "guardian_angel"}
+                       for item_id in OPTIONAL_ITEM_NARRATION_PENDING}
         page = InventoryPage(self.inventory.entries, ITEM_CATALOGUE, targets, self.use_inventory_item,
                              can_use=self.can_use_items(), body_font=readable_body_font(),
                              title_font=self.speaker_font, target_options=options, unavailable=unavailable)
@@ -631,7 +647,7 @@ class GameWindow(QMainWindow):
         context = self.item_use_context()
         try:
             definition = ITEM_CATALOGUE[self.inventory.get(instance_id).item_id]
-            if not definition.default and definition.item_id != "guardian_angel":
+            if definition.item_id in OPTIONAL_ITEM_NARRATION_PENDING:
                 raise ItemRuleError("This item is not available in this development build yet.")
             events = self.item_rules.use_item(instance_id, context, target_body_id,
                                              message=message, room_id=room_id, drafts=self.item_drafts,
@@ -686,6 +702,14 @@ class GameWindow(QMainWindow):
                         and event.owner_id == self.player_owner_id
                         and event.death_decision.target_body_id != self.body_id(self.player_name)):
                     self.queue_progress("player_kill")
+                if event.event_type == "immediate_death_resolved":
+                    decision = event.death_decision
+                    label = self.label_for_body(decision.target_body_id)
+                    self.record_history(
+                        f"{ITEM_CATALOGUE[event.item_id].name}: {label}, {decision.outcome}.", display=True)
+                    if killed:
+                        self.item_deaths[decision.attempt_id] = ItemDeathRecord(
+                            decision.attempt_id, decision.target_body_id, decision.day, decision.cause, None)
             self.applied_item_events.add(event.event_id)
             self.trace.record("item_effect", {"event": event})
             recipient = self.label_for_body(event.target_body_id)
@@ -715,6 +739,8 @@ class GameWindow(QMainWindow):
                 self.queue_progress("reserved_room_kill")
             elif event.event_type == "extra_action_earned":
                 self.queue_progress("marked_kill_completed")
+            elif event.event_type == "vote_skipped":
+                self.record_history("Presidential Decree: the next vote was skipped.", display=True)
             elif event.event_type == "execution_stayed":
                 self.add_public_event(GUARDIAN_PUBLIC.format(target=recipient))
             elif event.event_type == "guardian_intervened" and recipient == self.player_name:
@@ -727,6 +753,66 @@ class GameWindow(QMainWindow):
                 self.record_history(f"You used {item_name}{target}.")
 
         return death_applied
+
+    def apply_delayed_item_resolution(self, resolution, *, room_id=None):
+        """Reconcile engine decisions without inventing ordinary attack witnesses."""
+        killed_any = False
+        for decision in resolution.decisions:
+            if not self.apply_resolved_death(decision):
+                continue
+            killed_any = True
+            self.item_deaths[decision.attempt_id] = ItemDeathRecord(
+                decision.attempt_id, decision.target_body_id, decision.day, decision.cause, room_id)
+            label = self.label_for_body(decision.target_body_id)
+            self.record_history(f"{decision.cause.value}: {label} died.", display=True)
+            if decision.target_body_id != self.body_id(self.player_name):
+                self.queue_progress("player_kill")
+        self.apply_item_events(resolution.events)
+        return killed_any
+
+    def resolve_action_curses(self):
+        bodies = self.body_states()
+        result = self.item_rules.resolve_due_curses(
+            f"{self.run_id}:action:{self.round_number}", self.round_number, bodies,
+            owners={self.body_id(self.player_name): self.player_owner_id})
+        self.apply_delayed_item_resolution(result)
+        return self.finish_item_death_outcomes(result.decisions)
+
+    def resolve_room_entry_items(self, entry_id, room_id, body_ids):
+        if not any(trap.room_id == room_id and trap.armed_day <= self.round_number
+                   for trap in self.item_rules.traps):
+            return False
+        entrants = tuple(body for body in self.body_states() if body.alive and body.body_id in body_ids)
+        if not entrants:
+            return False
+        owners = {body.body_id: self.player_owner_id for body in entrants
+                  if body.body_id == self.body_id(self.player_name)}
+        result = self.item_rules.resolve_entry(entry_id, room_id, entrants, self.round_number, owners=owners)
+        self.apply_delayed_item_resolution(result, room_id=room_id)
+        return self.finish_item_death_outcomes(result.decisions)
+
+    def finish_item_death_outcomes(self, decisions):
+        if self.game_over:
+            return True
+        if not self.player_alive:
+            cause = next(decision.cause for decision in decisions
+                         if decision.target_body_id == self.body_id(self.player_name)
+                         and decision.outcome == "killed")
+            score = 5 - sum(data["alive"] for data in self.characters.values())
+            self.end_game_screen(score, death_cause=cause)
+            return True
+        return self.check_victory()
+
+    def publish_item_bodies(self):
+        for record in self.item_deaths.values():
+            if (record.day != self.round_number or record.room_id is None
+                    or record.attempt_id in self.published_item_deaths
+                    or record.body_id == self.body_id(self.player_name)):
+                continue
+            label = self.label_for_body(record.body_id)
+            self.add_public_event(
+                f"In the morning the Detective reveals {label}'s body was found in the {record.room_id}.")
+            self.published_item_deaths.add(record.attempt_id)
 
     def apply_resolved_death(self, decision):
         target = next((body for body in self.body_states()
@@ -2320,6 +2406,8 @@ class GameWindow(QMainWindow):
         self.bonus_action_pending = False
         self.bonus_action_id = None
         self.apply_item_events(self.item_rules.begin_night(self.round_number, self.body_states()))
+        if self.resolve_action_curses():
+            return
         self.update_inventory_button()
         self.append_output_text(f"Action Phase {self.round_number} begins!\n")
         self.record_history(f"Night {self.round_number}", kind="section")
@@ -2343,6 +2431,12 @@ class GameWindow(QMainWindow):
             self.room_assignments[room].append(character)
             if len(self.room_assignments[room]) == 2:
                 room_with_two_people = room
+
+        for room, occupants in self.room_assignments.items():
+            if self.resolve_room_entry_items(
+                    f"{self.run_id}:night:{self.round_number}:assigned:{room}", room,
+                    {self.body_id(name) for name in occupants}):
+                return
 
         living_npcs = tuple(name for name, data in self.characters.items()
                             if data["alive"] and name != self.player_name)
@@ -2409,6 +2503,10 @@ class GameWindow(QMainWindow):
         if (self.phase != "action" or self.game_over or self.pending_room_action is not None
                 or self.room_buttons_widget.isHidden()
                 or not self.room_buttons[selected_room].isEnabled()):
+            return
+        if self.resolve_room_entry_items(
+                f"{self.run_id}:night:{self.round_number}:player:{len(self.rooms_visited)}:{selected_room}",
+                selected_room, {self.body_id(self.player_name)}):
             return
         self.record_history(f"\nYou have chosen to stay in the {selected_room}.\n", display=True)
         occupants = [name for name in self.room_assignments[selected_room]
@@ -2631,6 +2729,8 @@ class GameWindow(QMainWindow):
                   for name, data in self.characters.items()}
         self._night_memories_written = True
         attacked_rooms = {attack["room"] for attack in self.night_attacks}
+        attacked_rooms.update(record.room_id for record in self.item_deaths.values()
+                              if record.day == self.round_number and record.room_id is not None)
         sleep_room = self.rooms_visited[0] if self.rooms_visited else None
         for attack in self.night_attacks:
             room, target, killer = attack["room"], attack["target_label"], attack["attacker_label"]
@@ -3635,6 +3735,7 @@ class GameWindow(QMainWindow):
         self.transcript_button.show()
         self.transcript_button.raise_()
         self.message_log.clear()
+        self.publish_item_bodies()
         self.npc_items.present_morning(
             self.round_number,
             lambda description: self.add_public_event(description, source="Photograph", display=False),
@@ -3663,7 +3764,8 @@ class GameWindow(QMainWindow):
         self.pass_button.setEnabled(False)
         self.interject_button.setEnabled(False)
         self.vote_button.setEnabled(False)
-        if not self.victims_last_night:
+        if not self.victims_last_night and not any(
+                record.day == self.round_number for record in self.item_deaths.values()):
             self.add_public_event("The Detective informs everyone that no murder occurred last night.")
         if ((self.selected_weapon or {}).get("id") == "pen"
                 and self.pending_pen_note_text and self.victims_last_night):
