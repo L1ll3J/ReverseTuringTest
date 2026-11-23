@@ -3580,6 +3580,7 @@ class GameWindow(QMainWindow):
         self.cancel_item_offer()
         self.invalidate_prepared_turn("voting_started", changed=True)
         self.phase = "voting"
+        self.refresh_conversation_stage()
         self.cancel_dictation()
         self.update_inventory_button()
         self.ensure_body_ids()
