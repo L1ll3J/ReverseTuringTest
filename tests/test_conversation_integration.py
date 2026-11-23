@@ -179,9 +179,21 @@ class ConversationIntegrationTests(unittest.TestCase):
 
     def test_three_direct_replies_cap_without_selection_or_forgery_reset(self):
         self.free_floor()
-        for _ in range(3):
+        self.window.interject_conversation()
+        self.target("Hank")
+        self.assertTrue(self.window.recipient_hint.isHidden())
+        self.assertEqual(self.window.recipient_hint.text(), "")
+        for count in range(1, 4):
             self.send_direct("Hank")
             self.wait_for(lambda: not self.window.active_workers)
+            self.window.interject_conversation()
+            self.target("Hank")
+            if count == 1:
+                self.assertTrue(self.window.recipient_hint.isHidden())
+                self.assertEqual(self.window.recipient_hint.text(), "")
+            else:
+                self.assertTrue(self.window.recipient_hint.isVisible())
+                self.assertTrue(self.window.recipient_hint.text().startswith(f"Hank {count}/3"))
         hank = self.window.body_id("Hank")
         self.window.interject_conversation()
         self.target("Dave")
@@ -202,6 +214,8 @@ class ConversationIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.direct_replies.count_for(hank), 3)
         self.window.append_speech("Dave", "An ordinary contribution.")
         self.assertEqual(self.window.direct_replies.count_for(hank), 0)
+        self.assertTrue(self.window.recipient_hint.isHidden())
+        self.assertEqual(self.window.recipient_hint.text(), "")
 
     def test_group_remains_available_to_answer_after_direct_cap(self):
         self.free_floor()

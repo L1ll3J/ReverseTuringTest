@@ -2481,14 +2481,16 @@ class GameWindow(QMainWindow):
         self.recipient_selector.setEnabled(not self.ai_busy)
         body_id = self.recipient_selector.currentData()
         capped = body_id is not None and not self.direct_replies.can_direct(body_id)
-        self.recipient_hint.setVisible(visible and body_id is not None)
+        hint = ""
         if body_id is not None:
             name = self.recipient_selector.currentText()
             count = self.direct_replies.count_for(body_id)
-            hint = f"{name}: {count}/{self.direct_replies.limit} direct replies."
+            if count >= 2:
+                hint = f"{name} {count}/{self.direct_replies.limit}"
             if capped:
-                hint += " Let another suspect speak or choose Group."
-            self.recipient_hint.setText(hint)
+                hint += ". Let another suspect speak or choose Group."
+        self.recipient_hint.setText(hint)
+        self.recipient_hint.setVisible(visible and bool(hint))
         self.say_button.setEnabled(self.phase == "conversation" and not self.game_over
                                    and not self.ai_busy and not capped)
 
