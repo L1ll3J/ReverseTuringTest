@@ -78,6 +78,9 @@ def capture(output):
             offer = window.item_drafts.pending_offer
             window.draft_page.take_buttons[offer.options.index("banana")].click()
             window.kill_victim("Jerry")
+            if window.weapon_aftermath_panel is not None:
+                save(window, "weapon-aftermath")
+                window.keep_weapon_button.click()
             if window.phase != "conversation":
                 raise AssertionError("The capture fixture did not reach discussion")
             window.append_speech("Hank", "Dave, I saw you watching the stairs. What did you see?", "Dave")
