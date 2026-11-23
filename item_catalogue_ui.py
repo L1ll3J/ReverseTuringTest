@@ -180,6 +180,7 @@ class ItemCataloguePanel(QWidget):
             card = self.cards[item_id]
             unlocked = definition.default or item_id in profile.unlocked
             optional = unlocked and not definition.default
+            card.setCursor(Qt.PointingHandCursor if optional else Qt.ArrowCursor)
             enabled = item_id not in profile.disabled_items
             card.blockSignals(True)
             card.setCheckable(optional)
@@ -210,7 +211,8 @@ class ItemCataloguePanel(QWidget):
                     painter.end()
                     icon.setPixmap(QPixmap.fromImage(image))
             goal = " Unlock: " + self._unlock_goals.get(item_id, "") if not unlocked else ""
-            card.setAccessibleDescription(f"{status}. {definition.description} {definition.flavour}{goal}")
+            tier = getattr(definition, "rarity", "green").capitalize()
+            card.setAccessibleDescription(f"{tier} tier. {status}. {definition.description} {definition.flavour}{goal}")
         if self._inspected is not None:
             self._inspect(self._inspected)
 
