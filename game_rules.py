@@ -231,6 +231,17 @@ class EffectResolution:
     events: tuple[ItemEvent, ...] = ()
     is_new: bool = True
 
+    def as_replay(self) -> "EffectResolution":
+        return replace(
+            self, is_new=False,
+            decisions=tuple(replace(decision, is_new=False) for decision in self.decisions),
+            events=_replay_item_events(self.events))
+
+
+def _replay_item_events(events: tuple[ItemEvent, ...]) -> tuple[ItemEvent, ...]:
+    return tuple(replace(event, death_decision=replace(event.death_decision, is_new=False))
+                 if event.death_decision is not None else event for event in events)
+
 
 @dataclass(frozen=True)
 class VoteResult:
@@ -383,6 +394,14 @@ class PlayerItemRules:
         return ItemEvent(f"{self._namespace}:{self._event_sequence}", event_type, day,
                          owner_id=self.owner_id, **values)
 
+    def activation_item_id(self, activation_id: str | None) -> str | None:
+        if not isinstance(activation_id, str):
+            return None
+        receipt = self._activation_receipts.get(activation_id)
+        if receipt is None:
+            return None
+        return next((event.item_id for event in receipt[1] if event.event_type == "item_used"), None)
+
     def use_item(
         self,
         instance_id: str,
@@ -402,7 +421,7 @@ class PlayerItemRules:
             original, _events = self._activation_receipts[activation_id]
             if original != identity:
                 raise ItemRuleError("This activation identifier already describes another use")
-            return ()
+            return _replay_item_events(_events)
         if (context.phase != "conversation" or context.ai_busy or context.day < 1
                 or context.owner_id != self.owner_id or self._active_vote_id is not None):
             raise ItemRuleError("Items can only be used at a conversation decision point")
@@ -664,8 +683,7 @@ class PlayerItemRules:
             previous, original = self._entry_receipts[entry_id]
             if previous != identity:
                 raise ItemRuleError("This entry identifier already describes another group")
-            return EffectResolution(tuple(replace(decision, is_new=False, events=())
-                                          for decision in original.decisions), (), False)
+            return original.as_replay()
         if any(not body.alive or body.body_id in self._known_dead for body in bodies.values()):
             raise ItemRuleError("Only living bodies can enter a room")
         trap = self._traps.get(room_id)
@@ -698,8 +716,7 @@ class PlayerItemRules:
             previous, original = self._curse_receipts[phase_id]
             if previous != identity:
                 raise ItemRuleError("This boundary identifier already describes another state")
-            return EffectResolution(tuple(replace(decision, is_new=False, events=())
-                                          for decision in original.decisions), (), False)
+            return original.as_replay()
         due = sorted((curse for curse in self._curses.values() if curse.due_day <= day),
                      key=lambda curse: curse.due_day)
         if any(curse.target_body_id not in body_map for curse in due):
@@ -906,7 +923,7 @@ class PlayerItemRules:
             if ballots:
                 raise ItemRuleError("A skipped vote cannot contain ballots")
             if vote_id in self._resolved_votes:
-                return replace(self._resolved_votes[vote_id][1], is_new=False, events=())
+                return replace(self._resolved_votes[vote_id][1], is_new=False)
             event = self._event("vote_skipped", snapshot.day, item_id="presidential_decree")
             result = VoteResult(vote_id, {}, "skipped", None, (), True, (event,))
             self._skip_next_vote = False
@@ -929,7 +946,7 @@ class PlayerItemRules:
             original_identity, original = self._resolved_votes[vote_id]
             if identity != original_identity:
                 raise ItemRuleError("This vote has already resolved with different ballots")
-            return replace(original, is_new=False, events=())
+            return replace(original, is_new=False)
         counts = {}
         events = []
         weights = snapshot.weights

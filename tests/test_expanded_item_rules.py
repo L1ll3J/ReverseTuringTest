@@ -310,7 +310,7 @@ class ExpandedItemRulesTests(unittest.TestCase):
         self.assert_mechanical(result.events)
         replay = self.rules.resolve_vote("vote", {"p": "NONE", "j": "d", "d": "p"})
         self.assertFalse(replay.is_new)
-        self.assertEqual(replay.events, ())
+        self.assertEqual(replay.events, result.events)
 
     def test_skipped_vote_expires_this_round_proxy_but_preserves_next_actual_ballot_effects(self):
         self.grant_use("spare_paper")
@@ -331,7 +331,9 @@ class ExpandedItemRulesTests(unittest.TestCase):
         self.assertEqual(self.rules.proxy_voters, {})
         self.assertEqual(self.rules.pending_ballot_bonus, 2)
         self.assertEqual(self.rules.execution_stays, ("p",))
-        self.assertFalse(self.rules.resolve_vote("skip", {}).is_new)
+        cached = self.rules.resolve_vote("skip", {})
+        self.assertFalse(cached.is_new)
+        self.assertEqual(cached.events, result.events)
         self.rules.begin_night(2, self.bodies)
         actual = self.rules.open_vote("actual", self.voters, "p", day=2)
         self.assertEqual(actual.weights["p"], 3)
@@ -382,7 +384,10 @@ class ExpandedItemRulesTests(unittest.TestCase):
         self.assertTrue(first[0].death_decision.prevented)
         self.assertEqual(first[0].subject_body_id, "p")
         self.assertIn(coin, self.inventory.entries)
-        self.assertEqual(self.rules.use_item(coin.instance_id, self.context, "j", activation_id="flip-1"), ())
+        replay = self.rules.use_item(coin.instance_id, self.context, "j", activation_id="flip-1")
+        self.assertEqual([event.event_id for event in replay], [event.event_id for event in first])
+        self.assertFalse(replay[0].death_decision.is_new)
+        self.assertEqual(replay[0].death_decision.events, first[0].death_decision.events)
         self.assertEqual(self.rng.calls, 1)
         with self.assertRaises(ItemRuleError):
             self.rules.use_item(coin.instance_id, self.context, "d", activation_id="flip-1")
@@ -401,7 +406,9 @@ class ExpandedItemRulesTests(unittest.TestCase):
         events = self.rules.use_item(dagger.instance_id, self.context, activation_id="spin")
         self.assertEqual(events[0].subject_body_id, "p")
         self.assertTrue(events[0].death_decision.killed)
-        self.assertEqual(self.rules.use_item(dagger.instance_id, self.context, activation_id="spin"), ())
+        replay = self.rules.use_item(dagger.instance_id, self.context, activation_id="spin")
+        self.assertEqual([event.event_id for event in replay], [event.event_id for event in events])
+        self.assertFalse(replay[0].death_decision.is_new)
         self.assertEqual(self.rng.calls, 1)
         self.assertNotIn(dagger, self.inventory.entries)
 
@@ -414,10 +421,16 @@ class ExpandedItemRulesTests(unittest.TestCase):
         self.assertEqual({decision.target_body_id for decision in result.decisions}, {"j", "d"})
         self.assertTrue(all(decision.killed and decision.cause == DeathCause.TRAP for decision in result.decisions))
         self.assertEqual(self.rules.traps, ())
+        self.grant_use("booby_trap", room_id="Cellar")
+        self.grant_use("guardian_angel")
         retry = self.rules.resolve_entry("arrivals", "Cellar", (replace(self.jerry, alive=False), replace(self.dave, alive=False)), 2)
         self.assertFalse(retry.is_new)
         self.assertTrue(all(not decision.is_new for decision in retry.decisions))
-        self.assertEqual(retry.events, ())
+        self.assertEqual(retry.events, result.events)
+        self.assertEqual(tuple(decision.events for decision in retry.decisions),
+                         tuple(decision.events for decision in result.decisions))
+        self.assertEqual(len(self.rules.traps), 1)
+        self.assertTrue(self.rules.protection_armed)
         self.assertNotIn(trap, self.inventory.entries)
 
     def test_trap_can_hit_player_and_guardian_is_owner_bound(self):

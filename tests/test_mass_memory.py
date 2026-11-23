@@ -206,5 +206,25 @@ class MassMemoryTests(unittest.TestCase):
         self.assertFalse(window.build_character_context("Alex").experiences)
 
 
+    def test_cached_consumed_mass_activation_recovers_once_and_keeps_later_memories(self):
+        self.conversation()
+        window = self.window
+        window.remember("Jerry", "experience", "OLD_RUN_MEMORY")
+        entry = window.inventory.grant("mass_discombobulator")
+        original = window.item_rules.use_item(entry.instance_id, window.item_use_context(), activation_id="lost-mass")
+        self.assertNotIn(entry, window.inventory.entries)
+        self.assertTrue(window.build_character_context("Jerry").experiences)
+        self.assertTrue(window.use_inventory_item(entry.instance_id, activation_id="lost-mass"))
+        self.assertFalse(window.build_character_context("Jerry").experiences)
+        self.assertTrue(set(event.event_id for event in original).issubset(window.applied_item_events))
+        window.remember("Jerry", "experience", "NEW_RUN_MEMORY")
+        self.assertTrue(window.use_inventory_item(entry.instance_id, activation_id="lost-mass"))
+        self.assertEqual([record.text for record in window.build_character_context("Jerry").experiences], ["NEW_RUN_MEMORY"])
+        self.assertEqual(window.items_used, 1)
+        self.assertFalse(window.use_inventory_item(entry.instance_id, activation_id="unknown-mass"))
+        self.assertFalse(window.use_inventory_item(entry.instance_id, message="changed", activation_id="lost-mass"))
+        self.assertEqual([record.text for record in window.build_character_context("Jerry").experiences], ["NEW_RUN_MEMORY"])
+
+
 if __name__ == "__main__":
     unittest.main()

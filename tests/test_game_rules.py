@@ -191,7 +191,7 @@ class PlayerItemRulesTests(unittest.TestCase):
             result.counts[self.jerry.body_id] = 0
         repeated = self.rules.resolve_vote("vote-1", dict(reversed(tuple(ballots.items()))))
         self.assertFalse(repeated.is_new)
-        self.assertEqual(repeated.events, ())
+        self.assertEqual(repeated.events, result.events)
         self.assertEqual(repeated.counts, result.counts)
         next_vote = self.rules.open_vote("vote-2", self.voters, self.player.body_id, day=2)
         self.assertEqual(next_vote.weights[self.player.body_id], 1)

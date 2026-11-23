@@ -699,7 +699,10 @@ class GameWindow(QMainWindow):
             return False
         context = self.item_use_context()
         try:
-            definition = ITEM_CATALOGUE[self.inventory.get(instance_id).item_id]
+            item_id = self.item_rules.activation_item_id(activation_id)
+            if item_id is None:
+                item_id = self.inventory.get(instance_id).item_id
+            definition = ITEM_CATALOGUE[item_id]
             if definition.item_id in OPTIONAL_ITEM_NARRATION_PENDING:
                 raise ItemRuleError("This item is not available in this development build yet.")
             events = self.item_rules.use_item(instance_id, context, target_body_id,
@@ -846,15 +849,17 @@ class GameWindow(QMainWindow):
         return self.finish_item_death_outcomes(result.decisions)
 
     def resolve_room_entry_items(self, entry_id, room_id, body_ids):
-        if not any(trap.room_id == room_id and trap.armed_day <= self.round_number
-                   for trap in self.item_rules.traps):
+        requested = set(body_ids)
+        if not requested:
             return False
-        entrants = tuple(body for body in self.body_states() if body.alive and body.body_id in body_ids)
-        if not entrants:
-            return False
+        entrants = tuple(body for body in self.body_states() if body.body_id in requested)
+        if len(entrants) != len(requested):
+            raise ItemRuleError("A room entry requires known body identifiers")
         owners = {body.body_id: self.player_owner_id for body in entrants
                   if body.body_id == self.body_id(self.player_name)}
         result = self.item_rules.resolve_entry(entry_id, room_id, entrants, self.round_number, owners=owners)
+        if not result.decisions and not result.events:
+            return False
         self.apply_delayed_item_resolution(result, room_id=room_id)
         return self.finish_item_death_outcomes(result.decisions)
 

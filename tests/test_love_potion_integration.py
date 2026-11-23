@@ -51,7 +51,7 @@ class LoveItemRuleTests(unittest.TestCase):
                          ("love_potion_applied", "Alex", "original-body", "target"))
         self.assertEqual((effect.public_text, effect.private_text, effect.disposition_text), (None, None, None))
         self.assertNotIn(entry, inventory.entries)
-        self.assertEqual(rules.use_item(entry.instance_id, context, target.body_id, activation_id="first-use"), ())
+        self.assertEqual(rules.use_item(entry.instance_id, context, target.body_id, activation_id="first-use"), events)
         next_entry = inventory.grant("love_potion")
         self.assertEqual(rules.use_item(next_entry.instance_id, context, target.body_id)[0].event_type,
                          "love_potion_applied")

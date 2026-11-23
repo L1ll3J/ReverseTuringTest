@@ -409,8 +409,6 @@ class ItemIntegrationTests(unittest.TestCase):
         for weapon_id, open_editor in editors:
             with self.subTest(weapon=weapon_id):
                 self.window.show_weapon_select_screen()
-                for character in self.window.characters.values():
-                    character["alive"] = True
                 self.night(weapon_id)
                 if weapon_id == "pen":
                     self.window.pending_pen_note_text = "Accepted note"
@@ -1772,6 +1770,188 @@ class ItemIntegrationTests(unittest.TestCase):
             self.window.body_id(target) if target else None, room_id=room)
         self.window.apply_item_events(events)
         return events
+
+    def test_cached_consumable_activation_recovers_original_item_then_rejects_mismatches(self):
+        self.conversation()
+        for item_id in ("lucky_match", "deep_pockets"):
+            with self.subTest(item=item_id):
+                self.window.item_drafts = DraftState(self.window.player_owner_id, eligible_item_pool())
+                entry = self.window.inventory.grant(item_id)
+                self.window.item_rules.use_item(entry.instance_id, self.window.item_use_context(),
+                    drafts=self.window.item_drafts, activation_id=item_id)
+                before = (self.window.item_drafts.rerolls_remaining, self.window.item_drafts.extra_pick_armed)
+                self.assertNotIn(entry, self.window.inventory.entries)
+                self.assertTrue(self.window.use_inventory_item(entry.instance_id, activation_id=item_id))
+                self.assertTrue(self.window.use_inventory_item(entry.instance_id, activation_id=item_id))
+                self.assertEqual((self.window.item_drafts.rerolls_remaining,
+                                  self.window.item_drafts.extra_pick_armed), before)
+                self.assertFalse(self.window.use_inventory_item(entry.instance_id, activation_id="unknown"))
+                self.assertFalse(self.window.use_inventory_item(entry.instance_id,
+                    self.window.body_id("Dave"), activation_id=item_id))
+        self.assertEqual(self.window.items_used, 2)
+
+    def test_cached_gamble_activation_recovers_guardian_and_kill_without_rerolling(self):
+        self.conversation()
+        self.give("guardian_angel")
+        coin = self.window.inventory.grant("lucky_coin")
+        player = next(body for body in self.window.body_states() if body.label == "Alex")
+        target = next(body for body in self.window.body_states() if body.label == "Dave")
+        with patch.object(self.window.item_rules._rng, "choice", return_value=player) as roll:
+            original = self.window.item_rules.use_item(coin.instance_id, self.window.item_use_context(),
+                                                       target.body_id, activation_id="lost-coin")
+            self.assertTrue(original[0].death_decision.prevented)
+            self.assertFalse(self.window.guardian_intervened_this_run)
+            self.assertTrue(self.window.use_inventory_item(coin.instance_id, target.body_id, activation_id="lost-coin"))
+            self.assertTrue(self.window.use_inventory_item(coin.instance_id, target.body_id, activation_id="lost-coin"))
+            self.assertEqual(roll.call_count, 1)
+        self.assertTrue(self.window.guardian_intervened_this_run)
+        self.assertTrue(self.window.player_alive)
+        self.assertFalse(self.window.item_rules.protection_armed)
+        self.assertEqual(sum("Against all expectation" in record.text for record in self.window.public_events), 1)
+        dagger = self.window.inventory.grant("spin_the_dagger")
+        with patch.object(self.window.item_rules._rng, "choice", return_value=target) as roll:
+            self.window.item_rules.use_item(dagger.instance_id, self.window.item_use_context(), activation_id="lost-spin")
+            self.assertTrue(self.window.characters["Dave"]["alive"])
+            self.assertTrue(self.window.use_inventory_item(dagger.instance_id, activation_id="lost-spin"))
+            self.assertTrue(self.window.use_inventory_item(dagger.instance_id, activation_id="lost-spin"))
+            self.assertEqual(roll.call_count, 1)
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertEqual(self.window.run_player_kills, 1)
+        self.assertEqual(self.window.items_used, 3)
+
+    def test_known_revolver_activation_cannot_bypass_pending_narration_gate(self):
+        self.conversation()
+        target = self.window.body_id("Dave")
+        entry = self.window.inventory.grant("revolver")
+        self.window.item_rules.use_item(entry.instance_id, self.window.item_use_context(), target,
+                                       activation_id="pending-shot")
+        self.assertNotIn(entry, self.window.inventory.entries)
+        with patch.object(self.window.item_rules, "use_item", side_effect=AssertionError("Gate must precede replay")):
+            self.assertFalse(self.window.use_inventory_item(entry.instance_id, target, activation_id="pending-shot"))
+        self.assertTrue(self.window.characters["Dave"]["alive"])
+        self.assertEqual(self.window.items_used, 0)
+
+    def test_lost_first_entry_result_recovers_guardian_note_bonus_and_death_once(self):
+        self.conversation()
+        self.give("guardian_angel")
+        note = self.window.inventory.grant("forged_note")
+        self.assertTrue(self.window.use_inventory_item(note.instance_id, message="Lost trap note."))
+        self.give("watch_this_drive", "Dave")
+        self.arm_optional("booby_trap", room="Attic")
+        self.window.phase = "action"
+        self.window.round_number = 2
+        entrants = tuple(body for body in self.window.body_states() if body.label in {"Alex", "Dave"})
+        requested = {body.body_id for body in entrants}
+        owners = {self.window.body_id("Alex"): self.window.player_owner_id}
+        original = self.window.item_rules.resolve_entry("lost-entry", "Attic", entrants, 2, owners=owners)
+        self.assertEqual({decision.outcome for decision in original.decisions}, {"prevented", "killed"})
+        self.assertFalse(self.window.item_rules.traps)
+        self.assertTrue(self.window.characters["Dave"]["alive"])
+        self.assertFalse(self.window.guardian_intervened_this_run)
+        self.assertEqual(self.window.morning_item_notes, [])
+        self.window.resolve_room_entry_items("lost-entry", "Attic", requested)
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertTrue(self.window.player_alive)
+        self.assertTrue(self.window.guardian_intervened_this_run)
+        self.assertEqual(len(self.window.morning_item_notes), 1)
+        self.assertEqual(self.window.morning_item_notes[0][1:], ("Dave", "Lost trap note."))
+        self.assertEqual(self.window.item_rules.bonus_actions, 1)
+        self.assertEqual(self.window.profile.counters["marked_kill_completed"], 1)
+        self.assertEqual(self.window.run_player_kills, 1)
+        before = (tuple(self.window.public_events), tuple(self.window.morning_item_notes),
+                  dict(self.window.profile.counters), frozenset(self.window.applied_item_events))
+        self.window.resolve_room_entry_items("lost-entry", "Attic", requested)
+        self.assertEqual((tuple(self.window.public_events), tuple(self.window.morning_item_notes),
+                          dict(self.window.profile.counters), frozenset(self.window.applied_item_events)), before)
+        self.assertEqual(self.window.item_rules.bonus_actions, 1)
+        self.assertEqual(self.window.run_player_kills, 1)
+
+    def test_fresh_dead_or_unknown_room_entry_is_rejected_without_spending_trap(self):
+        self.conversation()
+        self.arm_optional("booby_trap", room="Attic")
+        self.window.phase = "action"
+        self.window.round_number = 2
+        self.window.characters["Dave"]["alive"] = False
+        for requested in ({"unknown"}, {self.window.body_id("Dave")}):
+            with self.subTest(requested=requested), self.assertRaises(game.ItemRuleError):
+                self.window.resolve_room_entry_items("fresh-entry", "Attic", requested)
+            self.assertEqual(len(self.window.item_rules.traps), 1)
+        self.assertFalse(self.window.resolve_room_entry_items("empty-entry", "Attic", set()))
+        self.assertEqual(len(self.window.item_rules.traps), 1)
+        self.window.resolve_room_entry_items("fresh-entry", "Attic", {self.window.body_id("Jerry")})
+        self.assertFalse(self.window.characters["Jerry"]["alive"])
+        self.assertFalse(self.window.item_rules.traps)
+
+    def test_lost_first_curse_boundary_recovers_nested_consequences_once(self):
+        self.conversation()
+        self.give("guardian_angel")
+        self.arm_optional("occult_ritual", target="Dave")
+        self.arm_optional("occult_ritual", target="Alex")
+        note = self.window.inventory.grant("forged_note")
+        self.assertTrue(self.window.use_inventory_item(note.instance_id, message="Lost curse note."))
+        self.window.round_number = 2
+        self.give("watch_this_drive", "Dave")
+        self.window.round_number = 3
+        self.window.phase = "action"
+        phase_id = f"{self.window.run_id}:action:3"
+        bodies = self.window.body_states()
+        owners = {self.window.body_id("Alex"): self.window.player_owner_id}
+        original = self.window.item_rules.resolve_due_curses(phase_id, 3, bodies, owners=owners)
+        self.assertFalse(self.window.item_rules.curses)
+        self.assertTrue(self.window.characters["Dave"]["alive"])
+        self.assertFalse(self.window.guardian_intervened_this_run)
+        cached = self.window.item_rules.resolve_due_curses(phase_id, 3, bodies, owners=owners)
+        self.assertFalse(cached.is_new)
+        self.assertTrue(all(not decision.is_new for decision in cached.decisions))
+        self.assertTrue(all(not event.death_decision.is_new for event in cached.events if event.death_decision is not None))
+        self.assertEqual([event.event_id for event in cached.events], [event.event_id for event in original.events])
+        self.assertEqual(tuple(decision.events for decision in cached.decisions),
+                         tuple(decision.events for decision in original.decisions))
+        self.window.resolve_action_curses()
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertTrue(self.window.player_alive)
+        self.assertTrue(self.window.guardian_intervened_this_run)
+        self.assertEqual(self.window.morning_item_notes[0][1:], ("Dave", "Lost curse note."))
+        self.assertEqual(self.window.profile.counters["marked_kill_completed"], 1)
+        self.assertEqual(self.window.item_rules.bonus_actions, 1)
+        before = (tuple(self.window.public_events), tuple(self.window.morning_item_notes),
+                  dict(self.window.profile.counters), frozenset(self.window.applied_item_events))
+        self.window.resolve_action_curses()
+        self.assertEqual((tuple(self.window.public_events), tuple(self.window.morning_item_notes),
+                          dict(self.window.profile.counters), frozenset(self.window.applied_item_events)), before)
+        self.assertEqual(self.window.run_player_kills, 1)
+
+    def test_cached_vote_payload_recovers_weighted_and_skipped_events_once(self):
+        self.conversation()
+        self.give("spare_paper")
+        bodies = self.window.body_states()
+        player = self.window.body_id("Alex")
+        self.window.item_rules.open_vote("lost-weighted", bodies, player, day=1)
+        ballots = {body.body_id: "NONE" for body in bodies}
+        ballots[player] = self.window.body_id("Dave")
+        original = self.window.item_rules.resolve_vote("lost-weighted", ballots)
+        text = original.events[0].public_text
+        self.assertFalse(any(record.text == text for record in self.window.public_events))
+        self.give("spare_paper")
+        cached = self.window.item_rules.resolve_vote("lost-weighted", ballots)
+        self.assertFalse(cached.is_new)
+        self.assertEqual(cached.events, original.events)
+        self.window.apply_item_events(cached.events)
+        self.window.apply_item_events(cached.events)
+        self.assertEqual(sum(record.text == text for record in self.window.public_events), 1)
+        self.assertEqual(self.window.item_rules.pending_ballot_bonus, 2)
+        self.arm_optional("presidential_decree")
+        self.window.item_rules.open_vote("lost-skipped", bodies, player, day=1)
+        skipped = self.window.item_rules.resolve_vote("lost-skipped", {})
+        self.arm_optional("presidential_decree")
+        cached_skip = self.window.item_rules.resolve_vote("lost-skipped", {})
+        self.assertFalse(cached_skip.is_new)
+        self.assertEqual(cached_skip.events, skipped.events)
+        self.window.apply_item_events(cached_skip.events)
+        self.window.apply_item_events(cached_skip.events)
+        self.assertTrue(self.window.item_rules.skip_next_vote)
+        self.assertEqual(sum(record.text == "Presidential Decree: the next vote was skipped."
+                             for record in self.window.history_records), 1)
 
     def test_assigned_group_trap_kills_once_without_attack_witnesses(self):
         self.conversation()
