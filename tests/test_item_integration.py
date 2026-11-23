@@ -1024,6 +1024,53 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.window.item_rules.prepared_note)
         self.assertEqual(self.window.morning_item_notes, [])
 
+    def test_known_equipment_refreshes_after_kill_before_watch_bonus(self):
+        self.window.npc_items = game.NPCItemState({"Dave": "camera"})
+        self.watch_night()
+        self.assertEqual(self.window.npc_equipment_label.text(), "Known equipment\nDave: Camera")
+        self.window.choose_room("Attic")
+        self.settle_offer()
+        self.window.kill_victim("Dave")
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertEqual(self.window.phase, "action")
+        self.assertTrue(self.window.bonus_action_pending)
+        self.assertTrue(self.window.room_buttons_widget.isVisible())
+        self.assertEqual(self.window.npc_equipment_label.text(), "")
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+        self.assertEqual(dict(self.window.npc_items.equipment), {"Dave": "camera"})
+        self.assertTrue(any(record.text == "Known equipment: Dave is carrying a Camera."
+                            for record in self.window.history_records))
+
+    def test_known_equipment_refresh_after_conversation_death_stays_hidden(self):
+        self.window.npc_items = game.NPCItemState({"Hank": "camera"})
+        self.night()
+        self.window.run_conversation_phase()
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+        self.assertTrue(self.window.apply_item_events(self.resolved_item_events()))
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertEqual(self.window.npc_equipment_label.text(), "Known equipment\nHank: Camera")
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+
+    def test_known_equipment_excludes_possessed_player_identity(self):
+        self.window.npc_items = game.NPCItemState({"Dave": "camera"})
+        self.night("voodoo")
+        self.window.choose_room("Attic")
+        self.settle_offer()
+        self.window.kill_victim("Dave")
+        self.assertEqual(self.window.player_name, "Dave")
+        self.assertTrue(self.window.player_alive)
+        self.assertNotIn("Dave", self.window.characters)
+        self.assertEqual(self.window.npc_equipment_label.text(), "")
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+        self.assertEqual(dict(self.window.npc_items.equipment), {"Dave": "camera"})
+
+    def test_known_equipment_is_logically_hidden_at_game_over(self):
+        self.window.npc_items = game.NPCItemState({"Hank": "camera"})
+        self.night()
+        self.assertFalse(self.window.npc_equipment_label.isHidden())
+        self.window.end_game_screen(0)
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+
     def test_watch_bonus_new_room_gets_first_reward_and_basic_attack(self):
         self.watch_night("stopwatch")
         self.window.choose_room("Attic")

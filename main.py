@@ -664,6 +664,7 @@ class GameWindow(QMainWindow):
                 self.player_alive = False
         self.applied_death_attempts.add(decision.attempt_id)
         self.invalidate_prepared_turn("death_resolved", changed=True)
+        self.refresh_known_equipment()
         return killed
 
     def resolve_death(self, label, attempt_id, *, cause=DeathCause.ATTACK, source_id=None, caused_by_player=False):
@@ -1524,12 +1525,13 @@ class GameWindow(QMainWindow):
             f'font-family: "{readable_body_font().family()}"; font-size: 18px; '
             'padding-left: 16px; padding-right: 24px;')
 
-    def refresh_known_equipment(self, living_npcs):
-        living = set(living_npcs)
+    def refresh_known_equipment(self):
+        living = {name for name, data in self.characters.items()
+                  if data["alive"] and name != self.player_name}
         holders = [f"{owner}: {NPC_ITEM_REGISTRY[item_id].name}"
                    for owner, item_id in self.npc_items.equipment.items() if owner in living]
         self.npc_equipment_label.setText("Known equipment\n" + "\n".join(holders) if holders else "")
-        self.npc_equipment_label.setVisible(bool(holders))
+        self.npc_equipment_label.setVisible(self.phase == "action" and not self.game_over and bool(holders))
 
     def resize_menu_content(self):
         if not hasattr(self, "play_content"):
@@ -2274,7 +2276,7 @@ class GameWindow(QMainWindow):
             living_npcs,
         )
         self.record_history(self.npc_items.equipment_description(living_npcs))
-        self.refresh_known_equipment(living_npcs)
+        self.refresh_known_equipment()
         self.trace_action("night_rooms_assigned", assignments=self.room_assignments)
 
         # Display room assignments if in normal mode
@@ -3347,6 +3349,7 @@ class GameWindow(QMainWindow):
         self.game_over = True
         self.invalidate_prepared_turn("game_over", changed=True)
         self.phase = "game_over"
+        self.npc_equipment_label.hide()
         self.set_action_output_mode(False)
         self.position_corner_controls()
         self.cancel_dictation()
