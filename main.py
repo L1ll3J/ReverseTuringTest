@@ -758,7 +758,13 @@ class GameWindow(QMainWindow):
         """Reconcile engine decisions without inventing ordinary attack witnesses."""
         killed_any = False
         for decision in resolution.decisions:
-            if not self.apply_resolved_death(decision):
+            killed = self.apply_resolved_death(decision)
+            self.trace.record("item_death_resolved", {
+                "attempt_id": decision.attempt_id, "target_body_id": decision.target_body_id,
+                "cause": decision.cause.value, "outcome": decision.outcome,
+                "is_new": decision.is_new, "applied": killed,
+            })
+            if not killed:
                 continue
             killed_any = True
             self.item_deaths[decision.attempt_id] = ItemDeathRecord(
@@ -923,6 +929,8 @@ class GameWindow(QMainWindow):
             "seen_rooms": sorted(self.item_drafts.seen_rooms) if self.item_drafts else [],
             "rerolls_remaining": self.item_drafts.rerolls_remaining if self.item_drafts else 0,
             "attacks": self.night_attacks, "witness_body_ids": sorted(self.witness_body_ids),
+            "item_deaths": self.item_deaths,
+            "published_item_deaths": sorted(self.published_item_deaths),
             "progress_sequence": self.progress_sequence, "pending_progress": self.pending_progress,
             "run_player_kills": self.run_player_kills,
             "vote_snapshot": self.vote_snapshot,

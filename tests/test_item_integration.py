@@ -920,6 +920,40 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertNotIn("stopwatch", self.window.profile.unlocked)
         self.assertNotIn("survived_witnessed_vote", self.window.profile.counters)
 
+    def test_delayed_death_trace_distinguishes_replays_and_snapshots_actual_corpses(self):
+        trace = TraceRun(enabled=True, root=Path(self.temp.name) / "traces")
+        self.window.trace = trace
+        trace.start({"gameplay_run_id": self.window.run_id})
+        self.conversation()
+        self.arm_optional("booby_trap", room="Attic")
+        self.window.phase = "action"
+        self.window.round_number = 2
+        body = next(body for body in self.window.body_states() if body.label == "Dave")
+        resolution = self.window.item_rules.resolve_entry("traced-entry", "Attic", (body,), 2)
+        self.assertTrue(self.window.apply_delayed_item_resolution(resolution, room_id="Attic"))
+        self.assertFalse(self.window.apply_delayed_item_resolution(resolution, room_id="Attic"))
+        replay = self.window.item_rules.resolve_entry("traced-entry", "Attic", (body,), 2)
+        self.assertFalse(self.window.apply_delayed_item_resolution(replay, room_id="Attic"))
+        self.window.publish_item_bodies()
+        self.window.publish_item_bodies()
+        self.window.trace_state("item-death-proof")
+        records = [json.loads(line) for line in (trace.run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        decisions = [record["payload"] for record in records if record["kind"] == "item_death_resolved"]
+        decision, = resolution.decisions
+        self.assertEqual([entry["applied"] for entry in decisions], [True, False, False])
+        self.assertEqual([entry["is_new"] for entry in decisions], [True, True, False])
+        for entry in decisions:
+            self.assertEqual((entry["attempt_id"], entry["target_body_id"], entry["cause"], entry["outcome"]),
+                             (decision.attempt_id, body.body_id, "trap", "killed"))
+        state = [record["payload"]["state"] for record in records if record["kind"] == "state_snapshot"][-1]
+        self.assertFalse(state["characters"]["Dave"]["alive"])
+        self.assertEqual(state["player_items"]["attacks"], [])
+        corpse, = state["player_items"]["item_deaths"].values()
+        self.assertEqual((corpse["body_id"], corpse["room_id"], corpse["cause"]), (body.body_id, "Attic", "trap"))
+        self.assertEqual(state["player_items"]["published_item_deaths"], [decision.attempt_id])
+        self.assertEqual(self.window.run_player_kills, 1)
+        self.assertTrue(trace.enabled)
+
     def test_item_effects_and_frozen_vote_weights_have_serializable_developer_snapshots(self):
         trace = TraceRun(enabled=True, root=Path(self.temp.name) / "traces")
         self.window.trace = trace

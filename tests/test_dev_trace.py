@@ -305,10 +305,14 @@ class GameTraceTests(unittest.TestCase):
         self.assertEqual((identity["payload"]["previous_body"], identity["payload"]["current_body"]), ("Alex", "Dave"))
         snapshot = next(record for record in records if record["kind"] == "state_snapshot" and record["payload"]["reason"] == "identity_changed")["payload"]["state"]
         self.assertEqual(snapshot["player_name"], "Dave")
-        self.assertFalse(snapshot["characters"]["Alex"]["alive"])
-        self.assertEqual(snapshot["room_assignments"]["Kitchen"], ["Alex"])
+        self.assertTrue(snapshot["characters"]["Alex"]["alive"])
+        self.assertEqual(snapshot["room_assignments"]["Kitchen"], ["Dave"])
         kill = next(record for record in records if record["kind"] == "action_applied" and record["payload"]["action"] == "kill_resolved")
         self.assertEqual(kill["payload"]["victim"], "Alex")
+        killed_snapshot = next(record for record in records if record["kind"] == "state_snapshot" and record["payload"]["reason"] == "kill_resolved")["payload"]["state"]
+        self.assertEqual(killed_snapshot["player_name"], "Dave")
+        self.assertFalse(killed_snapshot["characters"]["Alex"]["alive"])
+        self.assertEqual(killed_snapshot["room_assignments"]["Kitchen"], ["Alex"])
         earlier = next(record for record in records if record["kind"] == "speech_committed")
         self.assertEqual(earlier["payload"]["speaker"], "Alex")
 
