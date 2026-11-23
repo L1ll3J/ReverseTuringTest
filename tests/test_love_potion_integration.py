@@ -174,12 +174,14 @@ class LovePotionIntegrationTests(unittest.TestCase):
         self.use_card("love_potion", "Jerry")
         self.use_card("watch_this_drive", "Dave")
         self.window.overlay_host.close_page()
-        self.window.run_action_phase()
-        self.window.item_drafts = None
-        self.window.room_assignments = {
+        assignments = {
             "Attic": ["Dave", "Jerry"], "Kitchen": ["Hank", "Owen"],
             "Library": ["Debra"], "Basement": [], "Cellar": [],
         }
+        plan = {self.window.body_id(name): room for room, names in assignments.items() for name in names}
+        with patch.object(game, "assign_guest_rooms", return_value=plan):
+            self.window.run_action_phase()
+        self.window.item_drafts = None
         self.window.choose_room("Attic")
         self.window.kill_victim("Dave")
         self.assertTrue(self.window.bonus_action_pending)
@@ -283,6 +285,7 @@ class LovePotionIntegrationTests(unittest.TestCase):
 
     def test_voodoo_changes_player_body_without_renaming_captured_giver(self):
         self.apply()
+        self.window.phase = "action"
         self.window.room_assignments = {"Cellar": ["Owen"]}
         self.window.new_crime_scenes = []
         self.window.commit_attack("Owen", "Cellar", weapon_id="voodoo")
@@ -351,6 +354,7 @@ class LovePotionIntegrationTests(unittest.TestCase):
         data = self.window.characters["Owen"]
         mind = self.window.mind_id("Owen")
         self.window.remember("Owen", "experience", "An earlier observation.")
+        self.window.phase = "action"
         self.window.room_assignments = {"Cellar": ["Owen"]}
         self.window.new_crime_scenes = []
         self.window.selected_weapon = next(w for w in self.window.weapons if w["id"] == "voodoo")
@@ -363,9 +367,14 @@ class LovePotionIntegrationTests(unittest.TestCase):
 
     def test_private_history_is_portable_with_its_experiencing_npc_data(self):
         self.apply()
-        data = self.window.characters.pop("Dave")
-        self.window.characters["AnotherBody"] = data
-        self.assertEqual(self.window.build_character_context("AnotherBody").current_feelings[0].giver, "Alex")
+        data = self.window.characters["Dave"]
+        mind = self.window.mind_id("Dave")
+        history = data["love_history"]
+        self.window.exchange_player_mind(self.window.body_id("Dave"))
+        self.assertIs(self.window.characters["Alex"], data)
+        self.assertEqual(self.window.label_for_mind(mind), "Alex")
+        self.assertIs(self.window.characters["Alex"]["love_history"], history)
+        self.assertEqual(self.window.build_character_context("Alex").current_feelings[0].giver, "Alex")
         self.assertNotIn("love_history", self.window.characters.get("Dave", {}))
 
     def test_trace_can_serialize_owned_history_and_fingerprints_active_templates(self):

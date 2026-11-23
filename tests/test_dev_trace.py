@@ -208,12 +208,16 @@ class GameTraceTests(unittest.TestCase):
         with patch.object(self.window, "run_conversation_loop"):
             self.window.select_weapon_and_start(bare)
             self.window.item_drafts = None
+            while not self.window.night_arrivals.complete:
+                self.window.loiter_button.click()
             room = next(room for room, occupants in self.window.room_assignments.items() if len(occupants) == 1)
             victim = self.window.room_assignments[room][0]
             self.window.choose_room(room)
         records = events(self.window.trace)
-        assigned = next(record for record in records if record["kind"] == "action_applied" and record["payload"]["action"] == "night_rooms_assigned")
-        self.assertEqual(sum(len(names) for names in assigned["payload"]["assignments"].values()), 5)
+        assigned = next(record for record in records if record["kind"] == "action_applied" and record["payload"]["action"] == "night_arrivals_started")
+        self.assertEqual(len(assigned["payload"]["arrivals"]), 5)
+        self.assertEqual({arrival["body_id"] for arrival in assigned["payload"]["arrivals"]},
+                         {self.window.body_id(name) for name in self.window.characters})
         killed = next(record for record in records if record["kind"] == "action_applied" and record["payload"]["action"] == "kill_resolved")
         self.assertEqual((killed["payload"]["victim"], killed["payload"]["room"]), (victim, room))
         self.assertFalse(self.window.characters[victim]["alive"])
@@ -257,19 +261,17 @@ class GameTraceTests(unittest.TestCase):
         self.assertNotIn("provider-internal-sentinel", text)
 
     def prepare_night(self, weapon_id, assignments):
-        self.window.phase = "action"
-        self.window.round_number = 1
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == weapon_id)
-        self.window.room_assignments = assignments
-        self.window.rooms_visited = []
-        self.window.new_crime_scenes = []
-        self.window.had_to_change_rooms = False
-        self.window.room_buttons_widget.show()
+        plan = {self.window.body_id(name): room for room, names in assignments.items() for name in names}
+        with patch.object(game, "assign_guest_rooms", return_value=plan):
+            self.window.run_action_phase()
+        self.window.item_drafts = None
 
     def test_remote_explosion_records_all_actual_deaths_and_resolved_crime_scene(self):
         self.prepare_night("c4", {"Attic": [], "Kitchen": ["Jerry", "Dave"],
                                   "Library": ["Hank"], "Basement": ["Debra"], "Cellar": ["Owen"]})
         self.window.c4_target_room = "Kitchen"
+        self.window.apply_weapon_gating()
         with patch.object(self.window, "run_conversation_loop"):
             self.window.choose_room("Attic")
         records = events(self.window.trace)
@@ -284,6 +286,7 @@ class GameTraceTests(unittest.TestCase):
         self.prepare_night("blackmagic", {"Attic": [], "Kitchen": ["Dave"],
                                           "Library": ["Jerry"], "Basement": ["Hank"], "Cellar": ["Debra", "Owen"]})
         self.window.black_magic_controller, self.window.black_magic_target = "Jerry", "Dave"
+        self.window.apply_weapon_gating()
         with patch.object(self.window, "run_conversation_loop"):
             self.window.choose_room("Attic")
         records = events(self.window.trace)
@@ -333,7 +336,6 @@ class GameTraceTests(unittest.TestCase):
         with patch.object(self.window, "run_conversation_loop"):
             self.window.run_single_response("Jerry")
             self.wait_for(lambda: self.window.retry_action is not None and not self.window.active_workers)
-            self.window.remember("Jerry", "experience", "Later experience")
             self.window.retry_ai_request()
             self.wait_for(lambda: not self.window.ai_busy and not self.window.active_workers)
         starts = [record for record in events(self.window.trace) if record["kind"] == "request_started"]

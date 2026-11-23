@@ -1006,7 +1006,6 @@ class RuntimeRegressionTests(unittest.TestCase):
             self.assertFalse(self.window.retry_button.isHidden())
             self.assertIn("Temporary failure", self.window.secondary_output_area.text())
             self.assertEqual(tuple(self.window.public_dialogue), before)
-            self.window.remember("Jerry", "experience", "A later observation")
             self.window.retry_button.click()
             self.wait_for(lambda: not self.window.ai_busy and not self.window.active_workers)
         self.assertIs(seen[0], seen[1])
@@ -1014,6 +1013,26 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(self.window.public_dialogue[-1].text, "Recovered reply")
         self.assertTrue(self.window.retry_button.isHidden())
         self.assertIsNone(self.window.retry_action)
+
+    def test_failed_speech_retry_rejects_changed_memory_and_leaves_decision_controls_usable(self):
+        self.window.phase = "conversation"
+        self.window.append_speech("Detective", "A question.")
+        self.speech.side_effect = game.AIRequestError("Temporary failure. Please retry.")
+        self.window.run_single_response("Jerry")
+        self.wait_for(lambda: self.window.retry_action is not None and not self.window.active_workers)
+        before = tuple(self.window.public_dialogue)
+        self.window.remember("Jerry", "experience", "A later observation")
+        self.window.retry_button.click()
+        self.assertEqual(self.speech.call_count, 1)
+        self.assertEqual(tuple(self.window.public_dialogue), before)
+        self.assertFalse(self.window.ai_busy)
+        self.assertFalse(self.window.active_workers)
+        self.assertIsNone(self.window.retry_action)
+        self.assertTrue(self.window.retry_button.isHidden())
+        self.assertTrue(self.window.pass_button.isEnabled())
+        self.assertTrue(self.window.interject_button.isEnabled())
+        self.assertTrue(self.window.interject_input.isEnabled())
+        self.assertTrue(self.window.say_button.isEnabled())
 
     def test_failed_vote_batch_keeps_player_ballot_and_retries_atomically(self):
         self.prepare_vote_call()
