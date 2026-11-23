@@ -132,6 +132,12 @@ ITEM_CATALOGUE = MappingProxyType({
         "occult_ritual", "Occult Ritual", "Curse a body to die at the action phase after next.", "living_body", False,
         flavour="Some appointments are best forgotten. This one isn't.",
     ),
+    "mass_discombobulator": ItemDefinition(
+        "mass_discombobulator", "Mass Discombobulator",
+        "Erase every suspect's memories of this run. Personalities, physical state and active item effects remain.",
+        "self", False,
+        flavour="A fresh start for everyone who knew too much.",
+    ),
     "revolver": ItemDefinition(
         "revolver", "Revolver", "Shoot one living body immediately in public.", "living_body", False,
         flavour="A rather loud way to end a discussion.",

@@ -19,6 +19,7 @@ UNLOCK_GOALS = {
     "occult_ritual": "Kill a suspect in the room you assigned them with Room Reservation.",
     "spin_the_dagger": "Win a run after using three different item types.",
     "revolver": "Kill three victims in one run.",
+    "mass_discombobulator": "Use five different item types in one run.",
     "lucky_coin": "Survive a Guardian Angel intervention and finish that run alive.",
 }
 
@@ -29,6 +30,7 @@ ITEM_UNLOCK_RULES = {
     "occult_ritual": UnlockRule("reserved_room_kill", 1),
     "spin_the_dagger": UnlockRule("three_item_types_victory", 1),
     "revolver": UnlockRule("three_kills_one_run", 1),
+    "mass_discombobulator": UnlockRule("five_item_types_used", 1),
     "lucky_coin": UnlockRule("guardian_intervention_run_survived", 1),
 }
 

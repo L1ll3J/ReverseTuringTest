@@ -66,6 +66,25 @@ class PrivateExperienceTests(unittest.TestCase):
         self.assertEqual(second.project().experiences, ())
         self.assertEqual(first.project().experiences[0].round_number, 2)
 
+    def test_recall_boundary_preserves_ledger_and_active_state_without_reviving_completed_stages(self):
+        closed = self.stage(stage_id="closed", round_number=1, closed_round=2)
+        active = self.stage(stage_id="active", round_number=2)
+        store = PrivateExperienceStore((closed, active))
+        forgotten = store.forget_recollections(3)
+        self.assertEqual(forgotten.stages, store.stages)
+        self.assertFalse(forgotten.project().experiences)
+        self.assertEqual(forgotten.project().current_feelings, (active.current_feeling,))
+        self.assertIs(forgotten.start(self.stage(stage_id="closed", round_number=1)), forgotten)
+        ended = forgotten.finish("active", 4)
+        self.assertEqual([record.round_number for record in ended.project().experiences], [3])
+        self.assertEqual(len(store.project().experiences), 1)
+        twice = ended.forget_recollections(4)
+        self.assertFalse(twice.project().experiences)
+        self.assertEqual(twice.stages, ended.stages)
+        for day in (0, True, 2):
+            with self.subTest(day=day), self.assertRaises(ValueError):
+                forgotten.forget_recollections(day)
+
 
 class LovePotionLifecycleTests(unittest.TestCase):
     def dose(self, dose_id="first", day=1, giver="Alex", body="original-body"):

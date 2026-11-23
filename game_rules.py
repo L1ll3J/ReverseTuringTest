@@ -490,6 +490,8 @@ class PlayerItemRules:
         elif entry.item_id == "muffle":
             self._muffles[target.body_id] = MuffleEffect(target.body_id, context.day, context.day + 1)
             effect = self._event("muffle_applied", context.day, **values, private_text=MUFFLE_PRIVATE)
+        elif entry.item_id == "mass_discombobulator":
+            effect = self._event("npc_recollections_cleared", context.day, **values)
         elif entry.item_id == "love_potion":
             effect = self._event("love_potion_applied", context.day, **values,
                                  subject_body_id=actor.body_id, giver_label=actor.label)

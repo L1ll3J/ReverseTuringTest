@@ -2,7 +2,7 @@ import os
 import random
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fingerprint
 from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal
 from ai_runtime import AIRuntime, AIRequestError
@@ -171,6 +171,8 @@ class GameWindow(QMainWindow):
         self.dictation_recorder.diagnostic.connect(self.record_dictation_diagnostic)
         self.public_events = []
         self.public_dialogue = []
+        self.npc_recall_public_event_start = 0
+        self.npc_recall_dialogue_start = 0
         self.night_rooms = tuple(self.rooms)
         self.ai_busy = False
         self.request_serial = 0
@@ -729,7 +731,9 @@ class GameWindow(QMainWindow):
                 if updated is not history:
                     data["love_history"] = updated
                     self.invalidate_prepared_turn("current_feelings_changed", changed=True)
-            if event.event_type == "banana_given":
+            if event.event_type == "npc_recollections_cleared":
+                self.clear_npc_recollections()
+            elif event.event_type == "banana_given":
                 self.queue_progress("banana_given")
             elif event.event_type == "apparent_speech" and event.origin == "projected_voice":
                 self.append_speech(recipient, event.message, origin=event.origin)
@@ -749,7 +753,10 @@ class GameWindow(QMainWindow):
                 self.guardian_intervened_this_run = True
             elif event.event_type == "item_used":
                 self.items_used += 1
+                distinct_before = len(self.used_item_types)
                 self.used_item_types.add(event.item_id)
+                if distinct_before < 5 <= len(self.used_item_types):
+                    self.queue_progress("five_item_types_used")
                 item_name = ITEM_CATALOGUE[event.item_id].name
                 target = f" on {recipient}" if recipient is not None and recipient != self.player_name else ""
                 self.record_history(f"You used {item_name}{target}.")
@@ -1026,12 +1033,37 @@ class GameWindow(QMainWindow):
                      if not data["alive"] and char != self.player_name)
         return PublicState(self.round_number, tuple(sorted(alive)), dead, self.night_rooms)
 
+    def recalled_public_events(self):
+        return tuple(self.public_events[self.npc_recall_public_event_start:])
+
+    def recalled_dialogue(self):
+        return tuple(self.public_dialogue[self.npc_recall_dialogue_start:])
+
+    def clear_npc_recollections(self):
+        self.ensure_identity_state()
+        for mind_id, data in self.mind_data.items():
+            if mind_id == self.player_owner_id:
+                continue
+            data["recall_experience_start"] = len(data["experiences"])
+            data["recall_disposition_start"] = len(data["dispositions"])
+            history = data.get("love_history")
+            if history is not None:
+                data["love_history"] = replace(
+                    history, experiences=history.experiences.forget_recollections(self.round_number))
+        self.npc_recall_public_event_start = len(self.public_events)
+        self.npc_recall_dialogue_start = len(self.public_dialogue)
+        self.night_memory_views = ()
+        self.pending_direct_reply = None
+        self.invalidate_prepared_turn("npc_recollections_cleared", changed=True)
+
     def build_character_context(self, character):
         data = self.characters[character]
         private = data.get("love_history", LovePotionHistory()).experiences.project()
+        experiences = tuple(data["experiences"][data.get("recall_experience_start", 0):])
+        dispositions = tuple(data["dispositions"][data.get("recall_disposition_start", 0):])
         return CharacterContext(character, tuple(data["profile"]), self.public_state(),
-                                (*data["experiences"], *private.experiences), tuple(data["dispositions"]),
-                                tuple(self.public_events), tuple(self.public_dialogue), private.current_feelings)
+                                (*experiences, *private.experiences), dispositions,
+                                self.recalled_public_events(), self.recalled_dialogue(), private.current_feelings)
 
     def advance_love_histories(self, *, discussion):
         changed = False
@@ -2949,8 +2981,8 @@ class GameWindow(QMainWindow):
                    self.player_owner_id, self.player_alive)
         runtime = self.ai_runtime
         return GroupTurnSnapshot(self.conversation_revision, self.round_number, self.player_name,
-                                 contexts, self.public_state(), tuple(self.public_events),
-                                 tuple(self.public_dialogue), overrides, tuple(sorted(self.body_ids.items())),
+                                 contexts, self.public_state(), self.recalled_public_events(),
+                                 self.recalled_dialogue(), overrides, tuple(sorted(self.body_ids.items())),
                                  effects, (id(runtime), runtime.config, str(runtime.prompt_root)))
 
     def invalidate_prepared_turn(self, reason, *, changed=False):
@@ -2977,10 +3009,10 @@ class GameWindow(QMainWindow):
     def can_prepare_next_turn(self):
         if (self.phase != "conversation" or self.game_over or self.ai_busy
                 or self.player_reply_required() or self.retry_action is not None
-                or not self.interject_input.isHidden() or not self.public_dialogue
+                or not self.interject_input.isHidden() or not self.recalled_dialogue()
                 or self.addressed_muffled_npc() is not None):
             return False
-        latest = self.public_dialogue[-1]
+        latest = self.recalled_dialogue()[-1]
         return (latest.round_number == self.round_number and latest.speaker != self.player_name
                 and self.characters.get(latest.speaker, {}).get("alive", False))
 
@@ -3189,7 +3221,7 @@ class GameWindow(QMainWindow):
             return
         self.secondary_output_area.clear()
         self.vote_button.setEnabled(self.can_call_vote())
-        latest = self.public_dialogue[-1] if self.public_dialogue else None
+        latest = self.recalled_dialogue()[-1] if self.recalled_dialogue() else None
         self.trace.record("conversation_routed", {
             "round": self.round_number,
             "addressee": latest.addressee if latest is not None else None,
@@ -3290,9 +3322,9 @@ class GameWindow(QMainWindow):
             self.run_conversation_loop()
 
     def addressed_muffled_npc(self):
-        if self.phase != "conversation" or self.game_over or not self.public_dialogue:
+        if self.phase != "conversation" or self.game_over or not self.recalled_dialogue():
             return None
-        latest = self.public_dialogue[-1]
+        latest = self.recalled_dialogue()[-1]
         target = latest.addressee
         if (latest.round_number == self.round_number and target != self.player_name
                 and self.characters.get(target, {}).get("alive", False)
@@ -3879,7 +3911,7 @@ class GameWindow(QMainWindow):
                 or mentioned not in self.characters or not self.characters[mentioned]["alive"]):
             return
         body_id = self.body_id(mentioned)
-        latest = self.public_dialogue[-1] if self.public_dialogue else None
+        latest = self.recalled_dialogue()[-1] if self.recalled_dialogue() else None
         pending = self.pending_direct_reply
         direct_reply = direct_reply or (pending is not None and pending[0] is latest and pending[1] == body_id)
         if direct_reply and not self.direct_replies.can_direct(body_id):
