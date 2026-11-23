@@ -13,6 +13,7 @@ from model_config_ui import ModelConfigPanel
 from conversation_flow import DirectReplyPolicy, GroupTurnSnapshot, TurnPreparation
 from conversation_widgets import DialogueView
 from message_view import DisplayRecord, MessageLog
+from house_view import HouseView, RoomObservation, ROOM_LABELS, ARTWORK_SIZE
 from overlay_host import OverlayHost
 from unlock_ui import UnlockPage, unlock_presentation
 from npc_items import NPCItemState
@@ -25,7 +26,7 @@ from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
 from item_ui import InlineItemDraftPage, InventoryPage
 from item_catalogue_ui import ItemCataloguePanel
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea, QStyle, QStyleOptionButton
+from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea, QStyle, QStyleOptionButton
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
 from PyQt5.QtGui import QColor, QTextCursor, QTextCharFormat, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
@@ -1096,152 +1097,39 @@ class GameWindow(QMainWindow):
         self.start_button = QPushButton('Start Game!', self)
         self.start_button.clicked.connect(self.start_game)
 
-        # Buttons for rooms in action phase
-        self.room_labels = {}
-        self.room_containers = {}
-        self.room_buttons = {}
-        self.room_buttons_widget = QWidget()  # Define the room_buttons_widget
-        room_layout = QGridLayout()
+        # Keep the root room widget as the inline reward insertion boundary.
+        self.room_buttons_widget = QWidget()
+        outer_room_layout = QHBoxLayout(self.room_buttons_widget)
+        outer_room_layout.setContentsMargins(0, 0, 0, 0)
+        self.house_row = QWidget()
+        outer_room_layout.addStretch(1)
+        outer_room_layout.addWidget(self.house_row)
+        outer_room_layout.addStretch(1)
+        room_layout = QHBoxLayout(self.house_row)
+        room_layout.setContentsMargins(0, 0, 0, 0)
+        room_layout.setSpacing(16)
+        self.house_view = HouseView(resource_path("House_images/house-cutaway-v1.png"),
+                                    body_font=body_font, heading_font=self.speaker_font,
+                                    external_info=True)
+        self.house_view.setMinimumWidth(1)
+        room_layout.addWidget(self.house_view, 1)
+        self.room_buttons = {label: self.house_view.buttons[room_id]
+                             for room_id, label in ROOM_LABELS.items()}
+        self.house_view.room_selected.connect(lambda room_id: self.choose_room(ROOM_LABELS[room_id]))
+        self.house_sidebar = QScrollArea()
+        self.house_sidebar.setFixedWidth(280)
+        self.house_sidebar.setFrameShape(QFrame.NoFrame)
+        self.house_sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.house_sidebar.setWidgetResizable(True)
+        self.house_sidebar_content = QWidget()
+        self.house_sidebar_layout = QVBoxLayout(self.house_sidebar_content)
+        self.house_sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        self.house_sidebar_layout.setSpacing(16)
+        self.house_sidebar_layout.addWidget(self.house_view.info_panel)
+        self.house_sidebar_layout.addStretch(1)
+        self.house_sidebar.setWidget(self.house_sidebar_content)
+        room_layout.addWidget(self.house_sidebar)
 
-        def apply_opacity(button, opacity_level):
-            effect = QGraphicsOpacityEffect(button)
-            effect.setOpacity(opacity_level)
-            button.setGraphicsEffect(effect)
-
-        # Define sizes for images
-        room_dim = int(256*(screen_width/2560))
-
-        attic_size = QSize(2*room_dim, room_dim)  # Adjusted attic size
-        room_size = QSize(room_dim, room_dim)  # Adjusted room size
-
-        # Adjust layout to remove large gaps and center content
-        room_layout.setSpacing(0)  # Remove extra spacing between buttons
-        #room_layout.setContentsMargins(0, 0, 0, 0)  # Remove outer margins
-
-        # Create buttons and place them in the layout
-        for room in self.rooms:
-            # Create a QPushButton for the room, acting as the image holder
-            button = QPushButton(self)
-
-            # Set the image for each room based on the room name
-            if room == "Attic":
-                button.setIcon(QIcon(resource_path("House_images/Scaled/Attic.png")))
-                button.setIconSize(attic_size)
-                button.setFixedSize(attic_size)  # Adjust size for attic
-                room_layout.addWidget(button, 0, 0, 1, 2, Qt.AlignCenter)  # Attic spans 2 columns
-            else:
-                button.setIcon(QIcon(resource_path(f"House_images/Scaled/{room}.png")))
-                button.setIconSize(room_size)
-                button.setFixedSize(room_size)
-
-                # Add the buttons for Kitchen, Library, Basement, and Cellar to the grid
-                if room == "Kitchen":
-                    room_layout.addWidget(button, 1, 0, Qt.AlignRight)  # Kitchen at row 1, col 0
-                elif room == "Library":
-                    room_layout.addWidget(button, 1, 1, Qt.AlignLeft)  # Library at row 1, col 1
-                elif room == "Basement":
-                    room_layout.addWidget(button, 2, 0, Qt.AlignRight)  # Basement at row 2, col 0
-                elif room == "Cellar":
-                    room_layout.addWidget(button, 2, 1, Qt.AlignLeft)  # Cellar at row 2, col 1
-
-            # Overlay room name on the button using a QLabel (this is now optional)
-
-            text_label = QLabel(room, self)
-            text_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            #text_label.setAlignment(Qt.AlignCenter)
-
-            room_button_font_size = int(16 * (screen_width / 2560))
-            room_button_font_size  = max(room_button_font_size, 12)
-            # Style the text label
-            text_label.setStyleSheet(f"""
-                QLabel {{
-                    font-family: 'Press Start 2P';
-                    font-size: {room_button_font_size}px;
-                    color: white;
-                    background-color: transparent;
-                }}
-            """)
-            
-            self.room_labels[room] = text_label
-            # Stack the button and label in a QVBoxLayout (optional)
-            layout = QVBoxLayout()
-            layout.addWidget(button)
-            layout.addWidget(text_label)
-
-            # Create a container widget to hold the layout
-            container = QWidget()
-            container.setLayout(layout)
-            container.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self.room_containers[room] = container
-
-            # Add the container to the room_layout grid
-            if room == "Attic":
-                room_layout.addWidget(container, 0, 0, 1, 2, Qt.AlignCenter)
-            elif room == "Kitchen":
-                room_layout.addWidget(container, 1, 0, Qt.AlignRight | Qt.AlignVCenter)
-                container.setStyleSheet(f"""
-                    QWidget {{
-                        padding-right: {int(60*(screen_width/2560))}px;  
-                    }}
-                """)
-            elif room == "Library":
-                room_layout.addWidget(container, 1, 1, Qt.AlignLeft | Qt.AlignVCenter)
-                container.setStyleSheet(f"""
-                    QWidget {{
-                        padding-left: {int(60*(screen_width/2560))}px;  
-                    }}
-                """)
-            elif room == "Basement":
-                room_layout.addWidget(container, 2, 0, Qt.AlignRight | Qt.AlignVCenter)
-                container.setStyleSheet(f"""
-                    QWidget {{
-                        padding-right: {int(60*(screen_width/2560))}px;  
-                    }}
-                """)
-            elif room == "Cellar":
-                room_layout.addWidget(container, 2, 1, Qt.AlignLeft | Qt.AlignVCenter)
-                container.setStyleSheet(f"""
-                    QWidget {{
-                        padding-left: {int(65*(screen_width/2560))}px;  
-                    }}
-                """)
-
-                # Apply initial opacity based on whether the button is enabled or disabled
-            if button.isEnabled():
-                apply_opacity(button, 0.5)  # Set default opacity for enabled buttons
-            else:
-                apply_opacity(button, 0.01)  # Reduce brightness for disabled buttons
-
-            # Hover effects only for enabled buttons
-            def enter_event(event, btn):
-                if btn.isEnabled():  # Only apply hover if the button is enabled
-                    apply_opacity(btn, 1.0)  # Increase brightness on hover
-                QPushButton.enterEvent(btn, event)
-
-            def leave_event(event, btn):
-                if btn.isEnabled():  # Only apply hover if the button is enabled
-                    apply_opacity(btn, 0.5)  # Return to default brightness
-
-                QPushButton.leaveEvent(btn, event)
-
-            # Install event filters to apply hover effect to the button (image itself)
-            button.enterEvent = lambda event, b=button: enter_event(event, b)
-            button.leaveEvent = lambda event, b=button: leave_event(event, b)
-
-            # Connect the button to the 'choose_room' function as a clickable area
-            button.clicked.connect(lambda _, r=room: self.choose_room(r))
-
-            # Store the button in the dictionary
-            self.room_buttons[room] = button
-
-        # Set the layout for room_buttons_widget
-        self.room_buttons_widget.setLayout(room_layout)
-        #self.setCentralWidget(self.room_buttons_widget)  # Set this as the central widget
-
-
-        # Add room_buttons_widget to the main window layout
-        #self.main_layout.addWidget(self.room_buttons_widget)
-        #User Information Widet
         self.secondary_output_area = QLabel(self)
         self.secondary_output_area.setAlignment(Qt.AlignCenter)
         self.secondary_output_area.setStyleSheet(f'color: grey; font-family: "{body_family}"; font-size: 18px;')
@@ -1452,7 +1340,7 @@ class GameWindow(QMainWindow):
         self.layout.insertWidget(1, self.weapon_scroll, 1)
         #self.layout.addWidget(self.top_right_widget)
         self.layout.addWidget(self.menu_widget, 1)
-        self.layout.addWidget(self.room_buttons_widget)
+        self.layout.addWidget(self.room_buttons_widget, 1)
         self.layout.addWidget(self.message_log)
         self.layout.addWidget(self.secondary_output_area)
         self.inventory_button = QPushButton("Inventory (0)")
@@ -1519,9 +1407,13 @@ class GameWindow(QMainWindow):
 
         # Create "Transcript" button
         self.transcript_button = QPushButton("Transcript", self)
+        corner_font = QFont(self.pixel_font_family)
+        corner_font.setPixelSize(14)
+        self.how_to_play_button.setFont(corner_font)
+        self.transcript_button.setFont(corner_font)
         self.transcript_button.setStyleSheet(f"""
             QPushButton{{
-            font-size: {int(start_buttons_font_size/2)}px; padding: 10px; color: white;
+            font-size: 14px; padding: 10px; color: white;
             background-color: rgba(0, 0, 0, 0);
             }}
             QPushButton:hover {{
@@ -1567,6 +1459,7 @@ class GameWindow(QMainWindow):
         self.weapon_action_panel.setLayout(QVBoxLayout())
         self.weapon_action_panel.layout().setContentsMargins(0, 0, 0, 0)
         self.weapon_action_panel.layout().setSpacing(0)
+        self.house_sidebar_layout.insertWidget(1, self.weapon_action_panel)
         self.room_buttons_widget.installEventFilter(self)
         QTimer.singleShot(0, self.position_weapon_panel)
 
@@ -1605,12 +1498,10 @@ class GameWindow(QMainWindow):
     def position_corner_controls(self):
         if not hasattr(self, "how_to_play_button") or not hasattr(self, "mute_button"):
             return
-        width = min(max(int(self.width() * 0.15), self.how_to_play_button.sizeHint().width(),
+        width = min(max(self.how_to_play_button.sizeHint().width(),
                         self.transcript_button.sizeHint().width()), max(1, self.width() - 20))
-        height = max(int(width * 0.35), self.how_to_play_button.sizeHint().height())
-        if self.phase == "start":
-            width = max(self.how_to_play_button.sizeHint().width(), min(220, width))
-            height = max(48, self.how_to_play_button.sizeHint().height())
+        height = max(48, self.how_to_play_button.sizeHint().height(),
+                     self.transcript_button.sizeHint().height())
         for button in (self.how_to_play_button, self.transcript_button):
             button.setGeometry(self.width() - width - 10, 10, width, height)
         self.mute_button.setGeometry(0, 10, width // 2, height)
@@ -1626,6 +1517,9 @@ class GameWindow(QMainWindow):
                           if not button.isHidden()), default=0)
             top = max(10, self.menu_widget.mapFrom(self, QPoint(0, bottom + 12)).y())
             self.menu_widget.layout().setContentsMargins(0, top, 0, 0)
+        if hasattr(self, "layout"):
+            top = height + 20 if self.phase == "action" else 11
+            self.layout.setContentsMargins(11, top, 11, 11)
         if self.draft_page is not None:
             controls = (self.how_to_play_button, self.transcript_button, self.mute_button)
             bottom = max((button.geometry().bottom() + 1 for button in controls
@@ -1787,23 +1681,14 @@ class GameWindow(QMainWindow):
             self.dictation_status.hide()
         self.update_dictation_controls()
 
-    def apply_opacity(self, button, opacity_level):
-        # Helper function to set the opacity of buttons
-        effect = QGraphicsOpacityEffect(button)
-        effect.setOpacity(opacity_level)
-        button.setGraphicsEffect(effect)
-
     def update_room_button_states(self):
-        # Loop through each room button to update their states and apply appropriate opacity
-        for room, button in self.room_buttons.items():
-            if button.isEnabled():  # If the button is enabled, apply regular opacity and hover effects
-                self.apply_opacity(button, 0.5)  # Default opacity for enabled buttons
-                self.room_labels[room].show()
-                self.room_containers[room].show()
-            else:
-                self.apply_opacity(button, 0.1)
-                self.room_labels[room].hide()   # Low opacity for disabled buttons (crime scenes)
-                self.room_containers[room].hide()
+        # Accessibility and painting reflect the same existing gameplay gates.
+        records = tuple(RoomObservation(
+            room_id, available=self.room_buttons[label].isEnabled(),
+            known_names=self.house_view.observations[room_id].known_names,
+            unknown_remainder=self.house_view.observations[room_id].unknown_remainder,
+        ) for room_id, label in ROOM_LABELS.items())
+        self.house_view.set_observations(records)
 
     def update_mute_button_icon(self):
         """Update the mute button icon based on whether sound is enabled."""
@@ -2125,6 +2010,7 @@ class GameWindow(QMainWindow):
 
         # Name
         name = QLabel(wpn["name"], card)
+        name.setObjectName("actionWeaponName")
         name.setAlignment(Qt.AlignHCenter)
         name.setStyleSheet("font-size:18px;font-weight:600;color:white;border:none;background:transparent;")
         name.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -2146,11 +2032,14 @@ class GameWindow(QMainWindow):
             desc_text = "No active effect."
 
         desc = QLabel(desc_text, card)
+        desc.setObjectName("actionWeaponDescription")
+        description_font = readable_body_font()
+        desc.setFont(description_font)
         desc.setWordWrap(True)
         desc.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
-        desc.setStyleSheet("font-size:13px;color:#A0A0A0;border:none;background:transparent;")
-        if self.knife_extra_target:
-            desc.setStyleSheet("font-size:13px;color:#EF5350;border:none;background:transparent;")
+        description_color = "#EF5350" if self.knife_extra_target else "#A0A0A0"
+        desc.setStyleSheet(f'font-family: "{description_font.family()}"; font-size: 18px; '
+                          f'color:{description_color};border:none;background:transparent;')
         desc.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         v.addWidget(desc, stretch=1)
 
@@ -2179,56 +2068,20 @@ class GameWindow(QMainWindow):
         self.weapon_action_panel.raise_()
 
     def position_weapon_panel(self):
-        """Right-anchored, clamped placement that never goes off-screen.
-        Works across 1080p/1440p/4K and narrow gaps."""
+        """The sidebar layout owns geometry; existing phase gates own visibility."""
         if not getattr(self, "weapon_action_panel", None):
             return
-        if (self.phase != "action" or self.game_over or not self.selected_weapon
-                or self.pending_room_action is not None or self.bonus_action_pending
-                or self.room_buttons_widget.isHidden()):
-            self.weapon_action_panel.hide()
-            return
-        parent = self.centralWidget()
-        rb = getattr(self, "room_buttons_widget", None)
-        if not parent or not rb:
-            return
-
-        pw, ph = parent.width(), parent.height()
-
-        # Responsive margins & gaps
-        margin_x = max(int(pw * 0.03), 32)   # >= 32px from right edge
-        margin_y = max(int(ph * 0.03), 24)   # >= 24px from top/bottom
-        min_gap  = max(int(pw * 0.015), 24)  # >= 24px gap from room buttons
-
-        desired_w, desired_h = 280, 280
-        # Clamp size to available viewport
-        panel_w = min(max(220, desired_w), max(200, pw - 2 * margin_x))
-        panel_h = min(max(220, desired_h), max(200, ph - 2 * margin_y))
-
-        # Room buttons geometry
-        rb_pos = rb.mapTo(parent, rb.rect().topLeft())
-        rb_right = rb_pos.x() + rb.width()
-        rb_center_y = rb_pos.y() + rb.height() // 2
-
-        # Horizontal limits inside viewport
-        left_limit  = margin_x
-        right_limit = pw - panel_w - margin_x
-        if right_limit < left_limit:
-            # Window too narrow: stretch into the safe band
-            panel_w = max(200, pw - 2 * margin_x)
-            right_limit = pw - panel_w - margin_x
-
-        # Place no closer than min_gap from room buttons, and clamp to limits
-        desired_x = rb_right + min_gap
-        panel_x = max(left_limit, min(desired_x, right_limit))
-
-        # Vertically center on the room row, then clamp to limits
-        ideal_y = rb_center_y - panel_h // 2
-        panel_y = max(margin_y, min(ideal_y, ph - panel_h - margin_y))
-
-        self.weapon_action_panel.setGeometry(panel_x, panel_y, panel_w, panel_h)
-        self.weapon_action_panel.show()
-        self.weapon_action_panel.raise_()
+        # Fit the composition to the proportional artwork instead of the monitor width.
+        height = max(1, self.room_buttons_widget.contentsRect().height() - 16)
+        art_width = int(height * ARTWORK_SIZE[0] / ARTWORK_SIZE[1])
+        row_width = art_width + 16 + self.house_sidebar.width() + self.house_row.layout().spacing()
+        self.house_row.setFixedWidth(min(self.room_buttons_widget.contentsRect().width(), row_width))
+        self.room_buttons_widget.layout().activate()
+        self.house_row.layout().activate()
+        visible = (self.phase == "action" and not self.game_over and bool(self.selected_weapon)
+                   and self.pending_room_action is None and not self.bonus_action_pending
+                   and not self.room_buttons_widget.isHidden())
+        self.weapon_action_panel.setVisible(visible)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2316,6 +2169,8 @@ class GameWindow(QMainWindow):
         self.cancel_item_offer()
         self.invalidate_prepared_turn("night_started", changed=True)
         self.phase = "action"
+        self.message_log.setMaximumHeight(128)
+        self.position_corner_controls()
         self.cancel_dictation()
         self.request_serial += 1
         self.night_rooms = tuple(r for r in self.rooms if r not in self.old_crime_scenes)
@@ -2382,11 +2237,16 @@ class GameWindow(QMainWindow):
                     formatted_assignments.append(f"{room}: EMPTY")
             
             assignments_output = "\n \n ".join(formatted_assignments)
-            self.append_output_text(f"Room Assignments; \n \n {assignments_output} \n")
             self.record_history(f"Room Assignments; \n \n {assignments_output} \n")
 
+        self.house_view.reset_observations(tuple(
+            RoomObservation(room_id,
+                            known_names=tuple(self.room_assignments[label]) if self.show_room_allocations else (),
+                            unknown_remainder=not self.show_room_allocations)
+            for room_id, label in ROOM_LABELS.items()))
+
         # Ask the player to choose a room
-        self.append_output_text("Choose a room by clicking one of the buttons.")
+        self.append_output_text("Choose a room in the house. Point at a room to inspect it.")
         self.rooms_visited = []  # Track rooms visited during the night
         self.new_crime_scenes = []  # Track new crime scenes
         self.had_to_change_rooms = False  # Track if the player moved rooms
@@ -2402,7 +2262,8 @@ class GameWindow(QMainWindow):
         self.room_buttons_widget.show()  # Show room selection buttons
         self.build_weapon_action_panel()  # build right-side card
         self.apply_weapon_gating()        # enforce mandatory fill-ins
-        QTimer.singleShot(0, self.position_weapon_panel)
+        self.layout.activate()
+        self.position_weapon_panel()
         self.weapon_action_panel.raise_()
 
 
@@ -2516,6 +2377,7 @@ class GameWindow(QMainWindow):
 
         # Handle the outcome based on room occupants
         if len(occupants) == 0:
+            self.observe_house_room(selected_room, ())
             self.record_history(f"The {selected_room} is empty and is now also a crime scene.", display=True)
             self.append_output_text("You must choose another room.")
             self.had_to_change_rooms = True
@@ -2529,11 +2391,21 @@ class GameWindow(QMainWindow):
         self.weapon_action_panel.hide()
         self.handle_room_occupants(selected_room, occupants)
 
+    def observe_house_room(self, room, names):
+        """Project a complete room fact already disclosed by an action outcome."""
+        records = tuple(RoomObservation(
+            key, available=button.isEnabled(),
+            known_names=tuple(names) if ROOM_LABELS[key] == room else self.house_view.observations[key].known_names,
+            unknown_remainder=False if ROOM_LABELS[key] == room else self.house_view.observations[key].unknown_remainder,
+        ) for key, button in self.house_view.buttons.items())
+        self.house_view.set_observations(records)
+
     def handle_room_occupants(self, player_room, occupants):
         living = [name for name in occupants if self.characters.get(name, {}).get("alive")]
         if len(living) == 1:
             self.finish_primary_kill(living[0], player_room)
         elif living:
+            self.observe_house_room(player_room, living)
             self.record_history(f"The {player_room} is occupied by {', '.join(living)}.", display=True)
             self.append_output_text("Choose who to kill.")
             self.display_victim_selection(living)
@@ -3596,6 +3468,8 @@ class GameWindow(QMainWindow):
         self.direct_replies.begin_discussion(self.round_number)
         self.refresh_recipient_choices()
         self.phase = "conversation"
+        self.message_log.setMaximumHeight(16777215)
+        self.position_corner_controls()
         self.cancel_dictation()
         self.update_inventory_button()
         self.request_serial += 1

@@ -625,7 +625,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertFalse(self.window.room_buttons["Attic"].isEnabled())
         self.assertFalse(self.window.room_buttons["Kitchen"].isEnabled())
         self.assertTrue(self.window.room_buttons["Library"].isEnabled())
-        self.assertFalse(self.window.room_labels["Library"].isHidden())
+        self.assertFalse(self.window.room_buttons["Library"].isHidden())
 
     def test_disabled_room_cannot_be_entered_by_direct_callback(self):
         self.window.phase = "action"
