@@ -4,7 +4,8 @@ import random
 import unittest
 from unittest.mock import patch
 
-from PyQt5.QtWidgets import QComboBox, QPushButton
+from PyQt5.QtCore import QEvent
+from PyQt5.QtWidgets import QApplication, QComboBox, QPushButton
 import test_love_potion_integration as fixtures
 from npc_items import NPCItemState
 from presentation_aliases import PresentationAliases
@@ -236,3 +237,80 @@ class AppearanceRoutingTests(unittest.TestCase):
         captured = self.window.characters["Dave"]["dispositions"][-1]
         self.clone("Alex", "Hank")
         self.assertIn("You VOUCH for Jerry and Debra.", captured.text)
+
+    def test_hard_room_hover_and_accessibility_match_local_victim_aliases(self):
+        self.clone("Dave")
+        self.window.show_room_allocations = False
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.run_action_phase()
+        self.assertTrue(all(not observation.known_names for observation in self.window.house_view.observations.values()))
+        self.window.room_assignments = {"Kitchen": ["Dave", "Debra"]}
+        self.window.finish_room_choice("Kitchen")
+        observation = self.window.house_view.observations["kitchen"]
+        labels = tuple(button.text().removeprefix("Kill ")
+                       for button in self.window.victim_buttons_widget.findChildren(QPushButton))
+        self.assertEqual(observation.known_names, labels)
+        self.assertEqual(set(labels), {"Debra #1", "Debra #2"})
+        button = self.window.house_view.buttons["kitchen"]
+        QApplication.sendEvent(button, QEvent(QEvent.Enter))
+        detail = self.window.house_view.info_body.text()
+        self.assertEqual(button.accessibleDescription(), detail)
+        for label in labels:
+            self.assertIn(label, detail)
+        self.assertNotIn("Dave", detail)
+        self.assertTrue(all(not item.known_names for room, item in self.window.house_view.observations.items()
+                            if room != "kitchen"))
+        self.clone("Dave", "Hank")
+        self.window.update_room_button_states()
+        self.assertEqual(self.window.house_view.observations["kitchen"].known_names, labels)
+        self.assertEqual(button.accessibleDescription(), detail)
+
+    def test_normal_initial_identical_occupants_have_distinct_observed_labels(self):
+        self.clone("Dave")
+        for name in ("Dave", "Debra"):
+            entry = self.window.inventory.grant("room_reservation")
+            self.assertTrue(self.window.use_inventory_item(
+                entry.instance_id, self.window.body_id(name), room_id="Kitchen"))
+        self.window.show_room_allocations = True
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.rooms_visited = ["Kitchen"]
+        self.window.run_action_phase()
+        observation = self.window.house_view.observations["kitchen"]
+        self.assertEqual(set(observation.known_names), {"Debra #1", "Debra #2"})
+        self.assertFalse(observation.unknown_remainder)
+        self.assertNotIn("Alex", self.window.house_view.buttons["kitchen"].accessibleDescription())
+
+    def test_generated_explosion_and_kill_history_capture_names_without_rewriting_prior_speech(self):
+        self.window.append_speech("Dave", "An earlier statement.")
+        prior = self.window.history_records[-1]
+        self.clone("Dave")
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "c4")
+        self.window.run_action_phase()
+        self.window.room_assignments = {"Kitchen": ["Dave", "Debra"], "Attic": [],
+                                        "Library": ["Jerry"], "Basement": ["Hank"], "Cellar": ["Owen"]}
+        self.window.c4_target_room = "Kitchen"
+        self.window.apply_weapon_gating()
+        start = len(self.window.history_records)
+        self.window.finish_room_choice("Attic")
+        generated = [record.text for record in self.window.history_records[start:]
+                     if "C4 detonates" in record.text or record.text.startswith("You killed ")]
+        self.assertEqual(len(generated), 3)
+        self.assertTrue(any("It kills: Debra, Debra." in line for line in generated))
+        self.assertTrue(all("Dave" not in line and "#" not in line for line in generated))
+        self.assertEqual((prior.speaker, prior.text), ("Dave", "An earlier statement."))
+        self.clone("Dave", "Hank")
+        self.assertTrue(all("Hank" not in line for line in generated))
+
+    def test_possession_history_captures_perceived_target_and_discarded_body(self):
+        self.clone("Alex", "Hank")
+        self.clone("Dave")
+        self.window.phase = "action"
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "voodoo")
+        self.window.room_assignments = {"Kitchen": ["Dave"]}
+        self.window.new_crime_scenes = []
+        start = len(self.window.history_records)
+        self.assertTrue(self.window.commit_attack("Dave", "Kitchen"))
+        generated = [record.text for record in self.window.history_records[start:]]
+        self.assertIn("You possessed the body of Debra in the Kitchen and left behind Hank as a corpse.", generated)
+        self.assertIn("You killed Hank in the Kitchen.", generated)
+        self.assertTrue(all("Alex" not in line and "Dave" not in line for line in generated))

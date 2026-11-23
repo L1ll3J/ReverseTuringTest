@@ -398,6 +398,17 @@ class GameWindow(QMainWindow):
     def display_actor(self, handle):
         return self.display_label(self.body_ids[handle]) if handle in self.body_ids else handle
 
+    def room_actor_labels(self, room, handles, *, include_player=False):
+        """Project only supplied observed actors, with explicit local player presence."""
+        self.ensure_identity_state()
+        handles = tuple(handles)
+        present = [self.body_id(handle) for handle in handles]
+        if include_player and self.player_alive and self.body_id(self.player_name) not in present:
+            present.append(self.body_id(self.player_name))
+        aliases = self.presentation_aliases.for_presence(
+            f"{self.run_id}:{self.round_number}:room:{room}", self.identity_state, present)
+        return tuple(aliases.label_for_body(self.body_id(handle)) for handle in handles)
+
     def populate_body_choices(self, combo, handles, selected=None):
         for handle in handles:
             combo.addItem(self.perceived_actor(handle), self.body_id(handle))
@@ -926,7 +937,7 @@ class GameWindow(QMainWindow):
             attack.update(corpse_label=old_body, corpse_body_id=self.body_id(old_body),
                           corpse_name=self.perceived_actor(old_body))
             decision = self.resolve_death(old_body, attack["attack_id"], caused_by_player=True)
-            self.record_history(f"You possessed the body of {target} in the {room} and left behind {old_body} as a corpse.")
+            self.record_history(f"You possessed the body of {attack['target_name']} in the {room} and left behind {attack['corpse_name']} as a corpse.")
         else:
             decision = self.resolve_death(target, attack["attack_id"], caused_by_player=True)
         if not decision.killed:
@@ -937,7 +948,7 @@ class GameWindow(QMainWindow):
         self.victims_last_night.append(attack["corpse_label"])
         if room not in self.new_crime_scenes:
             self.new_crime_scenes.append(room)
-        self.record_history(f"You killed {attack['corpse_label']} in the {room}.", display=True)
+        self.record_history(f"You killed {attack['corpse_name']} in the {room}.", display=True)
         self.queue_progress("player_kill")
         self.trace_action("kill_resolved", victim=attack["corpse_label"], room=room, attack=attack)
         return True
@@ -2614,7 +2625,7 @@ class GameWindow(QMainWindow):
             formatted_assignments = []
             for room, occupants in self.room_assignments.items():
                 if occupants:
-                    observed_occupants = [self.perceived_actor(name) for name in occupants]
+                    observed_occupants = self.room_actor_labels(room, occupants)
                     occupants_str = ", ".join(observed_occupants[:-1]) + (f" and {observed_occupants[-1]}" if len(observed_occupants) > 1 else observed_occupants[0])
                     formatted_assignments.append(f"{room}: {occupants_str}")
 
@@ -2626,7 +2637,7 @@ class GameWindow(QMainWindow):
 
         self.house_view.reset_observations(tuple(
             RoomObservation(room_id,
-                            known_names=tuple(self.perceived_actor(name) for name in self.room_assignments[label]) if self.show_room_allocations else (),
+                            known_names=self.room_actor_labels(label, self.room_assignments[label]) if self.show_room_allocations else (),
                             unknown_remainder=not self.show_room_allocations)
             for room_id, label in ROOM_LABELS.items()))
 
@@ -2716,7 +2727,7 @@ class GameWindow(QMainWindow):
                 self.c4_cooldown_nights = 2
 
                 if victims:
-                    self.record_history(f"The C4 detonates in the {target_room}. It kills: {', '.join(victims)}.\n", display=True)
+                    self.record_history(f"The C4 detonates in the {target_room}. It kills: {', '.join(self.perceived_actor(victim) for victim in victims)}.\n", display=True)
                     for v in victims:
                         if self.characters.get(v, {}).get("alive"):
                             self.commit_attack(v, target_room, weapon_id="c4")
@@ -2782,9 +2793,11 @@ class GameWindow(QMainWindow):
 
     def observe_house_room(self, room, names):
         """Project a complete room fact already disclosed by an action outcome."""
+        labels = self.room_actor_labels(
+            room, names, include_player=bool(self.rooms_visited and self.rooms_visited[-1] == room))
         records = tuple(RoomObservation(
             key, available=button.isEnabled(),
-            known_names=tuple(names) if ROOM_LABELS[key] == room else self.house_view.observations[key].known_names,
+            known_names=labels if ROOM_LABELS[key] == room else self.house_view.observations[key].known_names,
             unknown_remainder=False if ROOM_LABELS[key] == room else self.house_view.observations[key].unknown_remainder,
         ) for key, button in self.house_view.buttons.items())
         self.house_view.set_observations(records)
@@ -2795,7 +2808,7 @@ class GameWindow(QMainWindow):
             self.finish_primary_kill(living[0], player_room)
         elif living:
             self.observe_house_room(player_room, living)
-            self.record_history(f"The {player_room} is occupied by {', '.join(self.perceived_actor(name) for name in living)}.", display=True)
+            self.record_history(f"The {player_room} is occupied by {', '.join(self.room_actor_labels(player_room, living, include_player=True))}.", display=True)
             self.append_output_text("Choose who to kill.")
             self.display_victim_selection(living)
 
@@ -2803,13 +2816,7 @@ class GameWindow(QMainWindow):
         if self.phase != "action" or not self.rooms_visited:
             return
         room, night = self.rooms_visited[-1], self.round_number
-        self.ensure_identity_state()
-        present = [self.body_id(handle) for handle in self.room_assignments.get(room, ())
-                   if self.characters.get(handle, {}).get("alive") and handle != self.player_name]
-        if self.player_alive:
-            present.append(self.body_id(self.player_name))
-        aliases = self.presentation_aliases.for_presence(
-            f"{self.run_id}:{night}:room:{room}", self.identity_state, present)
+        labels = self.room_actor_labels(room, occupants, include_player=True)
         # Display buttons for choosing the victim in the room
         previous = getattr(self, "victim_buttons_widget", None)
         if previous is not None:
@@ -2824,8 +2831,8 @@ class GameWindow(QMainWindow):
         screen_width = screen_size.width()
         conversation_button_font_size = max(int(32 *(screen_width/2560)), 18)
 
-        for occupant in occupants:
-            victim_button = QPushButton(f"Kill {aliases.label_for_body(self.body_id(occupant))}", self)
+        for occupant, label in zip(occupants, labels):
+            victim_button = QPushButton(f"Kill {label}", self)
             victim_button.setProperty("target_body_id", self.body_id(occupant))
             victim_button.setStyleSheet(f"""
                 QPushButton {{
