@@ -616,9 +616,9 @@ class GameWindow(QMainWindow):
             body_font=readable_body_font(), title_font=self.speaker_font,
         )
         self.layout.insertWidget(self.layout.indexOf(self.room_buttons_widget), self.draft_page, 1)
-        self.draft_page.setMaximumWidth(1280)
-        self.draft_page.setMaximumHeight(720)
-        self.layout.setAlignment(self.draft_page, Qt.AlignCenter)
+        self.draft_page.setMaximumWidth(1440)
+        self.draft_page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.layout.setAlignment(self.draft_page, Qt.AlignHCenter)
         self.draft_page.show()
         self.layout.activate()
         self.position_corner_controls()
@@ -1590,7 +1590,7 @@ class GameWindow(QMainWindow):
         start_buttons_font_size = max(int(50*(screen_width/2560)), 37)
 
         # Toggle button for game difficulty (Normal/Super Hard)
-        self.difficulty_button = QPushButton("Mode: Normal  >", self)
+        self.difficulty_button = QPushButton("Mode: Coward", self)
         self.difficulty_button.setAccessibleName("Change difficulty")
         self.difficulty_button.clicked.connect(self.toggle_mode)
 
@@ -1702,7 +1702,7 @@ class GameWindow(QMainWindow):
         self.interject_input = QLineEdit(self)
         self.interject_input.setFont(body_font)
         self.interject_input.setPlaceholderText("Type here...")
-        self.interject_input.setAlignment(Qt.AlignLeft)
+        self.interject_input.setAlignment(Qt.AlignCenter)
         self.interject_input.setMinimumHeight(48)
         self.interject_input.setStyleSheet(f"""
             QLineEdit {{
@@ -1711,18 +1711,22 @@ class GameWindow(QMainWindow):
                 padding: 5px;
                 text-align: center;
                 color: #DCDCDC;
-                border: none; border-bottom: 1px solid #555;
+                border: none;
             }}
         """)
         self.interject_input.hide()  # Hidden until needed
         self.interject_input.returnPressed.connect(self.send_interjection)
         self.interject_input.textEdited.connect(lambda _text: self.invalidate_prepared_turn("draft_edited"))
         self.say_button = QPushButton('Say')
-        self.say_button.setFixedWidth(112)
+        say_font = QFont(font_family)
+        say_font.setPixelSize(20)
+        self.say_button.setFont(say_font)
+        self.say_button.setMinimumWidth(self.say_button.fontMetrics().horizontalAdvance("Say") + 32)
+        self.say_button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.say_button.setStyleSheet(f"""
             QPushButton {{
-                font-size: {conversation_button_font_size}px;
-                border: 1px solid #777; background: transparent; padding: 10px;
+                font-family: "{font_family}"; font-size: 20px;
+                border: none; background: transparent; padding: 12px 16px;
             }}
             QPushButton:hover {{
                 color: #808080;
@@ -1792,6 +1796,9 @@ class GameWindow(QMainWindow):
         self.dictation_button.clicked.connect(self.toggle_dictation)
         self.dictation_cancel_button = QPushButton("Cancel")
         self.dictation_cancel_button.clicked.connect(self.cancel_dictation)
+        cancel_policy = self.dictation_cancel_button.sizePolicy()
+        cancel_policy.setRetainSizeWhenHidden(True)
+        self.dictation_cancel_button.setSizePolicy(cancel_policy)
         for button in (self.dictation_button, self.dictation_cancel_button):
             button.setFont(body_font)
             button.setStyleSheet(f'QPushButton {{ font-family: "{body_family}"; font-size: 18px; padding: 6px; }} QPushButton:disabled {{ color: #777; }}')
@@ -1813,6 +1820,7 @@ class GameWindow(QMainWindow):
         self.dictation_status = QLabel()
         self.dictation_status.setTextFormat(Qt.PlainText)
         self.dictation_status.setWordWrap(True)
+        self.dictation_status.setFixedHeight(48)
         self.dictation_status.setFont(body_font)
         self.dictation_status.setStyleSheet(f'font-family: "{body_family}"; font-size: 18px; color: #B8B8B8;')
         self.dictation_status.hide()
@@ -1821,6 +1829,9 @@ class GameWindow(QMainWindow):
             can_trigger=self.can_toggle_dictation, conflict_reason=self.dictation_binding_conflict)
         self.dictation_bindings.activation_failed.connect(self.show_dictation_binding_failure)
         self.dictation_binding_badge = BindingBadge(self.dictation_bindings, font=body_font)
+        badge_policy = self.dictation_binding_badge.sizePolicy()
+        badge_policy.setRetainSizeWhenHidden(True)
+        self.dictation_binding_badge.setSizePolicy(badge_policy)
         dictation_layout.addWidget(self.dictation_binding_badge)
         self.update_dictation_controls()
         self.interject_input.installEventFilter(self)
@@ -1849,7 +1860,7 @@ class GameWindow(QMainWindow):
         self.start_layout = QVBoxLayout()
         self.start_layout.addStretch(5)
         self.start_layout.addWidget(self.title_label)  # Add the title at the top
-        self.start_layout.addSpacing(24)
+        self.start_layout.addStretch(1)
         self.start_layout.addLayout(self.player_name_layout)
         self.start_layout.addStretch(2)
         self.start_layout.addWidget(self.difficulty_button)
@@ -1913,18 +1924,16 @@ class GameWindow(QMainWindow):
         self.layout.addWidget(self.room_buttons_widget, 1)
         self.layout.addWidget(self.conversation_stage)
         self.layout.addWidget(self.message_log, 1)
-        self.conversation_stage.setMaximumWidth(1280)
         self.message_log.setMaximumWidth(1280)
-        self.layout.setAlignment(self.conversation_stage, Qt.AlignHCenter)
         self.layout.setAlignment(self.message_log, Qt.AlignHCenter)
         self.layout.addWidget(self.secondary_output_area)
         self.inventory_button = QPushButton("Inventory")
         self.inventory_button.setFont(self.speaker_font)
         self.inventory_button.setStyleSheet(
-            'QPushButton { font-size: 12px; color: #ddd; background: transparent; '
-            'border: 1px solid #555; padding: 12px 16px; } '
-            'QPushButton:enabled:hover, QPushButton:focus { color: white; border-color: #ddd; } '
-            'QPushButton:disabled { color: #666; border-color: #333; }')
+            f'QPushButton {{ font-family: "{font_family}"; font-size: 12px; color: #ddd; background: transparent; '
+            'border: none; padding: 12px 16px; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color: white; } '
+            'QPushButton:disabled { color: #666; }')
         self.inventory_button.clicked.connect(self.open_inventory)
         self.inventory_button.hide()
         self.progress_notice = QLabel()
@@ -2031,9 +2040,9 @@ class GameWindow(QMainWindow):
         self.game_menu_button.setFont(self.speaker_font)
         self.game_menu_button.setAccessibleName("Open game menu (Escape)")
         self.game_menu_button.setStyleSheet(
-            'QPushButton { font-size: 10px; color: #aaa; background: black; '
-            'border: 1px solid #444; padding: 10px; } '
-            'QPushButton:enabled:hover, QPushButton:focus { color: white; border-color: #ddd; }')
+            f'QPushButton {{ font-family: "{font_family}"; font-size: 12px; color: #aaa; background: black; '
+            'border: none; padding: 12px; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color: white; }')
         self.game_menu_button.clicked.connect(self.open_escape_menu)
         self.game_menu_button.hide()
 
@@ -2112,7 +2121,7 @@ class GameWindow(QMainWindow):
             f'font-family: "{self.pixel_font_family}"; font-size: {title_size}px; color: white; padding-bottom: 2px;')
         control_size = max(16, min(32, int(available_width * 0.026), int(self.height() * 0.045)))
         control_height = max(50, min(84, int(self.height() * 0.08)))
-        mode_color = "#d0c8bb" if self.show_room_allocations else "#c58e87"
+        mode_color = "#71ed8d" if self.show_room_allocations else "#ef7777"
         for button, color in ((self.difficulty_button, mode_color), (self.start_button, "white")):
             button.setFixedHeight(control_height)
             button.setStyleSheet(
@@ -2231,6 +2240,10 @@ class GameWindow(QMainWindow):
             return
         self.dictation_controls.setVisible(self.can_dictate() or self.dictation_recorder.is_recording)
         recording = self.dictation_recorder.is_recording
+        status_policy = self.dictation_status.sizePolicy()
+        status_policy.setRetainSizeWhenHidden(
+            self.can_dictate() or recording or self.dictation_context is not None)
+        self.dictation_status.setSizePolicy(status_policy)
         action = "Stop recording" if recording else "Record voice"
         icon = self.dictation_icons[recording]
         self.dictation_button.setIcon(icon)
@@ -2389,10 +2402,10 @@ class GameWindow(QMainWindow):
     def toggle_mode(self):
         # Toggle between Normal and Super Hard modes
         if self.show_room_allocations:
-            self.difficulty_button.setText("Mode: Super Hard  >")
+            self.difficulty_button.setText("Mode: Super Hard")
             self.show_room_allocations = False
         else:
-            self.difficulty_button.setText("Mode: Coward  >")
+            self.difficulty_button.setText("Mode: Coward")
             self.show_room_allocations = True
         self.resize_menu_content()
 
@@ -5197,10 +5210,11 @@ class GameWindow(QMainWindow):
         button.setFont(self.speaker_font)
         button.setCursor(Qt.PointingHandCursor)
         button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        color = {"pauseResume": "#8bc99b", "pauseRestart": "#d8ac72", "pauseExit": "#d78383"}.get(name, "#ddd")
         button.setStyleSheet(
-            'QPushButton { color: #ddd; background: transparent; border: none; border-bottom: 1px solid #242424; '
-            'padding: 12px 16px; min-height: 24px; font-size: 12px; text-align: left; } '
-            'QPushButton:enabled:hover, QPushButton:focus { color: white; background: #191919; } '
+            f'QPushButton {{ font-family: "{self.pixel_font_family}"; color: {color}; background: transparent; border: none; '
+            'padding: 14px 16px; min-height: 24px; font-size: 12px; text-align: left; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color: white; background: #151515; } '
             'QPushButton:pressed { color: #aaa; }')
         button.clicked.connect(callback)
         return button
@@ -5219,7 +5233,7 @@ class GameWindow(QMainWindow):
             ("Resume", "pauseResume", self.close_escape_menu),
             ("Controls", "pauseControls", self.show_voice_controls),
             ("Microphone", "pauseMicrophone", self.show_microphone_settings),
-            ("Restart", "pauseRestart", self._esc_restart_click),
+            ("Main menu", "pauseRestart", self._esc_restart_click),
         )
         for text, name, callback in actions:
             layout.addWidget(self.pause_menu_button(text, name, callback))
