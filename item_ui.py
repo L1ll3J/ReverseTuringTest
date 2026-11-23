@@ -11,6 +11,9 @@ from PyQt5.QtWidgets import (
 )
 
 
+_ITEM_SPRITE_NAMES = {"soul": "soul_transfusion"}
+
+
 def item_sprite(item_id, parent=None, *, icon_root=None, size=64):
     """Return a bounded sprite label using source or packaged resources."""
     root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -20,7 +23,8 @@ def item_sprite(item_id, parent=None, *, icon_root=None, size=64):
     label.setTextFormat(Qt.PlainText)
     label.setFixedSize(size, size)
     label.setAlignment(Qt.AlignCenter)
-    pixmap = QPixmap(str(directory / f"{item_id}.png"))
+    sprite_name = _ITEM_SPRITE_NAMES.get(item_id, item_id)
+    pixmap = QPixmap(str(directory / f"{sprite_name}.png"))
     if not pixmap.isNull():
         label.setPixmap(pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.FastTransformation))
     return label

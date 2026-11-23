@@ -148,6 +148,17 @@ class ItemCatalogueTests(unittest.TestCase):
             self.assertEqual(missing.accessibleName(), "Muffle")
             self.assertEqual(missing.width(), 64)
 
+    def test_soul_uses_its_full_display_name_and_existing_artwork(self):
+        panel = self.panel()
+        self.assertEqual(panel.findChild(QLabel, "itemName_soul").text(), "Soul Transfusion")
+        icon = panel.findChild(QLabel, "itemIcon_soul")
+        self.assertIsNotNone(icon.pixmap())
+        self.assertFalse(icon.pixmap().isNull())
+        expected = QPixmap(str(Path(__file__).resolve().parents[1]
+                              / "icons" / "items" / "soul_transfusion.png"))
+        expected = expected.scaled(64, 64, Qt.KeepAspectRatio, Qt.FastTransformation)
+        self.assertEqual(icon.pixmap().toImage(), expected.toImage())
+
     def test_all_text_resolves_to_readable_font_despite_parent_style(self):
         panel = self.panel(ProfileSnapshot(unlocked={"guardian_angel"}))
         expected = QFontInfo(self.font).family()
@@ -203,6 +214,7 @@ class ItemCatalogueTests(unittest.TestCase):
             image.fill(Qt.green)
             for item_id in ITEM_CATALOGUE:
                 self.assertTrue(image.save(str(icons / f"{item_id}.png")))
+            self.assertTrue(image.save(str(icons / "soul_transfusion.png")))
             choose, reroll, skip, use = Mock(), Mock(), Mock(), Mock()
             with patch.object(sys, "_MEIPASS", directory, create=True):
                 offer = DraftOffer("offer", "Kitchen", ("banana", "muffle", "spare_paper"))
