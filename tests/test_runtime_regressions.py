@@ -76,6 +76,7 @@ class RuntimeRegressionTests(unittest.TestCase):
             "Jerry": character(), "Dave": character(), "Hank": character(),
             "Debra": character(False),
         }
+        self.window.rooms_visited = []
 
     def tearDown(self):
         for worker in self.window.active_workers:
@@ -712,29 +713,41 @@ class RuntimeRegressionTests(unittest.TestCase):
             self.window, "run_conversation_phase"
         ) as conversation:
             self.window.choose_room("Attic")
+            self.assertIsNotNone(self.window.weapon_aftermath_panel)
+            self.window.keep_weapon_button.click()
         self.assertEqual(self.window.new_crime_scenes, [])
         self.assertEqual(self.window.rooms_visited, ["Attic"])
         memories.assert_called_once_with(None)
         conversation.assert_called_once()
 
+    def assert_shared_pen_signature(self, roll, signature):
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "pen")
+        placements = {self.window.body_id(name): room for name, room in
+                      (("Dave", "Attic"), ("Jerry", "Kitchen"), ("Hank", "Library"))}
+        with patch.object(game, "assign_guest_rooms", return_value=placements):
+            self.window.run_action_phase()
+        self.window.item_drafts = None
+        self.window.pending_pen_note_text = "Trust nobody"
+        self.window.apply_weapon_gating()
+        with patch.object(game.random, "random", return_value=roll) as random_roll, patch.object(
+            self.window, "run_conversation_loop"
+        ):
+            self.window.choose_room("Attic")
+            self.assertIsNotNone(self.window.weapon_aftermath_panel)
+            self.window.keep_weapon_button.click()
+        random_roll.assert_called_once()
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        notes = [next(event.text for event in self.window.build_character_context(name).public_events
+                      if "note was found" in event.text) for name in self.window.characters]
+        self.assertEqual(len(set(notes)), 1)
+        self.assertIn("Trust nobody - Signed: " + signature, notes[0])
+        self.assertEqual(sum("note was found" in event.text for event in self.window.public_events), 1)
+
     def test_pen_reveals_one_shared_signature_to_every_character(self):
-        for roll, signature in ((0.01, "Alex"), (0.99, "Debra")):
-            with self.subTest(roll=roll):
-                self.window.selected_weapon = {"id": "pen"}
-                self.window.pending_pen_note_text = "Trust nobody"
-                self.window.victims_last_night = ["Debra"]
-                self.window.new_crime_scenes = []
-                self.window.public_events = []
-                with patch.object(game.random, "random", return_value=roll) as random_roll, patch.object(
-                    self.window, "run_conversation_loop"
-                ):
-                    self.window.run_conversation_phase()
-                random_roll.assert_called_once()
-                notes = [next(event.text for event in self.window.build_character_context(name).public_events
-                              if "note was found" in event.text) for name in self.window.characters]
-                self.assertEqual(len(set(notes)), 1)
-                self.assertIn("Trust nobody - Signed: " + signature, notes[0])
-                self.assertEqual(sum("note was found" in event.text for event in self.window.public_events), 1)
+        self.assert_shared_pen_signature(0.99, "Dave")
+
+    def test_pen_backfire_reveals_one_shared_attacker_signature_to_every_character(self):
+        self.assert_shared_pen_signature(0.01, "Alex")
 
     def test_pen_without_victim_does_not_reveal_a_note(self):
         self.window.selected_weapon = {"id": "pen"}

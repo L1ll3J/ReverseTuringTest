@@ -274,6 +274,8 @@ class GameTraceTests(unittest.TestCase):
         self.window.apply_weapon_gating()
         with patch.object(self.window, "run_conversation_loop"):
             self.window.choose_room("Attic")
+            self.assertIsNotNone(self.window.weapon_aftermath_panel)
+            self.window.keep_weapon_button.click()
         records = events(self.window.trace)
         explosion = next(record for record in records if record["kind"] == "action_applied" and record["payload"]["action"] == "explosion_resolved")
         self.assertEqual(explosion["payload"]["victims"], ["Jerry", "Dave"])

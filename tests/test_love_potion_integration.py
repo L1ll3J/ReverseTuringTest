@@ -153,6 +153,7 @@ class LovePotionIntegrationTests(unittest.TestCase):
         self.use_card("love_potion", "Dave")
         self.window.overlay_host.close_page()
         self.window.run_action_phase()
+        self.assertTrue(self.window.prepare_room_entry(self.window.night_rooms[0]))
         self.window.finish_night()
         view = next(view for view in self.window.night_memory_views
                     if view.body_id == self.window.body_id("Dave"))
