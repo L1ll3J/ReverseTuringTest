@@ -14,10 +14,10 @@ class ContentMetadataTests(unittest.TestCase):
     def test_metadata_matches_every_implemented_item_without_unfinished_entries(self):
         items = {entry.content_id: entry for entry in CONTENT_CATALOGUE if entry.category == "item"}
         self.assertEqual(tuple(items), tuple(ITEM_CATALOGUE))
-        self.assertEqual(len(items), 24)
-        self.assertEqual(sum(entry.default for entry in items.values()), 17)
+        self.assertEqual(len(items), 25)
+        self.assertEqual(sum(entry.default for entry in items.values()), 18)
         self.assertTrue(items["love_potion"].default)
-        self.assertTrue({"soul_transfusion"}.isdisjoint(items))
+        self.assertTrue(items["soul"].default)
         for item_id, entry in items.items():
             self.assertEqual(entry.default, ITEM_CATALOGUE[item_id].default)
             if not entry.default:

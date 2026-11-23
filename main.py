@@ -4,7 +4,7 @@ from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fingerprint, development_mode
-from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal
+from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal, SelfIdentity
 from ai_runtime import AIRuntime, AIRequestError
 from dictation import DictationRecorder, DictationError
 from preferences import Preferences
@@ -18,8 +18,9 @@ from overlay_host import OverlayHost
 from unlock_ui import UnlockPage, unlock_presentation
 from npc_items import NPCItemState, NPC_ITEM_REGISTRY
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
-from game_rules import BodyState, DeathCause, ItemUseContext, NightMemoryView, PlayerItemRules, ItemRuleError, GUARDIAN_PUBLIC
+from game_rules import BodyState, DeathCause, ItemUseContext, NightMemoryView, PlayerItemRules, ItemRuleError, GUARDIAN_PUBLIC, SOUL_PRIVATE
 from identity_state import IdentityState
+from soul_rules import SoulResolver
 from presentation_aliases import PresentationAliases
 from love_potion import LoveDose, LovePotionHistory
 from muffled import TONES, TONE_LABELS, muffled_sound
@@ -204,7 +205,10 @@ class GameWindow(QMainWindow):
         self.body_muffle_styles = {}
         self.player_alive = True
         self.inventory = Inventory(self.player_owner_id)
-        self.item_rules = PlayerItemRules(self.player_owner_id, self.inventory)
+        self.item_rules = PlayerItemRules(self.player_owner_id, self.inventory, guardian_scope="body")
+        self.item_activation_contexts = {}
+        self.soul_resolver = SoulResolver()
+        self.soul_former_bodies = {}
         self.item_drafts = None
         self.draft_page = None
         self._draft_room_selection_visible = False
@@ -323,11 +327,10 @@ class GameWindow(QMainWindow):
         self.ensure_identity_state()
         return self.label_for_body(self.identity_state.body_for_mind(mind_id)) if self.identity_state else None
 
-    def exchange_player_mind(self, target_body_id):
-        """Mechanical exchange only; callers must provide approved embodiment narration.
+    def exchange_player_mind(self, target_body_id, *, resolved_identity=None):
+        """Install an exchange; callers provide the separately approved narration.
 
         Private data follows its mind. Body labels and recorded events remain literal.
-        The live Soul item stays gated until that narrative adapter is approved.
         """
         self.ensure_identity_state()
         target = next((body for body in self.body_states() if body.body_id == target_body_id), None)
@@ -338,6 +341,8 @@ class GameWindow(QMainWindow):
         old_body_id = self.body_id(old_label)
         old_state = self.identity_state
         new_state = old_state.exchange(target_body_id)
+        if resolved_identity is not None and resolved_identity != new_state:
+            raise ItemRuleError("The resolved exchange no longer matches the current identity")
         memory_views = tuple(
             NightMemoryView(new_state.body_for_mind(old_state.mind_for_body(view.body_id)),
                             view.night, view.experiences) for view in self.night_memory_views)
@@ -379,6 +384,24 @@ class GameWindow(QMainWindow):
         self.refresh_conversation_stage()
         self.trace_action("identity_changed", previous_body=old_label, current_body=target.label)
         return new_state
+
+    def apply_soul_exchange(self, event):
+        self.ensure_identity_state()
+        resolution = self.soul_resolver.resolve(
+            event.event_id, self.identity_state, event.actor_body_id,
+            event.target_body_id, self.body_states(), event.day)
+        if resolution.application_state == "superseded":
+            return
+        if resolution.identity_application_required:
+            self.exchange_player_mind(event.target_body_id, resolved_identity=resolution.identity)
+        data = self.mind_data[resolution.target_mind_id]
+        self.remember_private(
+            data, self.label_for_mind(resolution.target_mind_id), "experience",
+            SOUL_PRIVATE.format(new_body=resolution.old_body_name,
+                                original_name=resolution.target_original_name))
+        self.soul_former_bodies[event.event_id] = (resolution.old_body_id, resolution.following_night)
+        self.record_history(f"You exchanged bodies with {resolution.new_body_name}.", display=True)
+        self.trace.record("soul_exchange_resolved", {"event_id": event.event_id, "resolution": resolution})
 
     def perceived_name(self, body_id):
         self.ensure_identity_state()
@@ -713,7 +736,8 @@ class GameWindow(QMainWindow):
     def use_inventory_item(self, instance_id, target_body_id=None, *, message=None, room_id=None, activation_id=None):
         if not self.can_use_items():
             return False
-        context = self.item_use_context()
+        activation_id = activation_id or uuid4().hex
+        context = self.item_activation_contexts.get(activation_id) or self.item_use_context()
         try:
             item_id = self.item_rules.activation_item_id(activation_id)
             if item_id is None:
@@ -721,15 +745,22 @@ class GameWindow(QMainWindow):
             definition = ITEM_CATALOGUE[item_id]
             if definition.item_id in OPTIONAL_ITEM_NARRATION_PENDING:
                 raise ItemRuleError("This item is not available in this development build yet.")
+            if item_id == "soul" and self.item_rules.activation_item_id(activation_id) is None:
+                self.ensure_identity_state()
+                target_mind = self.identity_state.mind_for_body(target_body_id)
+                if (self.identity_state.mind_name(self.player_owner_id) is None
+                        or self.identity_state.mind_name(target_mind) is None):
+                    raise ItemRuleError("This exchange requires both people's original identities")
             events = self.item_rules.use_item(instance_id, context, target_body_id,
                                              message=message, room_id=room_id, drafts=self.item_drafts,
-                                             activation_id=activation_id or uuid4().hex)
+                                             activation_id=activation_id)
         except (ItemRuleError, InventoryError) as error:
             self.secondary_output_area.setText(str(error))
             self.secondary_output_area.show()
             if self.inventory_page is not None:
                 self.inventory_page.show_feedback(str(error))
             return False
+        self.item_activation_contexts[activation_id] = context
         self.invalidate_prepared_turn("item_used", changed=True)
         self.request_serial += 1
         self.retry_action = None
@@ -779,6 +810,8 @@ class GameWindow(QMainWindow):
             personal_data, personal_handle = self.personal_event_recipient(event)
             if event.event_id in self.applied_item_events:
                 continue
+            if event.event_type == "soul_exchange_requested":
+                self.apply_soul_exchange(event)
             if event.death_decision is not None:
                 killed = self.apply_resolved_death(event.death_decision)
                 death_applied = killed or death_applied
@@ -986,6 +1019,13 @@ class GameWindow(QMainWindow):
             self.new_crime_scenes.append(room)
         self.record_history(f"You killed {attack['corpse_name']} in the {room}.", display=True)
         self.queue_progress("player_kill")
+        completed = [event_id for event_id, (body_id, due_day) in self.soul_former_bodies.items()
+                     if attack["player_attack"] and self.phase == "action"
+                     and attack["corpse_body_id"] == body_id and self.round_number == due_day]
+        if completed:
+            for event_id in completed:
+                del self.soul_former_bodies[event_id]
+            self.queue_progress("former_body_killed_following_night")
         self.trace_action("kill_resolved", victim=attack["corpse_label"], room=room, attack=attack)
         return True
 
@@ -1161,9 +1201,14 @@ class GameWindow(QMainWindow):
         private = data.get("love_history", LovePotionHistory()).experiences.project()
         experiences = tuple(data["experiences"][data.get("recall_experience_start", 0):])
         dispositions = tuple(data["dispositions"][data.get("recall_disposition_start", 0):])
+        self.ensure_identity_state()
+        original_name = self.identity_state.mind_name(self.mind_id(character)) if self.identity_state else None
+        identity = (SelfIdentity(original_name, self.perceived_actor(character), self.display_actor(character))
+                    if original_name is not None else None)
         return CharacterContext(character, tuple(data["profile"]), self.public_state(),
                                 (*experiences, *private.experiences), dispositions,
-                                self.recalled_public_events(), self.recalled_dialogue(), private.current_feelings)
+                                self.recalled_public_events(), self.recalled_dialogue(), private.current_feelings,
+                                identity)
 
     def advance_love_histories(self, *, discussion):
         changed = False

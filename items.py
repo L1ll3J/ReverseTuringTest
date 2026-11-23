@@ -53,7 +53,7 @@ ITEM_CATALOGUE = MappingProxyType({
     ),
     "guardian_angel": ItemDefinition(
         "guardian_angel", "Guardian Angel",
-        "Arm one protection against your next death. Protection follows you through possession.",
+        "Protect your current body from its next death. Protection stays with that body if you swap.",
         "self", False,
         flavour="Death can wait. Once.", rarity="gold",
     ),
