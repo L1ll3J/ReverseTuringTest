@@ -163,6 +163,20 @@ class ItemCatalogueTests(unittest.TestCase):
                     if not widget.objectName().startswith("itemIcon_"):
                         self.assertTrue(widget.wordWrap())
 
+    def test_optional_title_font_survives_parent_styles_and_refresh_without_changing_body(self):
+        title_font = QFont("Courier New")
+        title_font.setPixelSize(12)
+        panel = self.panel(title_font=title_font)
+        panel.refresh(ProfileSnapshot())
+        self.app.processEvents()
+        for label in panel.findChildren(QLabel):
+            if label.objectName().startswith("itemName_"):
+                self.assertEqual(QFontInfo(label.font()).family(), QFontInfo(title_font).family())
+                self.assertEqual(QFontInfo(label.font()).pixelSize(), 12)
+            elif not label.objectName().startswith("itemIcon_"):
+                self.assertEqual(QFontInfo(label.font()).family(), QFontInfo(self.font).family())
+                self.assertEqual(QFontInfo(label.font()).pixelSize(), 18)
+
     def test_packaged_resource_root_and_shared_dialog_sprites_keep_callbacks(self):
         with tempfile.TemporaryDirectory() as directory:
             icons = Path(directory) / "icons" / "items"

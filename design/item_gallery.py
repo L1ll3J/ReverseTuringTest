@@ -32,6 +32,10 @@ def create_gallery():
     window.setStyleSheet("QWidget { background: #1e1e1e; }")
     font = QFontDatabase.systemFont(QFontDatabase.GeneralFont)
     font.setPixelSize(18)
+    font_id = QFontDatabase.addApplicationFont(str(SOURCE_ROOT / "fonts" / "PressStart2P-Regular.ttf"))
+    families = QFontDatabase.applicationFontFamilies(font_id)
+    title_font = QFont(families[0] if families else "Sans-Serif")
+    title_font.setPixelSize(12)
     layout = QVBoxLayout(window)
     notice = QLabel(
         f"Development preview: all {len(ITEM_CATALOGUE)} catalogue definitions. All items are shown "
@@ -45,7 +49,8 @@ def create_gallery():
     notice.setStyleSheet("color: #dedede; background: transparent;")
     layout.addWidget(notice)
     profile = SimpleNamespace(unlocked=frozenset(ITEM_CATALOGUE), disabled_items=frozenset())
-    panel = ItemCataloguePanel(ITEM_CATALOGUE, profile, {}, lambda *_: profile, font)
+    panel = ItemCataloguePanel(ITEM_CATALOGUE, profile, {}, lambda *_: profile, font,
+                               title_font=title_font)
     for checkbox in panel.checkboxes.values():
         checkbox.setEnabled(False)
         checkbox.setToolTip("Pool preferences are unavailable in the development preview.")

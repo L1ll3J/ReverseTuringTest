@@ -1,0 +1,145 @@
+"""Offline Qt coverage of the real menu and its existing start flow."""
+
+import contextlib
+import os
+from pathlib import Path
+import socket
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+if sys.platform == "win32":
+    os.environ.setdefault("QT_QPA_FONTDIR", str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from PyQt5.QtCore import QCoreApplication, QEvent, QPoint, Qt
+from PyQt5.QtGui import QFont, QFontInfo
+from PyQt5.QtTest import QTest
+from PyQt5.QtWidgets import QApplication, QLabel, QPushButton, QStyle, QStyleOptionButton
+
+import main as game
+
+
+class MenuNavigationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication(["menu-navigation"])
+        cls.app.setQuitOnLastWindowClosed(False)
+        if sys.platform == "win32" and cls.app.platformName() == "offscreen":
+            QFont.insertSubstitution("Helvetica", "Segoe UI")
+
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        directory = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.stack.enter_context(patch.dict(os.environ, {
+            "ALIBAI_PROFILE_PATH": str(directory / "profile.json"),
+            "ALIBAI_SETTINGS_PATH": str(directory / "preferences.ini"), "ALIBAI_DEV_MODE": "0",
+        }))
+        self.stack.enter_context(patch.object(game, "QMediaPlayer"))
+        self.stack.enter_context(patch.object(socket.socket, "connect", side_effect=AssertionError("Offline test")))
+        self.stack.enter_context(patch.object(game.GameWindow, "maybe_prepare_next_turn"))
+        self.window = game.GameWindow()
+        self.window.showNormal()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def rect_in_window(self, widget):
+        rectangle = widget.rect()
+        rectangle.moveTopLeft(widget.mapTo(self.window, QPoint(0, 0)))
+        return rectangle
+
+    def assert_mute_icon_fits(self):
+        button = self.window.mute_button
+        option = QStyleOptionButton()
+        button.initStyleOption(option)
+        contents = button.style().subElementRect(QStyle.SE_PushButtonContents, option, button)
+        requested = button.iconSize()
+        self.assertEqual(requested.width(), requested.height())
+        self.assertGreater(requested.width(), 0)
+        self.assertLessEqual(requested.width(), contents.width())
+        self.assertLessEqual(requested.height(), contents.height())
+        self.assertFalse(button.icon().pixmap(requested).isNull())
+
+    def test_repeated_resizes_keep_real_controls_in_bounds_and_clear_of_corners(self):
+        window = self.window
+        for width, height in ((800, 600), (1280, 800), (2560, 1440), (3440, 1440), (800, 600)):
+            window.resize(width, height)
+            self.app.processEvents()
+            self.assertEqual((window.width(), window.height()), (width, height))
+            self.assert_mute_icon_fits()
+            window.play_tab_button.click()
+            self.app.processEvents()
+            self.assertEqual(window.title_label.text(), "AlibAi")
+            self.assertEqual(QFontInfo(window.title_label.font()).family(), window.pixel_font_family)
+            self.assertLessEqual(window.play_content.width(), 1000)
+            content = self.rect_in_window(window.play_content)
+            self.assertLessEqual(abs(content.center().x() - window.rect().center().x()), 1)
+            for control in (window.title_label, window.player_name_label, window.player_name_input,
+                            window.difficulty_button, window.start_button, window.play_tab_button,
+                            window.items_tab_button, window.mute_button, window.how_to_play_button):
+                with self.subTest(size=(width, height), control=control.text()):
+                    self.assertTrue(control.isVisible())
+                    rectangle = self.rect_in_window(control)
+                    self.assertTrue(window.rect().contains(rectangle), rectangle)
+                    if control not in (window.mute_button, window.how_to_play_button):
+                        for corner in (window.mute_button, window.how_to_play_button):
+                            self.assertFalse(rectangle.intersects(self.rect_in_window(corner)))
+            self.assertLessEqual(window.title_label.fontMetrics().horizontalAdvance("AlibAi"),
+                                 window.title_label.width())
+            window.items_tab_button.click()
+            self.app.processEvents()
+            self.assertIs(window.menu_stack.currentWidget(), window.item_catalogue)
+            for corner in (window.mute_button, window.how_to_play_button):
+                self.assertFalse(self.rect_in_window(window.item_catalogue).intersects(self.rect_in_window(corner)))
+            self.assertEqual(window.item_catalogue.scroll.horizontalScrollBar().maximum(), 0)
+            name = window.item_catalogue.findChild(QLabel, "itemName_banana")
+            detail = window.item_catalogue.findChild(QLabel, "itemDescription_banana")
+            self.assertEqual(QFontInfo(name.font()).family(), window.pixel_font_family)
+            self.assertNotEqual(QFontInfo(detail.font()).family(), window.pixel_font_family)
+            self.assertEqual(QFontInfo(detail.font()).pixelSize(), 18)
+
+    def test_keyboard_tabs_and_start_weapon_house_routing(self):
+        window = self.window
+        window.resize(800, 600)
+        self.app.processEvents()
+        window.play_tab_button.setFocus()
+        QTest.keyClick(window.play_tab_button, Qt.Key_Right)
+        self.assertIs(self.app.focusWidget(), window.items_tab_button)
+        self.assertIs(window.menu_stack.currentWidget(), window.item_catalogue)
+        QTest.keyClick(window.items_tab_button, Qt.Key_Tab)
+        self.assertIsNot(self.app.focusWidget(), window.items_tab_button)
+        window.play_tab_button.setFocus()
+        QTest.keyClick(window.play_tab_button, Qt.Key_Space)
+        self.assertIs(window.menu_stack.currentWidget(), window.play_page)
+        window.player_name_input.setText("Alex")
+        window.difficulty_button.click()
+        self.assertEqual(window.difficulty_button.text(), "Mode: Super Hard")
+        window.difficulty_button.click()
+        self.assertEqual(window.difficulty_button.text(), "Mode: Coward")
+        window.start_button.click()
+        self.app.processEvents()
+        self.assertEqual(window.phase, "weapon_select")
+        self.assertTrue(window.weapon_scroll.isVisible())
+        self.assertFalse(window.menu_widget.isVisible())
+        bare = window.weapon_grid.itemAtPosition(0, 0).widget()
+        self.assertTrue(bare.isEnabled())
+        QTest.mouseClick(bare, Qt.LeftButton)
+        self.app.processEvents()
+        self.assertEqual(window.phase, "action")
+        self.assertTrue(window.room_buttons_widget.isVisible())
+        self.assertEqual(window.selected_weapon["id"], "bare")
+        for size in ((1280, 800), (800, 600)):
+            window.resize(*size)
+            self.app.processEvents()
+            self.assert_mute_icon_fits()
+
+
+if __name__ == "__main__":
+    unittest.main()

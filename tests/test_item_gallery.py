@@ -43,6 +43,9 @@ class ItemGalleryTests(unittest.TestCase):
         names = [label for label in panel.findChildren(QLabel)
                  if label.objectName().startswith("itemName_")]
         self.assertEqual(len(names), len(ITEM_CATALOGUE))
+        for name in names:
+            self.assertEqual(QFontInfo(name.font()).family(), "Press Start 2P")
+            self.assertEqual(QFontInfo(name.font()).pixelSize(), 12)
         for width, height in ((800, 600), (1920, 1080)):
             with self.subTest(size=(width, height)):
                 self.window.resize(width, height)
