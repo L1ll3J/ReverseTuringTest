@@ -63,7 +63,7 @@ class ConversationIntegrationTests(unittest.TestCase):
         self.window.phase = "conversation"
         self.window.round_number = 1
         self.window.menu_widget.hide()
-        self.window.output_area.show()
+        self.window.message_log.show()
         self.window.conversation_buttons_widget.show()
         self.window.new_crime_scenes = []
         self.window.victims_last_night = []

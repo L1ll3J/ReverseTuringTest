@@ -2,7 +2,6 @@ import os
 import random
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
-from html import escape
 from dataclasses import asdict
 from dev_trace import TraceRun, call_with_trace, prompt_fingerprints, source_fingerprint
 from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState, SpeechProposal
@@ -11,17 +10,19 @@ from dictation import DictationRecorder, DictationError
 from preferences import Preferences
 from conversation_flow import DirectReplyPolicy, GroupTurnSnapshot, TurnPreparation
 from conversation_widgets import DialogueView
+from message_view import DisplayRecord, MessageLog
+from overlay_host import OverlayHost
 from npc_items import NPCItemState
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, ItemUseContext, PlayerItemRules, ItemRuleError
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
-from item_ui import ItemDraftDialog, InventoryDialog
+from item_ui import ItemDraftDialog, InventoryPage
 from item_catalogue_ui import ItemCataloguePanel
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
-from PyQt5.QtGui import QTextCursor, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption
+from PyQt5.QtGui import QTextCursor, QTextCharFormat, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 def resource_path(relative_path):
@@ -97,6 +98,7 @@ class AIWorker(QThread):
 
 class GameWindow(QMainWindow):
     development_trace_notice = pyqtSignal(str)
+    history_record_added = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()  # Ensure the parent class is initialized
@@ -124,7 +126,9 @@ class GameWindow(QMainWindow):
         self.voting_resolved = False
 
         # New Variables for the conversation phase
-        self.transcript = []
+        self.history_records = []
+        self.public_event_display_records = []
+        self.display_sequence = 0
         self.current_conversation = []  # Holds the conversation log
         self.most_recent_messageS = []  # Holds the short-term memory stack of recent messages
         self.alive_characters = []  # Holds the list of alive characters
@@ -166,7 +170,9 @@ class GameWindow(QMainWindow):
         self.item_rules = PlayerItemRules(self.player_owner_id, self.inventory)
         self.item_drafts = None
         self.draft_dialog = None
-        self.inventory_dialog = None
+        self.inventory_page = None
+        self.transcript_page = None
+        self.help_page = None
         self.pending_room_action = None
         self.run_weapons = ()
         self.run_item_pool = ()
@@ -371,6 +377,7 @@ class GameWindow(QMainWindow):
         except InventoryError:
             return
         self.trace_action("item_acquired", entry=entry, offer_id=offer_id)
+        self.record_history(f"You kept {ITEM_CATALOGUE[entry.item_id].name}.")
         self.finish_item_offer()
 
     def skip_item_offer(self, offer_id):
@@ -379,6 +386,7 @@ class GameWindow(QMainWindow):
         except InventoryError:
             return
         self.trace_action("item_offer_skipped", offer_id=offer_id)
+        self.record_history("You left the items behind.")
         self.finish_item_offer()
 
     def reroll_item_offer(self, offer_id, slot):
@@ -387,6 +395,7 @@ class GameWindow(QMainWindow):
         except InventoryError:
             return
         self.trace_action("item_offer_rerolled", offer=offer, slot=slot)
+        self.record_history(f"You rerolled an item in the {offer.room_id}.")
         self.show_item_offer(offer)
 
     def finish_item_offer(self):
@@ -411,18 +420,31 @@ class GameWindow(QMainWindow):
             return
         self.inventory_button.setText(f"Inventory ({len(self.inventory.entries)})")
         self.inventory_button.setEnabled(self.can_use_items())
+        if (not self.can_use_items() and self.inventory_page is not None
+                and self.overlay_host.current_page is self.inventory_page):
+            self.overlay_host.close_page()
 
     def open_inventory(self):
         if not self.can_use_items():
             return
-        if self.inventory_dialog is not None:
-            self.inventory_dialog.close()
-            self.inventory_dialog.deleteLater()
+        current = self.overlay_host.current_page
+        if ((current is not None and current is not self.inventory_page)
+                or self.separate_surface_open()):
+            return
         targets = [(body.body_id, body.label) for body in self.body_states() if body.alive and body.is_npc]
-        self.inventory_dialog = InventoryDialog(self.inventory.entries, ITEM_CATALOGUE, targets,
-                                                self.can_use_items(), self.use_inventory_item,
-                                                readable_body_font(), self)
-        self.inventory_dialog.open()
+        page = InventoryPage(self.inventory.entries, ITEM_CATALOGUE, targets, self.use_inventory_item,
+                             can_use=self.can_use_items(), body_font=readable_body_font(),
+                             title_font=self.speaker_font)
+        self.inventory_page = page
+        help_text = "Keep items between nights. Use them while the discussion is waiting for you."
+        if current is not None:
+            opened = self.overlay_host.replace_page(page, title="Inventory", help_text=help_text)
+        else:
+            opened = self.open_overlay_page(page, "Inventory", help_text)
+        if not opened:
+            self.inventory_page = None
+            if current is not None:
+                page.deleteLater()
 
     def use_inventory_item(self, instance_id, target_body_id=None):
         if not self.can_use_items():
@@ -442,7 +464,7 @@ class GameWindow(QMainWindow):
         self.apply_item_events(events)
         self.update_inventory_button()
         self.trace_action("inventory_item_used", events=events)
-        if self.inventory_dialog is not None:
+        if self.inventory_page is not None:
             self.open_inventory()
         self.maybe_prepare_next_turn()
         return True
@@ -462,6 +484,9 @@ class GameWindow(QMainWindow):
                 self.queue_progress("banana_given")
             elif event.event_type == "item_used":
                 self.items_used += 1
+                item_name = ITEM_CATALOGUE[event.item_id].name
+                target = f" on {recipient}" if recipient is not None and recipient != self.player_name else ""
+                self.record_history(f"You used {item_name}{target}.")
 
     def resolve_death(self, label, attempt_id):
         target = next(body for body in self.body_states() if body.label == label)
@@ -500,7 +525,7 @@ class GameWindow(QMainWindow):
             self.room_assignments[room].append(old_body)
             attack.update(corpse_label=old_body, corpse_body_id=self.body_id(old_body))
             decision = self.resolve_death(old_body, attack["attack_id"])
-            self.transcript.append(f"You possessed the body of {target} in the {room} and left behind {old_body} as a corpse.")
+            self.record_history(f"You possessed the body of {target} in the {room} and left behind {old_body} as a corpse.")
             self.trace_action("identity_changed", previous_body=old_body, current_body=target)
         else:
             decision = self.resolve_death(target, attack["attack_id"])
@@ -510,7 +535,7 @@ class GameWindow(QMainWindow):
         self.victims_last_night.append(attack["corpse_label"])
         if room not in self.new_crime_scenes:
             self.new_crime_scenes.append(room)
-        self.append_output_text(f"You killed {attack['corpse_label']} in the {room}.")
+        self.record_history(f"You killed {attack['corpse_label']} in the {room}.", display=True)
         self.queue_progress("player_kill")
         self.trace_action("kill_resolved", victim=attack["corpse_label"], room=room, attack=attack)
         return True
@@ -592,18 +617,51 @@ class GameWindow(QMainWindow):
         self.trace.record("memory_added", {"character": character, "kind": kind,
                                           "round": self.round_number, "text": text})
 
+    def make_display_record(self, text, *, kind="event", speaker=None, speaker_id=None):
+        self.display_sequence += 1
+        return DisplayRecord(f"{self.run_id}:{self.display_sequence}", kind, text,
+                             speaker=speaker, speaker_id=speaker_id,
+                             round_number=self.round_number, phase=self.phase)
+
+    def record_history(self, text, *, kind="event", speaker=None, speaker_id=None, display=False):
+        """Record player-visible history separately from NPC memory and live status."""
+        record = self.make_display_record(text, kind=kind, speaker=speaker, speaker_id=speaker_id)
+        self.history_records.append(record)
+        self.history_record_added.emit(record)
+        if display:
+            self.message_log.append_record(record)
+        return record
+
     def append_output_text(self, text):
-        """Insert literal game text through an explicit rich-text boundary."""
-        content = escape(text).replace("\n", "<br>")
-        self.output_area.append(f"<p>{content}</p>")
+        """Display literal text without making temporary UI status permanent history."""
+        self.message_log.append_record(self.make_display_record(text))
+
+    def speaker_display_format(self, record):
+        result = QTextCharFormat()
+        if (record.speaker_id is not None and record.speaker != self.player_name
+                and self.characters.get(record.speaker, {}).get("alive", False)):
+            result.setAnchor(True)
+            result.setAnchorHref("npc:" + record.speaker_id)
+            result.setForeground(Qt.lightGray)
+            result.setFontUnderline(False)
+        return result
+
+    def overlay_page_closed(self, title):
+        if title == "Inventory":
+            self.inventory_page = None
+        elif title == "Transcript":
+            self.transcript_page = None
+        elif title == "How to Play":
+            self.help_page = None
 
     def add_public_event(self, text, source="Detective", display=True):
         self.invalidate_prepared_turn("public_event", changed=True)
         self.public_events.append(MemoryRecord(self.round_number, "public_event", text, source))
         self.trace.record("public_event", {"source": source, "round": self.round_number, "text": text})
-        self.transcript.append(text)
+        record = self.record_history(text)
+        self.public_event_display_records.append(record)
         if display and self.phase in ("conversation", "voting"):
-            self.append_output_text(text)
+            self.message_log.append_record(record)
 
     def public_state(self):
         alive = {char for char, data in self.characters.items() if data["alive"]}
@@ -638,16 +696,11 @@ class GameWindow(QMainWindow):
         message = f"{speaker}: {speech}"
         self.current_conversation.append(message)
         self.most_recent_messageS.append(message)
-        self.transcript.append(message)
-        name_style = f'font-family: "{escape(self.pixel_font_family, quote=True)}"; font-size: 12px;'
-        name = escape(speaker)
-        if self.characters.get(speaker, {}).get("alive", False) and speaker != self.player_name:
-            name = f'<a href="npc:{self.body_id(speaker)}" style="color: #E0E0E0; text-decoration: none;">{name}</a>'
-        self.output_area.append(f"<p><span style='{name_style}'><strong>{name}:</strong></span><br>{escape(speech)}</p><br>")
+        speaker_id = self.body_id(speaker) if speaker in self.characters or speaker == self.player_name else None
+        self.record_history(speech, kind="speech", speaker=speaker, speaker_id=speaker_id, display=True)
         if ordinary_npc:
             self.direct_replies.committed(self.body_id(speaker), direct=direct_reply)
         self.refresh_recipient_choices()
-        self.output_area.ensureCursorVisible()
         if speaker == "Detective" or speaker in self.characters:
             self.play_sound_effect(f"sounds/voices/{speaker}.mp3")
         return True
@@ -780,6 +833,7 @@ class GameWindow(QMainWindow):
         if not restarting:
             self.save_player_name_preference()
         self.game_over = True
+        self.overlay_host.cancel_owner()
         self.invalidate_prepared_turn("closed", changed=True)
         self.cancel_dictation()
         self.dictation_recorder.close()
@@ -809,7 +863,18 @@ class GameWindow(QMainWindow):
         self.output_area.speaker_chosen.connect(self.choose_speaker_recipient)
         self.output_area.setReadOnly(True)
         self.output_area.document().setDefaultFont(body_font)
-        self.output_area.hide()  # Hide until game starts
+        self.speaker_font = QFont(font_family)
+        self.speaker_font.setPixelSize(12)
+        self.message_log = MessageLog(self.output_area, body_font=body_font,
+                                      speaker_font=self.speaker_font, name_format=self.speaker_display_format)
+        self.message_log.hide()
+        self.overlay_host = OverlayHost(self, body_font=body_font, title_font=self.speaker_font)
+        self.overlay_host.setStyleSheet("QDialog#gameOverlayHost { background: #2A2A2A; border: 3px solid white; } "
+                                       "QLabel { color: #E0E0E0; } "
+                                       "QToolButton { color: white; background: #333; border: 1px solid #777; padding: 8px; } "
+                                       "QToolButton:hover, QToolButton:focus { background: #444; border-color: white; }")
+        self.overlay_host.page_closed.connect(self.overlay_page_closed)
+        self.overlay_host.unlock_failed.connect(self.show_profile_error)
 
 
 
@@ -1202,7 +1267,7 @@ class GameWindow(QMainWindow):
         #self.layout.addWidget(self.top_right_widget)
         self.layout.addWidget(self.menu_widget, 1)
         self.layout.addWidget(self.room_buttons_widget)
-        self.layout.addWidget(self.output_area)
+        self.layout.addWidget(self.message_log)
         self.layout.addWidget(self.secondary_output_area)
         self.inventory_button = QPushButton("Inventory (0)")
         self.inventory_button.setFont(body_font)
@@ -1293,7 +1358,6 @@ class GameWindow(QMainWindow):
         self.how_to_play_button.show()
         self.how_to_play_button.raise_()
         self.transcript_button.hide()
-        self.transcript = []
 
         self.mute_button = QPushButton(self)
         self.update_mute_button_icon()
@@ -1555,7 +1619,7 @@ class GameWindow(QMainWindow):
 
         # Show room buttons and output area
         self.room_buttons_widget.show()
-        self.output_area.show()
+        self.message_log.show()
 
         # Initialize characters
         self.characters = {
@@ -1595,7 +1659,7 @@ class GameWindow(QMainWindow):
         self.menu_widget.hide()
         self.npc_equipment_label.show()
         self.mute_button.hide()
-        self.output_area.hide() 
+        self.message_log.hide()
         self.room_buttons_widget.hide()
         # Clear previous (if restarting)
         while self.weapon_grid.count():
@@ -1695,7 +1759,7 @@ class GameWindow(QMainWindow):
         self.inventory_button.show()
         self.selected_weapon = weapon
         self.trace_action("weapon_selected", weapon_id=weapon["id"])
-        self.append_output_text(f"\nSelected weapon: {weapon['name']}\n")
+        self.record_history(f"Selected weapon: {weapon['name']}")
         self.weapon_scroll.hide()
         self.npc_equipment_label.hide()
 
@@ -1706,27 +1770,37 @@ class GameWindow(QMainWindow):
             self.voodoo_current_identity = None
 
         # proceed into the normal loop
-        self.output_area.show()
+        self.message_log.show()
         self.room_buttons_widget.show() 
         self.run_action_phase()
 
     def show_how_to_play(self):
-        font_id = QFontDatabase.addApplicationFont(resource_path("fonts/PressStart2P-Regular.ttf"))
-        font_families = QFontDatabase.applicationFontFamilies(font_id)
-        font_family = font_families[0] if font_families else "Sans-Serif"
-
-        # Create the 'How to Play' window
-        self.how_to_play_window = HowToPlayWindow(font_family)
-        self.how_to_play_window.show()
+        if self.overlay_host.current_page is not None or self.separate_surface_open():
+            return
+        page = HowToPlayPage()
+        if self.open_overlay_page(page, "How to Play"):
+            self.help_page = page
 
     def show_transcript(self):
-        font_id = QFontDatabase.addApplicationFont(resource_path("fonts/PressStart2P-Regular.ttf"))
-        font_families = QFontDatabase.applicationFontFamilies(font_id)
-        font_family = font_families[0] if font_families else "Sans-Serif"
+        if self.overlay_host.current_page is not None or self.separate_surface_open():
+            return
+        page = MessageLog(QTextEdit(), body_font=readable_body_font(), speaker_font=self.speaker_font)
+        page.editor.setStyleSheet(self.output_area.styleSheet())
+        page.set_records(self.history_records)
+        if self.open_overlay_page(page, "Transcript"):
+            self.transcript_page = page
+            self.history_record_added.connect(page.append_record)
 
-        # Create the custom transcript window
-        self.transcript_window = TranscriptWindow(self.transcript, font_family)
-        self.transcript_window.show()
+    def open_overlay_page(self, page, title, help_text=""):
+        fit_window_to_screen(self.overlay_host, 800, 700)
+        if not self.separate_surface_open() and self.overlay_host.open_page(page, title=title, help_text=help_text):
+            return True
+        page.deleteLater()
+        return False
+
+    def separate_surface_open(self):
+        surfaces = (*self._weapon_windows.values(), self.draft_dialog, self._esc_overlay)
+        return any(surface is not None and surface.isVisible() for surface in surfaces)
 
     def build_weapon_action_panel(self):
         """Right-side card for the currently equipped weapon during Action Phase."""
@@ -1967,14 +2041,14 @@ class GameWindow(QMainWindow):
         self.media_player.stop()
         self.effect_player.setVolume(25)
         self.play_sound_effect("sounds/start_button.mp3")
-        self.output_area.clear()
+        self.message_log.clear()
         self.round_number += 1
         self.night_attacks = []
         self._night_memories_written = False
         self.apply_item_events(self.item_rules.begin_night(self.round_number, self.body_states()))
         self.update_inventory_button()
         self.append_output_text(f"Action Phase {self.round_number} begins!\n")
-        self.transcript.append(f"Action Phase {self.round_number}:\n")
+        self.record_history(f"Night {self.round_number}", kind="section")
 
         # Room assignments for each character
         self.room_assignments = {room: [] for room in self.rooms}
@@ -2022,7 +2096,7 @@ class GameWindow(QMainWindow):
             
             assignments_output = "\n \n ".join(formatted_assignments)
             self.append_output_text(f"Room Assignments; \n \n {assignments_output} \n")
-            self.transcript.append(f"Room Assignments; \n \n {assignments_output} \n")
+            self.record_history(f"Room Assignments; \n \n {assignments_output} \n")
 
         # Ask the player to choose a room
         self.append_output_text("Choose a room by clicking one of the buttons.")
@@ -2058,8 +2132,7 @@ class GameWindow(QMainWindow):
                 or self.room_buttons_widget.isHidden()
                 or not self.room_buttons[selected_room].isEnabled()):
             return
-        #self.remove_last_message()
-        self.append_output_text(f"\nYou have chosen to stay in the {selected_room}.\n")
+        self.record_history(f"\nYou have chosen to stay in the {selected_room}.\n", display=True)
         occupants = self.room_assignments[selected_room]
 
         self.rooms_visited.append(selected_room)
@@ -2128,7 +2201,7 @@ class GameWindow(QMainWindow):
                     self.trace_action("explosion_resolved", room=target_room, victims=[])
                     self.update_witness_memories(None)
                 # No witnesses for blast; go to convo
-                self.transcript.append(f"You blew up the {target_room}.")
+                self.record_history(f"You blew up the {target_room}.")
                 return self.run_conversation_phase()
 
             if wpn_id == "blackmagic":
@@ -2295,7 +2368,7 @@ class GameWindow(QMainWindow):
                     self.remember(observer, "experience", f"You ({observer}) spent the night alone in the {room}.")
 
         if (self.selected_weapon or {}).get("id") == "love":
-            self.transcript.append(f"You brewed a storm of passion in the {self.rooms_visited[-1]}.")
+            self.record_history(f"You brewed a storm of passion in the {self.rooms_visited[-1]}.")
             occupants = self.room_assignments.get(self.rooms_visited[-1], [])
             for occupant in occupants:
                 if not self.characters[occupant]["alive"]:
@@ -2704,7 +2777,7 @@ class GameWindow(QMainWindow):
         if not self.can_call_vote():
             return
         self.cancel_dictation()
-        self.output_area.clear()
+        self.message_log.clear()
         self.append_output_text("Vote called!\n")
         self.trace_action("vote_called")
         # self.pass_button.hide()
@@ -2803,12 +2876,12 @@ class GameWindow(QMainWindow):
         )
         if selected_character != "NONE":
             self.append_output_text(f"You voted for {selected_character}.\n")
-            self.transcript.append(f"Voting Phase {self.round_number} results: \n")
-            self.transcript.append(f"You voted for {selected_character}.\n")
+            self.record_history(f"Vote {self.round_number}", kind="section")
+            self.record_history(f"You voted for {selected_character}.\n")
         else:
             self.append_output_text(f"You voted to skip.\n")
-            self.transcript.append(f"Voting Phase {self.round_number} results: \n")
-            self.transcript.append(f"You voted to skip.\n")           
+            self.record_history(f"Vote {self.round_number}", kind="section")
+            self.record_history(f"You voted to skip.\n")
         self.votes[self.player_name] = selected_character
         self.trace.record("ballot_received", {"voter": self.player_name, "target": selected_character,
                                              "round": self.round_number, "source": "player"})
@@ -2846,9 +2919,7 @@ class GameWindow(QMainWindow):
                 message = f"{character} voted to skip.\n"
             else:
                 message = f"{character} voted for {self.votes[character]}.\n"
-            self.append_output_text(message)
-            self.transcript.append(message)
-            self.public_events.append(MemoryRecord(self.round_number, "public_event", message, "Voting"))
+            self.add_public_event(message, "Voting")
 
         result = self.item_rules.resolve_vote(self.vote_id, {
             self.body_ids[voter]: self.body_ids[target] if target != "NONE" else "NONE"
@@ -2882,7 +2953,6 @@ class GameWindow(QMainWindow):
             if not self.check_victory():
                 self.add_continue_button()
 
-        self.transcript.append("\n\n\n")
         self.trace_action("vote_resolved", ballots=dict(self.votes), vote_id=self.vote_id,
                           weighted_counts=dict(result.counts), outcome=result.outcome)
 
@@ -2917,7 +2987,7 @@ class GameWindow(QMainWindow):
         self.continue_button.hide()
 
         # Clear the output area if desired (optional)
-        self.output_area.clear()
+        self.message_log.clear()
 
         # Move to the next action phase
         self.run_action_phase()
@@ -2973,7 +3043,7 @@ class GameWindow(QMainWindow):
 
         # Append the final score and display the "Play Again" button
         message += f"Final Score: {final_score}/5\n"
-        self.append_output_text(message)
+        self.record_history(message, display=True)
         # Create a layout for the game over screen
         #game_over_layout = QVBoxLayout()
 
@@ -3026,7 +3096,7 @@ class GameWindow(QMainWindow):
         play_again_layout = QVBoxLayout()
 
         # Add the output area to the layout to keep it visible
-        play_again_layout.addWidget(self.output_area)
+        play_again_layout.addWidget(self.message_log)
 
         # Add a spacer to push the button to the bottom
         play_again_layout.addStretch()
@@ -3051,6 +3121,7 @@ class GameWindow(QMainWindow):
         self.game_over = True
         self.invalidate_prepared_turn("restarting", changed=True)
         self.phase = "restarting"
+        self.overlay_host.cancel_owner()
         self.cancel_dictation()
         # Close the ESC overlay if it’s open
         if self._esc_overlay and self._esc_overlay.isVisible():
@@ -3127,14 +3198,14 @@ class GameWindow(QMainWindow):
         self.effect_player.setVolume(50)
         self.transcript_button.show()
         self.transcript_button.raise_()
-        self.output_area.clear()
+        self.message_log.clear()
         self.npc_items.present_morning(
             self.round_number,
             lambda description: self.add_public_event(description, source="Photograph", display=False),
         )
-        for event in self.public_events:
-            if event.round_number == self.round_number:
-                self.append_output_text(event.text)
+        for record in self.public_event_display_records:
+            if record.round_number == self.round_number:
+                self.message_log.append_record(record)
         if self.check_victory():
             return
         self.append_output_text(f"Conversation Phase {self.round_number} begins!\n")
@@ -3256,19 +3327,6 @@ class GameWindow(QMainWindow):
         self.append_speech(speaker, best_response.speech, best_response.addressee)
         self.run_conversation_loop()
 
-    def remove_last_message(self):
-        # Move the cursor to the end
-        cursor = self.output_area.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        
-        # Move the cursor to the beginning of the last block (last paragraph)
-        cursor.movePosition(QTextCursor.PreviousBlock, QTextCursor.KeepAnchor)
-        
-        # Remove the selected block (last message)
-        cursor.removeSelectedText()
-        
-        # Optionally, remove the newline left over from the previous message
-        cursor.deletePreviousChar()
 
     # Weapon-specific windows
     def open_pen_editor(self):
@@ -3672,6 +3730,9 @@ class GameWindow(QMainWindow):
         super().keyPressEvent(e)
 
     def open_escape_menu(self):
+        if self.overlay_host.current_page is not None:
+            self.overlay_host.close_page()
+            return
         # If already open, bring to front
         if self._esc_overlay and self._esc_overlay.isVisible():
             self._esc_overlay.close()
@@ -3816,225 +3877,60 @@ class GameWindow(QMainWindow):
 
 
 
-class TranscriptWindow(QWidget):
-    def __init__(self, transcript, font_family, parent=None):
+class HowToPlayPage(QWidget):
+    """Guide content for the game's shared overlay, without separate window chrome."""
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-
-        # Store the transcript for the text area
-        self.transcript = transcript
-
-        # Set up the window without native decorations
-        self.setWindowFlags(Qt.FramelessWindowHint)
-        self.setStyleSheet(f"background-color: #3A3A3A;")
-
-        # Create a vertical layout
         layout = QVBoxLayout(self)
-
-        # Create custom header with a title and close button
-        header = QWidget()
-        header_layout = QHBoxLayout()
-        header.setLayout(header_layout)
-        header.setStyleSheet("background-color: #2E2E2E; padding: 5px; border: 3px solid white;")
-
-        title = QLabel("Transcript")
-        title.setStyleSheet(f"color: #FFFFFF; font-family: {font_family}; font-size: 20px;")
-        title.setAlignment(Qt.AlignCenter)
-
-        # Close button
-        close_button = QPushButton("X")
-        close_button.setFixedSize(30, 30)
-        close_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: #E74C3C;
-                color: white;
-                font-family: {font_family};
-                font-size: 16px;
-                border-radius: 5px;
-            }}
-            QPushButton:hover {{
-                background-color: #C0392B;  /* Darker red on hover */
-            }}
-        """)
-        close_button.clicked.connect(self.close)
-
-        # Add title and close button to the header
-        header_layout.addWidget(title, alignment=Qt.AlignLeft)
-        header_layout.addStretch(1)  # Push close button to the right
-        header_layout.addWidget(close_button, alignment=Qt.AlignRight)
-
-        # Add the header to the main layout
-        layout.addWidget(header)
-
-        # Create the transcript text area
-        transcript_area = QTextEdit()
-        transcript_area.setReadOnly(True)
-        body_font = readable_body_font()
-        transcript_area.document().setDefaultFont(body_font)
-        transcript_area.setPlainText("\n".join(self.transcript))
-        transcript_area.setStyleSheet(f'background-color: #1E1E1E; color: #E0E0E0; border: 1px solid white; font-family: "{body_font.family()}"; font-size: 18px; padding: 16px;')
-        layout.addWidget(transcript_area)
-
-        cursor = transcript_area.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        transcript_area.setTextCursor(cursor)
-
-        self.adjust_window_size()
-
-        # Make window resizable
-        self.setLayout(layout)
-        fit_window_to_screen(self, 700, self.dynamic_height)
-
-        # Variables for dragging the window
-        self.old_pos = None
-
-    def adjust_window_size(self):
-        line_count = len(self.transcript)
-        line_height = 100  # Approximate line height, can be adjusted based on font size
-        min_height = 200  # Minimum window height
-        max_height = 900  # Maximum window height
-
-        self.dynamic_height = min(max_height, max(min_height, line_count * line_height + 100))  # +100 for header and padding
-
-    # Override mousePressEvent for dragging
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.old_pos = event.globalPos()
-
-    # Override mouseMoveEvent to update window position during dragging
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.LeftButton and self.old_pos:
-            delta = QPoint(event.globalPos() - self.old_pos)
-            self.move(self.x() + delta.x(), self.y() + delta.y())
-            self.old_pos = event.globalPos()
-
-class HowToPlayWindow(QWidget):
-    def __init__(self, font_family, parent=None):
-        super().__init__(parent)
-
-        # Set up the window without native decorations
-        self.setWindowFlags(Qt.FramelessWindowHint)
-        self.setStyleSheet(f"background-color: #2A2A2A;")
-
-        # Create a vertical layout
-        layout = QVBoxLayout(self)
-
-        # Create custom header with a title, minimize, and close buttons
-        header = QWidget()
-        header_layout = QHBoxLayout()
-        header.setLayout(header_layout)
-        header.setStyleSheet("background-color: #2E2E2E; padding: 5px; border: 3px solid white;")
-
-        title = QLabel("How to Play")
-        title.setStyleSheet(f"color: #FFFFFF; font-family: {font_family}; font-size: 20px;")
-        title.setAlignment(Qt.AlignCenter)
-
-        # Minimize button
-        minimize_button = QPushButton("-")
-        minimize_button.setFixedSize(30, 30)
-        minimize_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: #FFA500;  /* Orange color */
-                color: white;
-                font-family: {font_family};
-                font-size: 16px;
-                border-radius: 5px;
-            }}
-            QPushButton:hover {{
-                background-color: #FF8C00;  /* Darker orange on hover */
-            }}
-        """)
-        minimize_button.clicked.connect(self.showMinimized)
-
-        # Close button
-        close_button = QPushButton("X")
-        close_button.setFixedSize(30, 30)
-        close_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: #E74C3C;
-                color: white;
-                font-family: {font_family};
-                font-size: 16px;
-                border-radius: 5px;
-            }}
-            QPushButton:hover {{
-                background-color: #C0392B;  /* Darker red on hover */
-            }}
-        """)
-        close_button.clicked.connect(self.close)
-
-        # Add title, minimize, and close buttons to the header
-        header_layout.addWidget(title, alignment=Qt.AlignLeft)
-        header_layout.addStretch(1)  # Push buttons to the right
-        header_layout.addWidget(minimize_button, alignment=Qt.AlignRight)
-        header_layout.addWidget(close_button, alignment=Qt.AlignRight)
-
-        # Add the header to the main layout
-        layout.addWidget(header)
-
-        # Create the how-to-play text area
-        how_to_play_area = QTextEdit()
-        how_to_play_area.setReadOnly(True)
-        body_font = readable_body_font()
-        how_to_play_area.document().setDefaultFont(body_font)
-        how_to_play_area.setPlainText(
-            "You are the killer. Survive the group's suspicions until only one other suspect remains.\n\n"
-            "Before your run\n"
-            "Choose a weapon. Locked weapons show exactly how to unlock them. New unlocks become available on your next run. "
-            "Your room-item pool always includes Banana of Friendship, Muffle and Spare Paper. "
-            "Open Items on the main menu to view the catalogue and switch unlocked optional items off before your next run.\n\n"
-            "At night\n"
-            "Choose a room. With ordinary weapons, one occupant means a kill; with two, choose your victim. "
-            "An empty room means trying another room. Crime scenes close for later nights. "
-            "Other weapons have their own actions, explained on their cards. Normal mode shows room assignments; Hard mode hides them.\n\n"
-            "Room finds and inventory\n"
-            "The first time you enter each room during a run, choose one of three items or leave them all behind. "
-            "Choosing or leaving is permanent. If your pool contains an alternative, you may reroll one slot once per run. "
-            "Keep your items for as long as you like, including the final discussion. "
-            "The Knife's second attack enters its target's room; a distant C4 explosion does not.\n\n"
-            "During discussion\n"
-            "Listen, pass, or interject with your own alibi. When someone directly addresses you, reply before passing or calling a vote. "
-            "Choose To: Group or a living suspect; you can also select a suspect by clicking their name. "
-            "A direct question gets that suspect's reply. After three direct replies from the same suspect, another suspect must speak before you can directly ask them again. Group remains available. "
-            "In the message box, Record voice starts the microphone; Stop recording transcribes into your draft. "
-            "You can keep typing, edit the result, or Cancel. Nothing is spoken until you choose Say. "
-            "Use Inventory while the conversation is waiting for you. Items do not send or erase the words you are composing. "
-            "A banana leaves a friendly impression. Muffle prevents a suspect from speaking clearly until the next night, but they can still vote. "
-            "Spare Paper adds two extra copies of your next ballot; multiple copies stack. "
-            "An armed Guardian Angel prevents your next death once, including an execution, and follows you through possession.\n\n"
-            "Evidence\n"
-            "Visible equipment is listed before the run and each night. A camera photograph is a genuine still image "
-            "taken before your night action, rather than proof of where someone stayed throughout the night.\n\n"
-            "Voting\n"
-            "After enough discussion, Call Vote becomes available. Choose another living suspect or abstain. "
-            "The highest weighted vote wins; a tie or an abstention winning means no execution. "
-            "Ballot results are public. Surviving a vote can unlock more options for your next run.\n\n"
-            "Use Transcript to revisit the conversation. You can minimise or Alt + Tab to keep this guide nearby."
+        self.text_area = QTextEdit()
+        self.text_area.setReadOnly(True)
+        self.text_area.document().setDefaultFont(readable_body_font())
+        self.text_area.setPlainText(
+            "You are the killer. Survive the group's suspicions until only one other suspect remains."
+            '\n\n'
+            'Before your run\nChoose a weapon. Locked weapons show exactly how to unlock them. New unlocks become '
+            'available on your next run. Your room-item pool always includes Banana of Friendship, Muffle and '
+            'Spare Paper. Open Items on the main menu to view the catalogue and switch unlocked optional items '
+            'off before your next run.'
+            '\n\n'
+            'At night\nChoose a room. With ordinary weapons, one occupant means a kill; with two, choose your '
+            'victim. An empty room means trying another room. Crime scenes close for later nights. Other weapons '
+            'have their own actions, explained on their cards. Normal mode shows room assignments; Hard mode '
+            'hides them.'
+            '\n\n'
+            'Room finds and inventory\nThe first time you enter each room during a run, choose one of three items '
+            'or leave them all behind. Choosing or leaving is permanent. If your pool contains an alternative, '
+            'you may reroll one slot once per run. Keep your items for as long as you like, including the final '
+            "discussion. The Knife's second attack enters its target's room; a distant C4 explosion does not."
+            '\n\n'
+            'During discussion\nListen, pass, or interject with your own alibi. When someone directly addresses '
+            'you, reply before passing or calling a vote. Choose To: Group or a living suspect; you can also '
+            "select a suspect by clicking their name. A direct question gets that suspect's reply. After three "
+            'direct replies from the same suspect, another suspect must speak before you can directly ask them '
+            'again. Group remains available. In the message box, Record voice starts the microphone; Stop '
+            'recording transcribes into your draft. You can keep typing, edit the result, or Cancel. Nothing is '
+            'spoken until you choose Say. Use Inventory while the conversation is waiting for you. Items do not '
+            'send or erase the words you are composing. A banana leaves a friendly impression. Muffle prevents a '
+            'suspect from speaking clearly until the next night, but they can still vote. Spare Paper adds two '
+            'extra copies of your next ballot; multiple copies stack. An armed Guardian Angel prevents your next '
+            'death once, including an execution, and follows you through possession.'
+            '\n\n'
+            'Evidence\nVisible equipment is listed before the run and each night. A camera photograph is a genuine'
+            ' still image taken before your night action, rather than proof of where someone stayed throughout '
+            'the night.'
+            '\n\n'
+            'Voting\nAfter enough discussion, Call Vote becomes available. Choose another living suspect or '
+            'abstain. The highest weighted vote wins; a tie or an abstention winning means no execution. Ballot '
+            'results are public. Surviving a vote can unlock more options for your next run.'
+            '\n\n'
+            'Use Transcript to revisit the conversation. Close this guide to return to the game.'
         )
-        how_to_play_area.setStyleSheet(f'background-color: #1E1E1E; color: #E0E0E0; border: 1px solid white; font-family: "{body_font.family()}"; font-size: 18px; padding: 16px;')
-        layout.addWidget(how_to_play_area)
-
-        cursor = how_to_play_area.textCursor()
+        self.text_area.setStyleSheet(f'background-color: #1E1E1E; color: #E0E0E0; border: 1px solid #777; font-family: "{readable_body_font().family()}"; font-size: 18px; padding: 16px;')
+        layout.addWidget(self.text_area)
+        cursor = self.text_area.textCursor()
         cursor.movePosition(QTextCursor.Start)
-        how_to_play_area.setTextCursor(cursor)
-
-        # Set the fixed size for the window
-        self.setLayout(layout)
-        fit_window_to_screen(self, 1100, 800)
-
-        # Variables for dragging the window
-        self.old_pos = None
-
-    # Override mousePressEvent for dragging
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.old_pos = event.globalPos()
-
-    # Override mouseMoveEvent to update window position during dragging
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.LeftButton and self.old_pos:
-            delta = QPoint(event.globalPos() - self.old_pos)
-            self.move(self.x() + delta.x(), self.y() + delta.y())
-            self.old_pos = event.globalPos()
+        self.text_area.setTextCursor(cursor)
 
 
 if __name__ == '__main__':

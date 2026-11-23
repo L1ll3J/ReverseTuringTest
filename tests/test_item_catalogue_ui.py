@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton, QWidge
 
 from content import UNLOCK_GOALS
 from item_catalogue_ui import ItemCataloguePanel
-from item_ui import InventoryDialog, ItemDraftDialog
+from item_ui import InventoryPage, ItemDraftDialog
 from items import ITEM_CATALOGUE, DraftOffer, InventoryEntry
 from progression import ProfileError, ProfileSnapshot
 
@@ -137,8 +137,8 @@ class ItemCatalogueTests(unittest.TestCase):
                 offer = DraftOffer("offer", "Kitchen", ("banana", "muffle", "spare_paper"))
                 draft = ItemDraftDialog(offer, ITEM_CATALOGUE, 1, True,
                                         choose, reroll, skip, self.font, self.parent)
-                inventory = InventoryDialog((InventoryEntry("instance", "banana"),), ITEM_CATALOGUE,
-                                            (("body", "Dave"),), True, use, self.font, self.parent)
+                inventory = InventoryPage((InventoryEntry("instance", "banana"),), ITEM_CATALOGUE,
+                                          (("body", "Dave"),), use, body_font=self.font, parent=self.parent)
                 for dialog, expected_count in ((draft, 3), (inventory, 1)):
                     sprites = [label for label in dialog.findChildren(QLabel)
                                if label.objectName().startswith("itemIcon_")]

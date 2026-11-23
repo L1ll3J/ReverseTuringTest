@@ -395,8 +395,7 @@ class DictationIntegrationTests(unittest.TestCase):
         self.assertEqual([layout.itemAt(i).widget() for i in range(layout.count())],
                          [self.window.pass_button, self.window.interject_button, self.window.vote_button])
         self.window.show_how_to_play()
-        help_window = self.window.how_to_play_window
-        self.addCleanup(help_window.close)
+        help_window = self.window.help_page
         self.assertIn("Nothing is spoken until you choose Say", help_window.findChild(QTextEdit).toPlainText())
 
     def test_input_length_limit_preserves_existing_draft_without_partial_insertion(self):

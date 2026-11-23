@@ -393,7 +393,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.window.add_public_event(literal)
         self.assertEqual(self.window.output_area.toPlainText(), literal)
         self.assertEqual(self.window.public_events[-1].text, literal)
-        self.assertEqual(self.window.transcript[-1], literal)
+        self.assertEqual(self.window.history_records[-1].text, literal)
 
     def test_name_preference_uses_literal_field_not_current_body(self):
         literal = "  JoSH O'Connor \u03a9  "
@@ -468,7 +468,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(document.defaultFont().pixelSize(), 18)
         self.assertEqual(self.window.interject_input.font().family(), body_font.family())
         self.assertEqual(self.window.interject_input.font().pixelSize(), 18)
-        speaker_format = document.find("Dave:").charFormat()
+        speaker_format = document.find("Dave").charFormat()
         self.assertEqual(speaker_format.fontFamily(), self.window.pixel_font_family)
         self.assertEqual(speaker_format.font().pixelSize(), 12)
         body_format = document.find("A readable").charFormat()
@@ -482,34 +482,24 @@ class RuntimeRegressionTests(unittest.TestCase):
                           for i in range(3)], ["Pass", "Interject", "Call Vote"])
 
     def test_help_and_transcript_are_readable_and_fit_the_available_screen(self):
-        windows = [game.HowToPlayWindow(self.window.pixel_font_family),
-                   game.TranscriptWindow(["Dave: A <b>literal</b> account."], self.window.pixel_font_family)]
-        try:
-            for window in windows:
-                window.show()
+        self.window.append_speech("Dave", "A <b>literal</b> account.")
+        for open_page in (self.window.show_how_to_play, self.window.show_transcript):
+            open_page()
             self.app.processEvents()
-            for window in windows:
-                with self.subTest(window=type(window).__name__):
-                    self.assertTrue(window.screen().availableGeometry().contains(window.geometry()))
-                    body = window.findChild(QTextEdit)
-                    self.assertEqual(body.document().defaultFont().family(), game.readable_body_font().family())
-                    self.assertEqual(body.document().defaultFont().pixelSize(), 18)
-                    first_word = body.toPlainText().split()[0]
-                    body_format = body.document().find(first_word).charFormat()
-                    resolved_body = QFontInfo(body_format.font().resolve(body.document().defaultFont())).family()
-                    self.assertNotEqual(resolved_body, QFontInfo(QFont(self.window.pixel_font_family)).family())
-                    self.assertTrue(any(label.font().family() == self.window.pixel_font_family
-                                        for label in window.findChildren(QLabel)))
-            help_body = windows[0].findChild(QTextEdit)
-            self.assertEqual(help_body.textCursor().position(), 0)
-            self.assertNotIn("hallucinate", help_body.toPlainText())
-            self.assertNotIn("capitalize", help_body.toPlainText())
-            self.assertNotIn("\n\n\n", help_body.toPlainText())
-            self.assertEqual(windows[1].findChild(QTextEdit).toPlainText(), "Dave: A <b>literal</b> account.")
-        finally:
-            for window in windows:
-                window.close()
-                window.deleteLater()
+            host = self.window.overlay_host
+            self.assertTrue(host.screen().availableGeometry().contains(host.geometry()))
+            body = host.current_page.findChild(QTextEdit)
+            self.assertEqual(body.document().defaultFont().family(), game.readable_body_font().family())
+            self.assertEqual(body.document().defaultFont().pixelSize(), 18)
+            self.assertEqual(host.title_label.font().family(), self.window.pixel_font_family)
+            if host.current_title == "How to Play":
+                self.assertEqual(body.textCursor().position(), 0)
+                self.assertNotIn("hallucinate", body.toPlainText())
+                self.assertNotIn("capitalize", body.toPlainText())
+                self.assertNotIn("\n\n\n", body.toPlainText())
+            else:
+                self.assertEqual(body.toPlainText(), "Dave\nA <b>literal</b> account.")
+            host.close_page()
 
     def test_escape_menu_timer_runs_and_menu_closes(self):
         QTest.keyClick(self.window, Qt.Key_Escape)

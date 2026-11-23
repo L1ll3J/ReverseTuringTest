@@ -64,8 +64,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.app.processEvents()
         if self.window.draft_dialog:
             self.window.draft_dialog.resolve()
-        if self.window.inventory_dialog:
-            self.window.inventory_dialog.close()
+        self.window.overlay_host.close_page()
         self.window.close()
         self.window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
@@ -140,11 +139,14 @@ class ItemIntegrationTests(unittest.TestCase):
         self.conversation()
         self.window.open_inventory()
         self.app.processEvents()
+        descriptions = [label for label in self.window.inventory_page.findChildren(QLabel)
+                        if label.objectName().startswith("inventoryDescription_")]
+        self.assertTrue(descriptions)
         self.assertTrue(all(QFontInfo(label.font()).family() != self.window.pixel_font_family
-                            for label in self.window.inventory_dialog.findChildren(QLabel)))
+                            for label in descriptions))
 
     def test_how_to_play_covers_current_items_progression_and_evidence(self):
-        guide = game.HowToPlayWindow(self.window.pixel_font_family, self.window)
+        guide = game.HowToPlayPage(self.window)
         text = guide.findChild(QTextEdit).toPlainText()
         for feature in ("three items", "Inventory", "Muffle", "Spare Paper", "Guardian Angel", "next run", "photograph"):
             self.assertIn(feature, text)

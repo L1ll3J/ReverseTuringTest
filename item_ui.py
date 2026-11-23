@@ -3,11 +3,11 @@
 from pathlib import Path
 import sys
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtCore import QPoint, Qt
+from PyQt5.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QPixmap, QPolygon
 from PyQt5.QtWidgets import (
     QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QScrollArea, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
 )
 
 
@@ -78,52 +78,160 @@ class ItemDraftDialog(QDialog):
             self._skip()
 
 
-class InventoryDialog(QDialog):
-    def __init__(self, entries, definitions, targets, can_use, use, body_font, parent=None):
+class _TargetComboBox(QComboBox):
+    """Keep native combo-box behavior with a contrasting game-style chevron."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        arrow = self.style().subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxArrow, self)
+        center = arrow.center()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setPen(QPen(QColor("#e0e0e0" if self.isEnabled() else "#777777"), 2))
+        painter.drawPolyline(QPolygon((QPoint(center.x() - 4, center.y() - 2),
+                                       QPoint(center.x(), center.y() + 2),
+                                       QPoint(center.x() + 4, center.y() - 2))))
+        painter.end()
+
+
+class InventoryPage(QWidget):
+    """Inventory content for the game's existing overlay, with no dialog of its own.
+
+    Entries and eligible targets are caller-owned snapshots. The caller also
+    applies item effects and replaces this page after a successful use.
+    """
+
+    def __init__(self, entries, definitions, targets, on_use, *, can_use=True,
+                 body_font=None, title_font=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Inventory")
-        self.setFont(body_font)
-        self.setStyleSheet(f'QWidget {{ font-family: "{body_font.family()}"; font-size: 18px; }} QPushButton:disabled {{ color: #777; }}')
-        self.setMinimumSize(500, 300)
-        screen = self.screen().availableGeometry()
-        self.resize(min(640, int(screen.width() * 0.85)), min(600, int(screen.height() * 0.85)))
+        if not callable(on_use):
+            raise TypeError("Inventory use requires a callback")
+        self.setObjectName("inventoryPage")
+        self.setAccessibleName("Inventory items")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self._body_font = QFont(body_font if body_font is not None else
+                                QFontDatabase.systemFont(QFontDatabase.GeneralFont))
+        if body_font is None:
+            self._body_font.setPixelSize(18)
+        self._title_font = QFont(title_font if title_font is not None else self._body_font)
+        if title_font is None:
+            self._title_font.setBold(True)
+        self.setFont(self._body_font)
+        self.setStyleSheet('''
+            QWidget#inventoryPage { background: #1e1e1e; color: #e0e0e0; }
+            QFrame#inventoryCard { background: #252525; border: 1px solid #555; }
+            QWidget#inventoryContents { background: transparent; }
+            QWidget#inventoryPage QLabel { color: #e0e0e0; background: transparent; border: none; }
+            QWidget#inventoryPage QScrollArea { background: transparent; border: none; }
+            QWidget#inventoryPage QComboBox {
+                color: #e0e0e0; background: #1b1b1b; border: 1px solid #888;
+                padding: 7px 8px; min-height: 24px;
+            }
+            QWidget#inventoryPage QComboBox:hover { border-color: #dedede; }
+            QWidget#inventoryPage QComboBox:focus { border: 2px solid #dedede; }
+            QWidget#inventoryPage QComboBox::drop-down {
+                width: 28px; border-left: 1px solid #888;
+            }
+            QWidget#inventoryPage QComboBox::down-arrow { image: none; }
+            QWidget#inventoryPage QComboBox QAbstractItemView {
+                color: #e0e0e0; background: #252525;
+                selection-color: white; selection-background-color: #444;
+            }
+            QWidget#inventoryPage QPushButton {
+                color: #e0e0e0; background: #2a2a2a; border: 1px solid #777;
+                padding: 9px 16px; min-height: 24px;
+            }
+            QWidget#inventoryPage QPushButton:hover { background: #3a3a3a; border-color: #dedede; }
+            QWidget#inventoryPage QPushButton:focus { border: 2px solid #dedede; }
+            QWidget#inventoryPage QPushButton:pressed { background: #444; }
+            QWidget#inventoryPage QPushButton:disabled { color: #777; border-color: #555; }
+        ''')
+        self.target_boxes = {}
+        self.use_buttons = {}
+        target_snapshot = tuple(targets)
         layout = QVBoxLayout(self)
-        intro = QLabel("Keep items between nights. Use them while the discussion is waiting for you.")
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
         content = QWidget()
+        content.setObjectName("inventoryContents")
         rows = QVBoxLayout(content)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(12)
+        entries = tuple(entries)
         if not entries:
-            rows.addWidget(QLabel("Your inventory is empty. Explore new rooms to find items."))
+            empty = self._label("Your inventory is empty.", self._body_font)
+            empty.setObjectName("inventoryEmpty")
+            rows.addWidget(empty)
         for entry in entries:
             definition = definitions[entry.item_id]
             card = QFrame()
+            card.setObjectName("inventoryCard")
             row = QVBoxLayout(card)
+            row.setContentsMargins(14, 14, 14, 14)
+            row.setSpacing(12)
             description = QHBoxLayout()
-            description.addWidget(item_sprite(entry.item_id), 0, Qt.AlignTop)
-            label = QLabel(f"{definition.name}\n{definition.description}")
-            label.setWordWrap(True)
-            description.addWidget(label, 1)
+            description.setSpacing(14)
+            sprite = item_sprite(entry.item_id)
+            sprite.setAccessibleName(definition.name)
+            description.addWidget(sprite, 0, Qt.AlignTop)
+            text = QVBoxLayout()
+            text.setSpacing(8)
+            name = self._label(definition.name, self._title_font)
+            name.setObjectName(f"inventoryName_{entry.instance_id}")
+            text.addWidget(name)
+            detail = self._label(definition.description, self._body_font)
+            detail.setObjectName(f"inventoryDescription_{entry.instance_id}")
+            text.addWidget(detail)
+            description.addLayout(text, 1)
             row.addLayout(description)
             controls = QHBoxLayout()
             target = None
             if definition.target_kind == "living_npc":
-                target = QComboBox()
-                for body_id, name in targets:
+                target = _TargetComboBox()
+                target.setObjectName(f"inventoryTarget_{entry.instance_id}")
+                target.setAccessibleName(f"Recipient for {definition.name}")
+                target.setFocusPolicy(Qt.StrongFocus)
+                self._font(target, self._body_font)
+                for body_id, name in target_snapshot:
                     target.addItem(name, body_id)
+                self.target_boxes[entry.instance_id] = target
                 controls.addWidget(target, 1)
+            else:
+                controls.addStretch()
             button = QPushButton("Use")
+            button.setObjectName(f"inventoryUse_{entry.instance_id}")
+            button.setAccessibleName(f"Use {definition.name}")
+            button.setFocusPolicy(Qt.StrongFocus)
+            button.setAutoDefault(False)
+            self._font(button, self._title_font)
             button.setEnabled(can_use and (target is None or target.count() > 0))
             button.clicked.connect(lambda _checked=False, instance=entry.instance_id, box=target:
-                                   use(instance, box.currentData() if box is not None else None))
+                                   on_use(instance, box.currentData() if box is not None else None))
+            self.use_buttons[entry.instance_id] = button
             controls.addWidget(button)
             row.addLayout(controls)
             rows.addWidget(card)
         rows.addStretch()
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
-        close = QPushButton("Back")
-        close.clicked.connect(self.accept)
-        layout.addWidget(close)
+        self.scroll.setWidget(content)
+        layout.addWidget(self.scroll)
+
+    @staticmethod
+    def _font(widget, font):
+        widget.setFont(font)
+        family = font.family().replace("\\", "\\\\").replace('"', '\\"')
+        size = f"{font.pixelSize()}px" if font.pixelSize() > 0 else f"{font.pointSizeF():g}pt"
+        weight = "bold" if font.bold() else "normal"
+        style = "italic" if font.italic() else "normal"
+        widget.setStyleSheet(f'font-family: "{family}"; font-size: {size}; font-weight: {weight}; font-style: {style};')
+
+    def _label(self, text, font):
+        label = QLabel(text)
+        label.setTextFormat(Qt.PlainText)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self._font(label, font)
+        return label
