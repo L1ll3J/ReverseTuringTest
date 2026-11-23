@@ -88,8 +88,31 @@ def label(text, *, pixel=None, size=18, color=INK, wrap=False):
     return widget
 
 
+class StudyButton(QPushButton):
+    """Give focused study buttons Return support without application-wide hooks."""
+
+    @staticmethod
+    def _is_return(event):
+        return (event.key() in (Qt.Key_Return, Qt.Key_Enter)
+                and event.modifiers() in (Qt.NoModifier, Qt.KeypadModifier))
+
+    def keyPressEvent(self, event):
+        if self._is_return(event):
+            if self.hasFocus() and self.isEnabled() and not event.isAutoRepeat():
+                self.click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if self._is_return(event):
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+
 def button(text, action, pixel, *, size=12):
-    widget = QPushButton(text)
+    widget = StudyButton(text)
     widget.setFont(pixel_font(pixel, size))
     widget.setMinimumHeight(42)
     widget.setCursor(Qt.PointingHandCursor)
@@ -689,7 +712,9 @@ def export_study(window, destination):
             if not composite.save(str(path)):
                 raise ValueError(f"Unable to write screenshot: {path}")
             # A modal native dialog is a separate window, so save it separately too.
-            window.item_dialog.grab().save(str(destination / f"inspection-{name}-{suffix}.png"))
+            inspection_path = destination / f"inspection-{name}-{suffix}.png"
+            if not window.item_dialog.grab().save(str(inspection_path)):
+                raise ValueError(f"Unable to write screenshot: {inspection_path}")
         window.item_dialog.reject()
         settle()
     window.close()
