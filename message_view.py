@@ -7,7 +7,7 @@ existing QTextEdit subclass keeps its input and anchor handling unchanged.
 from dataclasses import dataclass
 from typing import Callable, Iterable, Literal
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PyQt5.QtWidgets import QHBoxLayout, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
@@ -75,10 +75,19 @@ class MessageLog(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(editor, 1)
+        layout.setSpacing(4)
+        editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        editor.document().setDocumentMargin(16)
         controls = QHBoxLayout()
         controls.addStretch()
         self.latest_button = QPushButton("Latest", self)
         self.latest_button.setFont(self.body_font)
+        self.latest_button.setMinimumHeight(34)
+        self.latest_button.setCursor(Qt.PointingHandCursor)
+        self.latest_button.setStyleSheet(
+            "QPushButton { color: #eeeae2; background: #242321; border: 1px solid #625f59;"
+            " padding: 4px 14px; } QPushButton:hover { background: #363430; }"
+            "QPushButton:focus { border-color: #eeeae2; }")
         self.latest_button.setAccessibleName("Jump to latest messages")
         self.latest_button.clicked.connect(self.jump_to_latest)
         self.latest_button.hide()
@@ -151,6 +160,10 @@ class MessageLog(QWidget):
                 if not isinstance(supplied, QTextCharFormat):
                     raise TypeError("The name formatter must return QTextCharFormat")
                 header.merge(supplied)
+            if record.speaker_id is None:
+                header.setAnchor(False)
+                header.setAnchorHref("")
+                header.setAnchorNames([])
             pending.append((record, header))
             known[record.record_id] = record
         return pending
@@ -204,20 +217,21 @@ class MessageLog(QWidget):
         block = QTextBlockFormat()
         block.setLineHeight(130, QTextBlockFormat.ProportionalHeight)
         block.setTopMargin(0)
-        block.setBottomMargin(10)
+        block.setBottomMargin(9)
         if not cursor.document().isEmpty():
             cursor.insertBlock(block, body)
         else:
             cursor.setBlockFormat(block)
             cursor.setCharFormat(body)
         if record.kind == "section":
-            block.setTopMargin(12)
+            block.setTopMargin(14)
+            block.setBottomMargin(8)
             cursor.setBlockFormat(block)
             cursor.insertText(record.text, header)
             return
         if record.speaker:
             heading = QTextBlockFormat(block)
-            heading.setTopMargin(8)
+            heading.setTopMargin(4)
             heading.setBottomMargin(3)
             cursor.setBlockFormat(heading)
             cursor.insertText(record.speaker, header)
