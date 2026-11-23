@@ -959,6 +959,106 @@ class ItemIntegrationTests(unittest.TestCase):
             self.assertEqual(self.window.vote_snapshot.proxy_ballots[self.window.body_id("Dave")], self.window.body_id("Alex"))
             self.assertTrue(self.window.voting_resolved)
 
+    def enable_decree_for_test(self):
+        catalogue = dict(game.ITEM_CATALOGUE)
+        catalogue["presidential_decree"] = replace(catalogue["presidential_decree"], default=True)
+        return patch.object(game, "ITEM_CATALOGUE", catalogue)
+
+    def test_decree_remains_blocked_in_production_inventory_and_callback(self):
+        self.conversation()
+        entry = self.window.inventory.grant("presidential_decree")
+        self.window.open_inventory()
+        with patch.object(self.window.item_rules, "use_item", side_effect=AssertionError("Unavailable item")):
+            self.assertFalse(self.window.inventory_page.use_buttons[entry.instance_id].isEnabled())
+            self.assertFalse(self.window.use_inventory_item(entry.instance_id))
+        self.assertIn(entry, self.window.inventory.entries)
+        self.assertFalse(self.window.item_rules.skip_next_vote)
+
+    def test_decree_skips_without_ballots_or_achievements_and_preserves_next_actual_vote(self):
+        self.conversation()
+        self.give("spare_paper")
+        self.give("stay_of_execution", "Alex")
+        self.give("mail_in_ballot", "Dave")
+        with self.enable_decree_for_test():
+            self.give("presidential_decree")
+        self.window.minimum_to_call_vote = 0
+        self.window.witness_body_ids.add(self.window.body_id("Jerry"))
+        public_before = tuple(self.window.public_events)
+        counters_before = dict(self.window.profile.counters)
+        with patch.object(self.window, "display_vote_buttons", side_effect=AssertionError("Skipped vote")), patch.object(
+                self.window, "start_ai_request", side_effect=AssertionError("Skipped vote")), patch.object(
+                self.window, "resolve_death", side_effect=AssertionError("Skipped vote")):
+            self.window.call_vote()
+        self.assertTrue(self.window.voting_resolved)
+        self.assertTrue(self.window.vote_snapshot.skipped)
+        self.assertFalse(self.window.awaiting_player_vote)
+        self.assertEqual(self.window.votes, {})
+        self.assertEqual(self.window.expected_voters, set())
+        self.assertEqual(tuple(self.window.public_events), public_before)
+        self.assertEqual(dict(self.window.profile.counters), counters_before)
+        self.assertFalse(self.window.item_rules.skip_next_vote)
+        self.assertEqual(dict(self.window.item_rules.proxy_voters), {})
+        self.assertEqual(self.window.item_rules.pending_ballot_bonus, 2)
+        self.assertEqual(self.window.item_rules.execution_stays, (self.window.body_id("Alex"),))
+        self.assertGreaterEqual(self.window.layout.indexOf(self.window.continue_button), 0)
+        vote_id = self.window.vote_id
+        with patch.object(self.window, "add_continue_button") as continuation:
+            self.window.player_vote("Dave", voter="Alex", vote_id=vote_id)
+            self.window.collect_ai_vote("Jerry", "Alex")
+            self.window.tally_votes()
+            self.window.start_vote_requests()
+            self.window.run_voting_phase()
+            self.window.call_vote()
+        continuation.assert_not_called()
+        self.assertEqual(self.window.vote_id, vote_id)
+        self.assertEqual(self.window.votes, {})
+        with patch.object(self.window, "run_action_phase") as next_night:
+            self.window.continue_button.click()
+        next_night.assert_called_once_with()
+        self.window.round_number = 2
+        self.window.item_rules.begin_night(2, self.window.body_states())
+        ballots = {name: "Alex" for name in self.window.characters}
+        ballots["Alex"] = "Dave"
+        self.vote(ballots)
+        self.assertFalse(self.window.vote_snapshot.skipped)
+        self.assertEqual(self.window.vote_snapshot.bonus, 2)
+        self.assertEqual(self.window.vote_snapshot.proxy_ballots, {})
+        self.assertIn("Alex's vote for Dave counted as 3 votes.",
+                      [event.text for event in self.window.public_events])
+        self.assertTrue(self.window.player_alive)
+        self.assertEqual(self.window.innocents_executed, 0)
+        self.assertEqual(self.window.item_rules.pending_ballot_bonus, 0)
+        self.assertEqual(self.window.item_rules.execution_stays, ())
+        self.assertEqual(self.window.profile.counters["survived_vote"], 1)
+        self.assertEqual(self.window.profile.counters["survived_spare_paper_vote"], 1)
+        self.assertEqual(self.window.profile.counters["survived_witnessed_vote"], 1)
+
+    def test_decree_waits_for_an_eligible_vote_boundary(self):
+        self.conversation()
+        with self.enable_decree_for_test():
+            self.give("presidential_decree")
+        self.window.minimum_to_call_vote = 0
+        self.window.append_speech("Detective", "Alex, answer.", "Alex")
+        self.window.call_vote()
+        self.window.run_voting_phase()
+        self.assertEqual(self.window.phase, "conversation")
+        self.assertTrue(self.window.item_rules.skip_next_vote)
+        self.window.append_speech("Alex", "My account.")
+        self.window.ai_busy = True
+        self.window.call_vote()
+        self.window.run_voting_phase()
+        self.assertEqual(self.window.phase, "conversation")
+        self.assertTrue(self.window.item_rules.skip_next_vote)
+        self.window.ai_busy = False
+        self.window.minimum_to_call_vote = 100
+        self.window.call_vote()
+        self.assertEqual(self.window.phase, "conversation")
+        self.window.minimum_to_call_vote = 0
+        with patch.object(self.window, "start_ai_request", side_effect=AssertionError("Skipped vote")):
+            self.window.call_vote()
+        self.assertTrue(self.window.voting_resolved)
+        self.assertFalse(self.window.item_rules.skip_next_vote)
+
     def test_player_ballot_callback_before_first_vote_is_ignored(self):
         history = tuple(self.window.history_records)
         self.window.player_vote("Dave")

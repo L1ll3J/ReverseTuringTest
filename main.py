@@ -3090,6 +3090,19 @@ class GameWindow(QMainWindow):
             char for char, data in self.characters.items() if data["alive"]
         }
         self.votes = {}
+        if self.item_rules.skip_next_vote:
+            self.vote_snapshot = self.item_rules.open_vote(
+                self.vote_id, self.vote_bodies, self.body_id(self.player_name), day=max(1, self.round_number))
+            self.vote_requests_started = True
+            self.proxy_voters = set()
+            self.expected_voters = set()
+            self.awaiting_player_vote = False
+            previous = getattr(self, "vote_buttons_widget", None)
+            if previous is not None:
+                previous.hide()
+            self.trace_state("voting_started")
+            self.tally_votes()
+            return
         self.awaiting_player_vote = True
         self.append_output_text("Voting phase has begun. Choose your vote below.")
         self.display_vote_buttons()
@@ -3257,7 +3270,7 @@ class GameWindow(QMainWindow):
             names = [self.label_for_body(body_id) if body_id != "NONE" else "NONE"
                      for body_id in result.tied_targets]
             self.add_public_event(f"There was a tie between {' and '.join(names)}. No one was voted out.", "Voting")
-        else:
+        elif result.outcome == "execution":
             voted_out = self.label_for_body(result.executed_body_id)
             decision = self.resolve_death(voted_out, f"vote:{self.vote_id}",
                                           cause=DeathCause.EXECUTION, source_id=self.vote_id)
@@ -3272,12 +3285,13 @@ class GameWindow(QMainWindow):
                     if self.innocents_executed == 2:
                         self.queue_progress("two_innocents_executed")
         if self.player_alive and not self.game_over:
-            self.queue_progress("survived_vote")
-            if self.vote_snapshot.bonus > 0:
-                self.queue_progress("survived_spare_paper_vote")
-            living_ids = {body.body_id for body in self.body_states() if body.alive and body.is_npc}
-            if self.witness_body_ids & living_ids:
-                self.queue_progress("survived_witnessed_vote")
+            if result.outcome != "skipped":
+                self.queue_progress("survived_vote")
+                if self.vote_snapshot.bonus > 0:
+                    self.queue_progress("survived_spare_paper_vote")
+                living_ids = {body.body_id for body in self.body_states() if body.alive and body.is_npc}
+                if self.witness_body_ids & living_ids:
+                    self.queue_progress("survived_witnessed_vote")
             if not self.check_victory():
                 self.add_continue_button()
 
