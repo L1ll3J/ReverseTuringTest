@@ -11,10 +11,13 @@ import unittest
 from unittest.mock import patch
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+if sys.platform == "win32":
+    os.environ.setdefault("QT_QPA_FONTDIR", str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PyQt5 import sip
 from PyQt5.QtCore import QCoreApplication, QEvent, Qt
+from PyQt5.QtGui import QFont, QFontInfo
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
@@ -26,6 +29,8 @@ class PresentationIntegrationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication(["presentation-tests"])
         cls.app.setQuitOnLastWindowClosed(False)
+        if sys.platform == "win32":
+            QFont.insertSubstitution("Helvetica", "Segoe UI")
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -76,6 +81,8 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.assertEqual(page.records, tuple(self.window.history_records))
         self.assertEqual([record.kind for record in page.records], ["speech", "speech", "event"])
         self.assertEqual(page.records[0].speaker_id, self.window.body_id("Dave"))
+        body_font = page.editor.document().find("Jerry").charFormat().font()
+        self.assertNotEqual(QFontInfo(body_font).family(), self.window.pixel_font_family)
         self.assertIn("Another account.", page.editor.toPlainText())
 
     def test_history_does_not_receive_private_context_drafts_status_or_unselected_proposals(self):
@@ -152,6 +159,36 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.window.overlay_host.close_page()
         self.app.processEvents()
         self.assertEqual(self.window.interject_input.selectedText(), before[1])
+
+    def test_nightly_equipment_and_empty_room_result_survive_clearing_the_live_view(self):
+        self.window.npc_items = game.NPCItemState({"Dave": "camera"})
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.run_action_phase()
+        empty = next(room for room, occupants in self.window.room_assignments.items() if not occupants)
+        self.window.choose_room(empty)
+        self.assertIn(empty, self.window.new_crime_scenes)
+        self.window.message_log.clear()
+        self.window.show_transcript()
+        text = self.window.transcript_page.editor.toPlainText()
+        self.assertIn("Dave is carrying a Camera", text)
+        self.assertIn(f"The {empty} is empty and is now also a crime scene.", text)
+        self.assertNotIn("You must choose another room.", text)
+
+    def test_controlled_attacker_is_retained_in_private_player_history(self):
+        self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "blackmagic")
+        self.window.run_action_phase()
+        self.window.room_assignments = {"Attic": ["Dave"], "Kitchen": ["Hank"],
+                                        "Library": ["Jerry"], "Basement": [], "Cellar": []}
+        self.window.black_magic_controller, self.window.black_magic_target = "Dave", "Hank"
+        self.window.apply_weapon_gating()
+        self.window.choose_room("Basement")
+        self.assertFalse(self.window.characters["Hank"]["alive"])
+        self.window.message_log.clear()
+        self.window.show_transcript()
+        text = self.window.transcript_page.editor.toPlainText()
+        self.assertIn("Dave (under your control) kills Hank in the Kitchen.", text)
+        self.assertFalse(any("(under your control)" in event.text
+                             for event in self.window.build_character_context("Jerry").public_events))
 
     def test_shared_help_and_transcript_never_stack_and_closed_pages_disconnect(self):
         self.window.show_how_to_play()

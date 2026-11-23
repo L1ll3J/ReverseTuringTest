@@ -2080,7 +2080,7 @@ class GameWindow(QMainWindow):
             self.room_assignments,
             living_npcs,
         )
-        self.append_output_text(self.npc_items.equipment_description(living_npcs))
+        self.record_history(self.npc_items.equipment_description(living_npcs), display=True)
         self.trace_action("night_rooms_assigned", assignments=self.room_assignments)
 
         # Display room assignments if in normal mode
@@ -2185,7 +2185,7 @@ class GameWindow(QMainWindow):
                 self.c4_cooldown_nights = 2
 
                 if victims:
-                    self.append_output_text(f"The C4 detonates in the {target_room}. It kills: {', '.join(victims)}.\n")
+                    self.record_history(f"The C4 detonates in the {target_room}. It kills: {', '.join(victims)}.\n", display=True)
                     for v in victims:
                         if self.characters.get(v, {}).get("alive"):
                             self.commit_attack(v, target_room, weapon_id="c4")
@@ -2196,12 +2196,11 @@ class GameWindow(QMainWindow):
                     self.update_witness_memories(' and '.join(victims))
     
                 else:
-                    self.append_output_text(f"The C4 detonates in the {target_room}, but nobody was there.\n")
+                    self.record_history(f"The C4 detonates in the {target_room}, but nobody was there.\n", display=True)
                     self.new_crime_scenes = [target_room]
                     self.trace_action("explosion_resolved", room=target_room, victims=[])
                     self.update_witness_memories(None)
                 # No witnesses for blast; go to convo
-                self.record_history(f"You blew up the {target_room}.")
                 return self.run_conversation_phase()
 
             if wpn_id == "blackmagic":
@@ -2224,7 +2223,7 @@ class GameWindow(QMainWindow):
                 self.commit_attack(tgt, target_room, attacker=ctrl, weapon_id="blackmagic")
                 self.new_crime_scenes = [target_room]
                 self._override_murder_room = target_room  # let update_witness_memories use the right room
-                self.append_output_text(f"{ctrl} (under your control) kills {tgt} in the {target_room}.\n")
+                self.record_history(f"{ctrl} (under your control) kills {tgt} in the {target_room}.\n", display=True)
 
                 # Adjust room assignments to handle mind control
                 controlled_current_room = next((rm for rm, occs in self.room_assignments.items() if ctrl in occs), None)
@@ -2239,7 +2238,8 @@ class GameWindow(QMainWindow):
 
         # Handle the outcome based on room occupants
         if len(occupants) == 0:
-            self.append_output_text(f"The {selected_room} is empty. You must choose another room, but the {selected_room} is now also a crime scene.\n")
+            self.record_history(f"The {selected_room} is empty and is now also a crime scene.", display=True)
+            self.append_output_text("You must choose another room.")
             self.had_to_change_rooms = True
             
             self.room_buttons[selected_room].setEnabled(False)  # Disable crime scene rooms
@@ -2256,7 +2256,8 @@ class GameWindow(QMainWindow):
         if len(living) == 1:
             self.finish_primary_kill(living[0], player_room)
         elif living:
-            self.append_output_text(f"The {player_room} is occupied by {', '.join(living)}. Choose who to kill.")
+            self.record_history(f"The {player_room} is occupied by {', '.join(living)}.", display=True)
+            self.append_output_text("Choose who to kill.")
             self.display_victim_selection(living)
 
     def display_victim_selection(self, occupants):
@@ -3394,6 +3395,7 @@ class GameWindow(QMainWindow):
         def do_save():
             txt = edit.toPlainText().strip()
             self.pending_pen_note_text = txt if txt else None
+            self.record_history(f"You prepared a forged note: {txt}" if txt else "You cleared your prepared note.")
             self.trace_action("weapon_configured", weapon_id="pen", note=self.pending_pen_note_text)
             self.apply_weapon_gating()
             w.close()
@@ -3518,6 +3520,7 @@ class GameWindow(QMainWindow):
             c, t = ctrl.currentText(), tgt.currentText()
             if c and t and c != t:
                 self.black_magic_controller, self.black_magic_target = c, t
+                self.record_history(f"You planned to compel {c} to attack {t}.")
                 self.trace_action("weapon_configured", weapon_id="blackmagic", controller=c, target=t)
                 self.apply_weapon_gating()
                 w.close()
@@ -3610,6 +3613,8 @@ class GameWindow(QMainWindow):
                 self.knife_extra_target = choice
                 self.knife_used_bloodlust = True
             self.trace_action("weapon_configured", weapon_id="knife", target=self.knife_extra_target)
+            self.record_history(f"You prepared a second attack against {self.knife_extra_target}."
+                                if self.knife_extra_target else "You decided against a second attack.")
             w.close()
             self.build_weapon_action_panel()
             QTimer.singleShot(0, self.position_weapon_panel)
@@ -3692,6 +3697,7 @@ class GameWindow(QMainWindow):
             sel = room_box.currentText().strip()
             if sel:
                 self.c4_target_room = sel
+                self.record_history(f"You set C4's target to the {sel}.")
                 self.trace_action("weapon_configured", weapon_id="c4", room=sel)
                 self.apply_weapon_gating()  # allows rooms now
                 w.close()
