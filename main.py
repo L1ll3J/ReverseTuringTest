@@ -8,6 +8,8 @@ from ai_context import CharacterContext, DialogueLine, MemoryRecord, PublicState
 from ai_runtime import AIRuntime, AIRequestError
 from dictation import DictationRecorder, DictationError
 from preferences import Preferences
+from input_bindings import BindingBadge, BindingSettingsPage, DictationBindings
+from model_config_ui import ModelConfigPanel
 from conversation_flow import DirectReplyPolicy, GroupTurnSnapshot, TurnPreparation
 from conversation_widgets import DialogueView
 from message_view import DisplayRecord, MessageLog
@@ -20,9 +22,9 @@ from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
 from item_ui import ItemDraftDialog, InventoryPage
 from item_catalogue_ui import ItemCataloguePanel
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea
+from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
-from PyQt5.QtGui import QTextCursor, QTextCharFormat, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption
+from PyQt5.QtGui import QColor, QTextCursor, QTextCharFormat, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 def resource_path(relative_path):
@@ -653,6 +655,9 @@ class GameWindow(QMainWindow):
             self.transcript_page = None
         elif title == "How to Play":
             self.help_page = None
+        elif title == "Menu":
+            self._esc_overlay = None
+            self._esc_sound_btn = None
 
     def add_public_event(self, text, source="Detective", display=True):
         self.invalidate_prepared_turn("public_event", changed=True)
@@ -833,6 +838,7 @@ class GameWindow(QMainWindow):
         if not restarting:
             self.save_player_name_preference()
         self.game_over = True
+        self.dictation_bindings.close()
         self.overlay_host.cancel_owner()
         self.invalidate_prepared_turn("closed", changed=True)
         self.cancel_dictation()
@@ -875,6 +881,7 @@ class GameWindow(QMainWindow):
                                        "QToolButton:hover, QToolButton:focus { background: #444; border-color: white; }")
         self.overlay_host.page_closed.connect(self.overlay_page_closed)
         self.overlay_host.unlock_failed.connect(self.show_profile_error)
+        self.overlay_host.installEventFilter(self)
 
 
 
@@ -1188,9 +1195,16 @@ class GameWindow(QMainWindow):
 
         self.dictation_controls = QWidget()
         dictation_layout = QHBoxLayout(self.dictation_controls)
-        dictation_layout.setContentsMargins(0, 0, 0, 0)
-        self.dictation_button = QPushButton("Record voice")
-        self.dictation_button.setToolTip("Record a message, then stop to add it to your editable draft.")
+        dictation_layout.setContentsMargins(4, 4, 4, 4)
+        self.dictation_button = QPushButton()
+        self.dictation_button.setCheckable(True)
+        self.dictation_button.setFixedSize(64, 64)
+        self.dictation_button.setIconSize(QSize(48, 48))
+        self.dictation_icons = {
+            recording: QIcon(QPixmap(resource_path(f"icons/ui/microphone-{state}.png")).scaled(
+                48, 48, Qt.KeepAspectRatio, Qt.FastTransformation))
+            for recording, state in ((False, "idle"), (True, "recording"))
+        }
         self.dictation_button.clicked.connect(self.toggle_dictation)
         self.dictation_cancel_button = QPushButton("Cancel")
         self.dictation_cancel_button.clicked.connect(self.cancel_dictation)
@@ -1198,6 +1212,18 @@ class GameWindow(QMainWindow):
             button.setFont(body_font)
             button.setStyleSheet(f'QPushButton {{ font-family: "{body_family}"; font-size: 18px; padding: 6px; }} QPushButton:disabled {{ color: #777; }}')
             dictation_layout.addWidget(button)
+        self.dictation_button.setStyleSheet(
+            f'QPushButton {{ font-family: "{body_family}"; font-size: 18px; padding: 4px; '
+            'background: #252525; border: 1px solid #777; } '
+            'QPushButton:hover, QPushButton:focus { background: #333; border-color: #e0e0e0; } '
+            'QPushButton:checked { background: #352d22; border: 2px solid #e2b76c; } '
+            'QPushButton:disabled { color: #777; border-color: #555; }')
+        self.dictation_glow = QGraphicsDropShadowEffect(self.dictation_button)
+        self.dictation_glow.setOffset(0, 0)
+        self.dictation_glow.setBlurRadius(12)
+        self.dictation_glow.setColor(QColor(226, 183, 108, 110))
+        self.dictation_glow.setEnabled(False)
+        self.dictation_button.setGraphicsEffect(self.dictation_glow)
         self.dictation_controls.hide()
         self.dictation_cancel_button.hide()
         self.dictation_status = QLabel()
@@ -1206,6 +1232,13 @@ class GameWindow(QMainWindow):
         self.dictation_status.setFont(body_font)
         self.dictation_status.setStyleSheet(f'font-family: "{body_family}"; font-size: 18px; color: #B8B8B8;')
         self.dictation_status.hide()
+        self.dictation_bindings = DictationBindings(
+            self, self.toggle_dictation, binding=self.preferences.dictation_binding(),
+            can_trigger=self.can_toggle_dictation, conflict_reason=self.dictation_binding_conflict)
+        self.dictation_bindings.activation_failed.connect(self.show_dictation_binding_failure)
+        self.dictation_binding_badge = BindingBadge(self.dictation_bindings, font=body_font)
+        dictation_layout.addWidget(self.dictation_binding_badge)
+        self.update_dictation_controls()
         self.interject_input.installEventFilter(self)
 
         # Weapon Picker
@@ -1411,6 +1444,10 @@ class GameWindow(QMainWindow):
         self.mute_button.setGeometry(0, 10, width // 2, height)
 
     def eventFilter(self, obj, event):
+        if (obj is getattr(self, "overlay_host", None) and event.type() == QEvent.KeyPress
+                and event.key() == Qt.Key_Escape and self.pause_settings_active()):
+            self.show_pause_menu_page()
+            return True
         if obj is self.room_buttons_widget and event.type() in (QEvent.Show, QEvent.Resize, QEvent.Move):
             QTimer.singleShot(0, self.position_weapon_panel)  # schedule after layout settles
         if obj is getattr(self, "interject_input", None) and event.type() in (QEvent.Show, QEvent.Hide, QEvent.EnabledChange):
@@ -1427,12 +1464,33 @@ class GameWindow(QMainWindow):
         return (self.phase == "conversation" and not self.game_over and not self.ai_busy
                 and not self.interject_input.isHidden() and self.interject_input.isEnabled())
 
+    def can_toggle_dictation(self):
+        return self.dictation_recorder.is_recording or (self.can_dictate() and self.dictation_worker is None)
+
+    def dictation_binding_conflict(self, binding):
+        if binding.kind == "key" and binding.key in (int(Qt.Key_Escape), int(Qt.Key_Return), int(Qt.Key_Enter)):
+            return "This key is reserved for the game menu or sending your message."
+        return None
+
+    def show_dictation_binding_failure(self, message):
+        self.dictation_status.setText(message)
+        self.dictation_status.show()
+
     def update_dictation_controls(self):
         if not hasattr(self, "dictation_controls"):
             return
-        self.dictation_controls.setVisible(self.can_dictate())
-        self.dictation_button.setText("Stop recording" if self.dictation_recorder.is_recording else "Record voice")
-        self.dictation_button.setEnabled(self.can_dictate() and self.dictation_worker is None)
+        self.dictation_controls.setVisible(self.can_dictate() or self.dictation_recorder.is_recording)
+        recording = self.dictation_recorder.is_recording
+        action = "Stop recording" if recording else "Record voice"
+        icon = self.dictation_icons[recording]
+        self.dictation_button.setIcon(icon)
+        self.dictation_button.setText("" if not icon.isNull() else ("STOP" if recording else "REC"))
+        self.dictation_button.setChecked(recording)
+        self.dictation_button.setAccessibleName(action)
+        self.dictation_button.setToolTip(action + ". " + ("Transcribe into your editable draft." if recording
+                                                       else "Stop when ready to add text to your editable draft."))
+        self.dictation_glow.setEnabled(recording)
+        self.dictation_button.setEnabled(self.can_toggle_dictation())
         self.dictation_cancel_button.setVisible(self.dictation_context is not None)
 
     def remember_entered_player_name(self, text):
@@ -1450,10 +1508,13 @@ class GameWindow(QMainWindow):
                                                 "phase": self.phase, **metadata})
 
     def toggle_dictation(self):
-        if not self.can_dictate() or self.dictation_worker is not None:
-            return
         if self.dictation_recorder.is_recording:
-            self.dictation_recorder.stop()
+            if self.can_dictate():
+                self.dictation_recorder.stop()
+            else:
+                self.cancel_dictation()
+            return
+        if not self.can_dictate() or self.dictation_worker is not None:
             return
         self.dictation_session += 1
         self.dictation_context = (self.dictation_session, self.round_number)
@@ -1799,7 +1860,7 @@ class GameWindow(QMainWindow):
         return False
 
     def separate_surface_open(self):
-        surfaces = (*self._weapon_windows.values(), self.draft_dialog, self._esc_overlay)
+        surfaces = (*self._weapon_windows.values(), self.draft_dialog)
         return any(surface is not None and surface.isVisible() for surface in surfaces)
 
     def build_weapon_action_panel(self):
@@ -3122,6 +3183,7 @@ class GameWindow(QMainWindow):
         self.game_over = True
         self.invalidate_prepared_turn("restarting", changed=True)
         self.phase = "restarting"
+        self.dictation_bindings.close()
         self.overlay_host.cancel_owner()
         self.cancel_dictation()
         # Close the ESC overlay if it’s open
@@ -3724,143 +3786,108 @@ class GameWindow(QMainWindow):
         w.show(); w.raise_()
 
 
-    # ESC Menu
-    def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Escape:
-            # toggle ESC menu
-            if self._esc_overlay and self._esc_overlay.isVisible():
-                self.close_escape_menu()
-            else:
-                self.open_escape_menu()
+    # Pause menu and settings share the same overlay surface.
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.open_escape_menu()
             return
-        super().keyPressEvent(e)
+        super().keyPressEvent(event)
+
+    def pause_settings_active(self):
+        page = self.overlay_host.current_page
+        return page is not None and bool(page.property("pauseMenuChild"))
 
     def open_escape_menu(self):
-        if self.overlay_host.current_page is not None:
+        if self.pause_settings_active():
+            self.show_pause_menu_page()
+        elif self.overlay_host.current_page is not None:
             self.overlay_host.close_page()
+        elif not self.separate_surface_open():
+            self.show_pause_menu_page()
+
+    def pause_menu_button(self, text, name, callback):
+        button = QPushButton(text)
+        button.setObjectName(name)
+        button.setAccessibleName(text)
+        button.setFont(self.speaker_font)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(
+            'QPushButton { color: white; background: #333; border: 1px solid #777; '
+            'padding: 12px 16px; min-height: 24px; font-size: 12px; } '
+            'QPushButton:hover, QPushButton:focus { background: #444; border-color: white; } '
+            'QPushButton:pressed { background: #555; }')
+        button.clicked.connect(callback)
+        return button
+
+    def show_pause_menu_page(self):
+        current = self.overlay_host.current_page
+        if (self.overlay_host.owner_cancelled or self.separate_surface_open()
+                or (current is not None and current is not self._esc_overlay and not self.pause_settings_active())):
             return
-        # If already open, bring to front
-        if self._esc_overlay and self._esc_overlay.isVisible():
-            self._esc_overlay.close()
-            return
-
-        parent = self  
-        overlay = QWidget(parent)
-        overlay.setObjectName("escOverlay")
-        overlay.setAttribute(Qt.WA_StyledBackground, True)
-        overlay.setStyleSheet("#escOverlay { background: rgba(0,0,0,0.45); }")
-
-        # Fill the window's content rect
-        cr = self.contentsRect()
-        # contentsRect() is in the window's local coords already
-        overlay.setGeometry(cr)
-        overlay.show()
-        overlay.raise_()
-
-        # Swallow clicks on overlay (so it acts modal-ish)
-        def swallow(_ev): pass
-        overlay.mousePressEvent = lambda ev: None
-        overlay.mouseReleaseEvent = lambda ev: None
-
-        # Content panel (outlined, matches your style)
-        panel = QFrame(overlay)
-        panel.setObjectName("escPanel")
-        panel.setAttribute(Qt.WA_StyledBackground, True)
-        panel.setStyleSheet("""
-            #escPanel {
-                background-color: #2A2A2A;
-                border: 3px solid white;
-            }
-        """)
-        panel.resize(520, 220)
-
-        # Center panel inside overlay
-        pw, ph = panel.width(), panel.height()
-        cw, ch = overlay.width(), overlay.height()
-        panel.move((cw - pw)//2, (ch - ph)//2)
-        panel.show()
-
-        v = QVBoxLayout(panel)
-        v.setContentsMargins(16, 16, 16, 16)
-        v.setSpacing(14)
-
-        # Title
-        title = QLabel("Menu")
-        title.setStyleSheet("color:white; background-color:rgba(0,0,0,0.45); font-size:20px;")
-        v.addWidget(title, 0, Qt.AlignHCenter)
-
-        # BUTTONS COLUMN
-        col = QVBoxLayout()
-        col.setSpacing(10)
-
-        btn_w = 360   # target width inside panel
-        btn_h = 44
-
-        def style_btn(bg):
-            return (
-                f"QPushButton{{background:{bg}; color:white; padding:10px 18px; "
-                f"border-radius:8px; font-size:16px;}} "
-                f"QPushButton:hover{{filter: brightness(1.05);}}"
-            )
-
-        # Restart (top, green)
-        restart_btn = QPushButton("Restart")
-        restart_btn.setFixedSize(btn_w, btn_h)
-        restart_btn.setCursor(Qt.PointingHandCursor)
-        restart_btn.setStyleSheet(style_btn("#2e7d32"))
-        restart_btn.clicked.connect(self._esc_restart_click)
-        col.addWidget(restart_btn, 0, Qt.AlignHCenter)
-
-        # Sound (middle, neutral)
-        sound_btn = QPushButton()
-        sound_btn.setFixedSize(btn_w, btn_h)
-        sound_btn.setCursor(Qt.PointingHandCursor)
-        # If you have a real mute button with an icon, reuse its icon:
-        if hasattr(self, "mute_button") and isinstance(self.mute_button, QPushButton):
-            sound_btn.setText(self.mute_button.text() or "Sound")
-        
-            sound_btn.clicked.connect(self.mute_button.click)   # proxy to your existing toggle
+        page = QWidget()
+        page.setObjectName("pauseMenuPage")
+        layout = QVBoxLayout(page)
+        layout.setSpacing(12)
+        actions = (
+            ("Resume", "pauseResume", self.close_escape_menu),
+            ("Controls", "pauseControls", self.show_voice_controls),
+            ("Model configuration", "pauseModels", self.show_model_configuration),
+            ("Restart", "pauseRestart", self._esc_restart_click),
+        )
+        for text, name, callback in actions:
+            layout.addWidget(self.pause_menu_button(text, name, callback))
+        sound = self.pause_menu_button("Sound: On" if self.music_enabled else "Sound: Off",
+                                       "pauseSound", self.toggle_pause_sound)
+        layout.addWidget(sound)
+        layout.addWidget(self.pause_menu_button("Exit", "pauseExit", self._esc_quit_click))
+        if current is None:
+            opened = self.open_overlay_page(page, "Menu")
         else:
-            sound_btn.setText("Sound")
-            if hasattr(self, "toggle_sound"):
-                sound_btn.clicked.connect(self.toggle_sound)
-        sound_btn.setStyleSheet(style_btn("#444"))
-        col.addWidget(sound_btn, 0, Qt.AlignHCenter)
+            opened = self.overlay_host.replace_page(page, title="Menu")
+            if not opened:
+                page.deleteLater()
+        if opened:
+            self._esc_overlay = page
+            self._esc_sound_btn = sound
 
-        # Exit (bottom, red)
-        exit_btn = QPushButton("Exit")
-        exit_btn.setFixedSize(btn_w, btn_h)
-        exit_btn.setCursor(Qt.PointingHandCursor)
-        exit_btn.setStyleSheet(style_btn("#E74C3C"))
-        exit_btn.clicked.connect(self._esc_quit_click)
-        col.addWidget(exit_btn, 0, Qt.AlignHCenter)
+    def toggle_pause_sound(self):
+        self.toggle_mute()
+        if self._esc_sound_btn is not None:
+            self._esc_sound_btn.setText("Sound: On" if self.music_enabled else "Sound: Off")
 
-        v.addLayout(col)
+    def show_pause_settings_page(self, content, title):
+        current = self.overlay_host.current_page
+        if (self.overlay_host.owner_cancelled or self.separate_surface_open()
+                or (current is not None and current is not self._esc_overlay and not self.pause_settings_active())):
+            content.deleteLater()
+            return
+        page = QWidget()
+        page.setProperty("pauseMenuChild", True)
+        layout = QVBoxLayout(page)
+        layout.addWidget(content, 1)
+        layout.addWidget(self.pause_menu_button("Back to menu", "settingsBack", self.show_pause_menu_page))
+        if current is None:
+            opened = self.open_overlay_page(page, title)
+        else:
+            opened = self.overlay_host.replace_page(page, title=title)
+            if not opened:
+                page.deleteLater()
+        if opened:
+            self._esc_overlay = None
+            self._esc_sound_btn = None
 
-        # make sure the panel stays above everything
-        panel.show()
-        self._esc_overlay = overlay
-        self._esc_overlay.raise_()
-        QTimer.singleShot(0, self._esc_overlay.raise_)
-        QTimer.singleShot(25, self._esc_overlay.raise_)
+    def show_voice_controls(self):
+        page = BindingSettingsPage(self.dictation_bindings, self.preferences.save_dictation_binding,
+                                   body_font=readable_body_font(), heading_font=self.speaker_font)
+        self.show_pause_settings_page(page, "Controls")
 
-        # recenter on resize (unchanged, but ensure it uses contentsRect)
-        def on_resize_recenter():
-            if not (self._esc_overlay and self._esc_overlay.isVisible()):
-                return
-            cr = self.contentsRect()
-            self._esc_overlay.setGeometry(cr)
-            panel.move((cr.width() - panel.width()) // 2,
-                    (cr.height() - panel.height()) // 2)
-            self._esc_overlay.raise_()
-
-        QTimer.singleShot(0, on_resize_recenter)
+    def show_model_configuration(self):
+        page = ModelConfigPanel(self.ai_runtime.config, body_font=readable_body_font(), heading_font=self.speaker_font)
+        self.show_pause_settings_page(page, "Model configuration")
 
     def close_escape_menu(self):
-        if self._esc_overlay:
-            self._esc_overlay.hide()
-            self._esc_overlay.deleteLater()
-            self._esc_overlay = None
+        if self.overlay_host.current_page is self._esc_overlay or self.pause_settings_active():
+            self.overlay_host.close_page()
 
     def _esc_restart_click(self):
         self.close_escape_menu()
