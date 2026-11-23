@@ -18,6 +18,8 @@ class ItemDefinition:
     description: str
     target_kind: str
     default: bool
+    requires_message: bool = False
+    reusable: bool = False
 
 
 ITEM_CATALOGUE = MappingProxyType({
@@ -40,6 +42,69 @@ ITEM_CATALOGUE = MappingProxyType({
         "guardian_angel", "Guardian Angel",
         "Arm one protection against your next death. Protection follows you through possession.",
         "self", False,
+    ),
+    "throw_voice": ItemDefinition(
+        "throw_voice", "Throw Voice", "Send one apparent message in a living suspect's voice.",
+        "living_npc", True, requires_message=True,
+    ),
+    "dark_whisper": ItemDefinition(
+        "dark_whisper", "Dark Whisper", "Send one apparent message from a dead character's voice.",
+        "dead_body", True, requires_message=True,
+    ),
+    "forged_note": ItemDefinition(
+        "forged_note", "Forged Note", "Prepare a signed note for the body of your next victim.",
+        "self", True, requires_message=True,
+    ),
+    "divine_revelation": ItemDefinition(
+        "divine_revelation", "Divine Revelation", "Send a private message that seems to come from a higher power.",
+        "living_npc", True, requires_message=True,
+    ),
+    "mail_in_ballot": ItemDefinition(
+        "mail_in_ballot", "Mail-in Ballot", "Choose a suspect whose ballot you will cast this round.",
+        "living_npc", True,
+    ),
+    "watch_this_drive": ItemDefinition(
+        "watch_this_drive", "Watch This Drive", "Mark a suspect. Kill their body next night to earn one extra action.",
+        "living_npc", True,
+    ),
+    "lucky_match": ItemDefinition(
+        "lucky_match", "Lucky Match", "Gain one extra single-slot reroll for this run.", "self", True,
+    ),
+    "deep_pockets": ItemDefinition(
+        "deep_pockets", "Deep Pockets", "Take up to two different items from your next room offer.", "self", True,
+    ),
+    "pocket_gavel": ItemDefinition(
+        "pocket_gavel", "Pocket Gavel", "Call the normal vote early after answering any required question.",
+        "self", True,
+    ),
+    "listening_glass": ItemDefinition(
+        "listening_glass", "Listening Glass", "Privately inspect one suspect's recorded experience from the latest night.",
+        "living_npc", True,
+    ),
+    "stay_of_execution": ItemDefinition(
+        "stay_of_execution", "Stay of Execution", "Protect one body from execution in the next actual vote only.",
+        "living_body", True,
+    ),
+    "booby_trap": ItemDefinition(
+        "booby_trap", "Booby Trap", "Prepare a room trap for next night. The next entering group triggers it once.",
+        "room", False,
+    ),
+    "lucky_coin": ItemDefinition(
+        "lucky_coin", "(Un)Lucky Coin", "Flip between your death and a chosen living body's death. Reusable.",
+        "living_body", False, reusable=True,
+    ),
+    "spin_the_dagger": ItemDefinition(
+        "spin_the_dagger", "Spin the Dagger", "Strike a random living person, possibly yourself.", "self", False,
+    ),
+    "presidential_decree": ItemDefinition(
+        "presidential_decree", "Presidential Decree", "Skip the next vote without spending pending extra ballots.",
+        "self", False,
+    ),
+    "occult_ritual": ItemDefinition(
+        "occult_ritual", "Occult Ritual", "Curse a body to die at the action phase after next.", "living_body", False,
+    ),
+    "revolver": ItemDefinition(
+        "revolver", "Revolver", "Shoot one living body immediately in public.", "living_body", False,
     ),
 })
 
@@ -102,6 +167,8 @@ class DraftOffer:
     offer_id: str
     room_id: str
     options: tuple[str, ...]
+    picks_remaining: int = 1
+    picked_item_ids: tuple[str, ...] = ()
 
 
 class DraftState:
@@ -115,6 +182,7 @@ class DraftState:
         self._pending_offer: DraftOffer | None = None
         self._seen_rooms: set[str] = set()
         self._rerolls_remaining = 1
+        self._extra_pick_armed = False
 
     @property
     def owner_id(self) -> str:
@@ -136,6 +204,22 @@ class DraftState:
     def rerolls_remaining(self) -> int:
         return self._rerolls_remaining
 
+    @property
+    def extra_pick_armed(self) -> bool:
+        return self._extra_pick_armed
+
+    def add_rerolls(self, count: int = 1) -> None:
+        if type(count) is not int or count < 1:
+            raise InventoryError("Added rerolls must be a positive integer")
+        self._rerolls_remaining += count
+
+    def arm_extra_pick(self) -> None:
+        if self._extra_pick_armed:
+            raise InventoryError("An extra room choice is already armed")
+        if len(self.eligible_item_ids) < 2:
+            raise InventoryError("The item pool has no second distinct choice")
+        self._extra_pick_armed = True
+
     def enter_room(self, room_id: str) -> DraftOffer | None:
         if not room_id:
             raise InventoryError("A room identifier is required")
@@ -146,9 +230,11 @@ class DraftState:
         if room_id in self._seen_rooms:
             return None
         options = tuple(self._rng.sample(self.eligible_item_ids, min(3, len(self.eligible_item_ids))))
-        offer = DraftOffer(uuid4().hex, room_id, options)
+        picks = min(2 if self._extra_pick_armed else 1, len(options))
+        offer = DraftOffer(uuid4().hex, room_id, options, picks)
         self._seen_rooms.add(room_id)
         self._pending_offer = offer
+        self._extra_pick_armed = False
         return offer
 
     def _require_offer(self, offer_id: str) -> DraftOffer:
@@ -167,12 +253,14 @@ class DraftState:
         self._require_slot(offer, slot_index)
         if not self._rerolls_remaining:
             raise InventoryError("The run's reroll has already been used")
-        alternatives = tuple(item_id for item_id in self.eligible_item_ids if item_id not in offer.options)
+        alternatives = tuple(item_id for item_id in self.eligible_item_ids
+                             if item_id not in offer.options and item_id not in offer.picked_item_ids)
         if not alternatives:
             raise InventoryError("No alternative items are available for this offer")
         options = list(offer.options)
         options[slot_index] = self._rng.choice(alternatives)
-        updated = DraftOffer(uuid4().hex, offer.room_id, tuple(options))
+        updated = DraftOffer(uuid4().hex, offer.room_id, tuple(options),
+                             offer.picks_remaining, offer.picked_item_ids)
         self._pending_offer = updated
         self._rerolls_remaining -= 1
         return updated
@@ -183,7 +271,12 @@ class DraftState:
         if inventory.owner_id != self.owner_id:
             raise InventoryError("This item offer belongs to another player")
         entry = inventory.grant(offer.options[slot_index])
-        self._pending_offer = None
+        remaining = tuple(item_id for index, item_id in enumerate(offer.options) if index != slot_index)
+        self._pending_offer = (
+            DraftOffer(uuid4().hex, offer.room_id, remaining, offer.picks_remaining - 1,
+                       (*offer.picked_item_ids, entry.item_id))
+            if offer.picks_remaining > 1 and remaining else None
+        )
         return entry
 
     def skip(self, offer_id: str) -> None:
