@@ -272,7 +272,11 @@ class HouseView(QWidget):
         side_width = int(self.image_rect.left()) - 24
         width = min(238, max(146, side_width))
         self.info_panel.setFixedWidth(width)
-        self.info_panel.adjustSize()
+        layout = self.info_panel.layout()
+        layout.invalidate()
+        height = layout.totalHeightForWidth(width)
+        self.info_panel.resize(width, height if height >= 0 else layout.sizeHint().height())
+        layout.activate()
         x = max(12, int(self.image_rect.left()) - width - 24)
         y = max(12, int(self.image_rect.top() + self.image_rect.height() * 0.38))
         if side_width < 146:

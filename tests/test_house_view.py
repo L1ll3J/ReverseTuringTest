@@ -304,6 +304,24 @@ class HouseStudyTests(unittest.TestCase):
                 self.assertLessEqual(view.info_panel.width(), 238)
                 self.assertLessEqual(view.info_panel.geometry().right(), view.image_rect.left())
 
+    def test_narrow_observation_helper_has_room_for_every_wrapped_line(self):
+        self.window.projection.setCurrentIndex(1)
+        for width, height in ((800, 600), (1280, 800), (800, 600)):
+            self.window.resize(width, height)
+            self.app.processEvents()
+            for room_id in ("library", "cellar"):
+                with self.subTest(size=(width, height), room=room_id):
+                    view = self.window.house
+                    QApplication.sendEvent(view.buttons[room_id], QEvent(QEvent.Enter))
+                    self.app.processEvents()
+                    body = view.info_body
+                    required_height = body.heightForWidth(body.width())
+                    self.assertGreaterEqual(body.height(), required_height)
+                    self.assertTrue(view.info_panel.rect().contains(body.geometry()))
+                    self.assertTrue(view.rect().contains(view.info_panel.geometry()))
+                    if room_id == "library":
+                        self.assertIn("Light observed on.", body.text())
+
 
 if __name__ == "__main__":
     unittest.main()
