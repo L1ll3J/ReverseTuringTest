@@ -140,7 +140,9 @@ class ItemIntegrationTests(unittest.TestCase):
                             for label in descriptions))
         self.assertTrue(all(QFontInfo(label.font()).family() == self.window.pixel_font_family for label in names))
         self.assertTrue(all(QFontInfo(button.font()).family() == self.window.pixel_font_family
-                            for button in page.findChildren(QPushButton)))
+                            for button in page.take_buttons.values()))
+        self.assertTrue(all(QFontInfo(button.font()).family() != self.window.pixel_font_family
+                            for button in page.reroll_buttons.values()))
         for label in labels:
             if label.wordWrap():
                 self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()))
@@ -425,7 +427,7 @@ class ItemIntegrationTests(unittest.TestCase):
                     boxes = editor.findChildren(QComboBox)
                     boxes[-1].setCurrentText("Hank" if weapon_id == "knife"
                                              else "Jerry" if weapon_id == "blackmagic" else "Cellar")
-                save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Save")
+                save = next(button for button in editor.findChildren(QPushButton) if button.text() == ("Confirm" if weapon_id == "knife" else "Save"))
                 before = configuration()
                 QTest.mouseClick(self.window.room_buttons["Basement"], Qt.LeftButton)
                 offer = self.window.item_drafts.pending_offer
@@ -479,7 +481,7 @@ class ItemIntegrationTests(unittest.TestCase):
                     if weapon_id == "blackmagic":
                         boxes[0].setCurrentText("Dave")
                     boxes[-1].setCurrentText("Kitchen" if weapon_id == "c4" else "Hank")
-                save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Save")
+                save = next(button for button in editor.findChildren(QPushButton) if button.text() == ("Confirm" if weapon_id == "knife" else "Save"))
                 QTest.mouseClick(save, Qt.LeftButton)
                 self.assertTrue(editor.isHidden())
                 self.assertTrue(self.window.room_buttons["Basement"].isEnabled())
@@ -501,7 +503,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.open_knife_dialog()
         editor = self.window._weapon_windows["knife"]
         editor.findChild(QComboBox).setCurrentText("Hank")
-        save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Save")
+        save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Confirm")
         QTest.mouseClick(self.window.room_buttons["Basement"], Qt.LeftButton)
         self.assertIsNone(self.window.draft_page)
         self.assertIsNone(self.window.pending_room_action)
@@ -638,7 +640,6 @@ class ItemIntegrationTests(unittest.TestCase):
         viewport = page.scroll.viewport()
         top = viewport.mapTo(self.window, QPoint(0, 0)).y()
         self.assertGreater(top, self.window.transcript_button.geometry().bottom())
-        self.assertGreater(page.scroll.verticalScrollBar().maximum(), 0)
         self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
         page.take_buttons[0].setFocus()
         QTest.keyClick(page.take_buttons[0], Qt.Key_Tab)
@@ -1365,7 +1366,7 @@ class ItemIntegrationTests(unittest.TestCase):
     def test_known_equipment_refreshes_after_kill_before_watch_bonus(self):
         self.window.npc_items = game.NPCItemState({"Dave": "camera"})
         self.watch_night()
-        self.assertEqual(self.window.npc_equipment_label.text(), "Known equipment\nDave: Camera")
+        self.assertEqual(self.window.npc_equipment_label.text(), "")
         self.window.choose_room("Attic")
         self.settle_offer()
         self.window.kill_victim("Dave")
@@ -1376,8 +1377,8 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.npc_equipment_label.text(), "")
         self.assertTrue(self.window.npc_equipment_label.isHidden())
         self.assertEqual(dict(self.window.npc_items.equipment), {"Dave": "camera"})
-        self.assertTrue(any(record.text == "Known equipment: Dave is carrying a Camera."
-                            for record in self.window.history_records))
+        self.assertFalse(any(record.text == "Known equipment: Dave is carrying a Camera."
+                             for record in self.window.history_records))
 
     def test_known_equipment_refresh_after_conversation_death_stays_hidden(self):
         self.window.npc_items = game.NPCItemState({"Hank": "camera"})
@@ -1386,7 +1387,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.npc_equipment_label.isHidden())
         self.assertTrue(self.window.apply_item_events(self.resolved_item_events()))
         self.assertFalse(self.window.characters["Dave"]["alive"])
-        self.assertEqual(self.window.npc_equipment_label.text(), "Known equipment\nHank: Camera")
+        self.assertEqual(self.window.npc_equipment_label.text(), "")
         self.assertTrue(self.window.npc_equipment_label.isHidden())
 
     def test_known_equipment_excludes_possessed_player_identity(self):
@@ -1405,7 +1406,7 @@ class ItemIntegrationTests(unittest.TestCase):
     def test_known_equipment_is_logically_hidden_at_game_over(self):
         self.window.npc_items = game.NPCItemState({"Hank": "camera"})
         self.night()
-        self.assertFalse(self.window.npc_equipment_label.isHidden())
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
         self.window.end_game_screen(0)
         self.assertTrue(self.window.npc_equipment_label.isHidden())
 
@@ -1477,7 +1478,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.player_alive)
         self.assertTrue(self.window.guardian_intervened_this_run)
         self.assertIn("presidential_decree", self.window.profile.unlocked)
-        self.assertNotIn("lucky_coin", self.window.profile.unlocked)
+        self.assertIn("lucky_coin", self.window.profile_store.item_pool())
         self.assertNotIn("spin_the_dagger", self.window.profile.unlocked)
         self.window.run_action_phase()
         for name in ("Dave", "Jerry", "Hank", "Owen"):
@@ -1485,11 +1486,44 @@ class ItemIntegrationTests(unittest.TestCase):
             self.assertTrue(self.window.commit_attack(name, room))
         self.window.finish_night()
         self.assertTrue(self.window.game_over)
-        self.assertIn("lucky_coin", self.window.profile.unlocked)
+        self.assertNotIn("guardian_angel", self.window.profile.unlocked)
         self.assertIn("spin_the_dagger", self.window.profile.unlocked)
         self.assertEqual(self.window.profile.counters["three_item_types_victory"], 1)
         self.window.end_game_screen(5)
-        self.assertEqual(self.window.profile.counters["guardian_intervention_run_survived"], 1)
+        self.assertNotIn("coin_survived_run_alive", self.window.profile.counters)
+
+    def test_survived_coin_unlocks_guardian_only_after_actual_run_victory_once(self):
+        self.conversation()
+        coin = self.window.inventory.grant("lucky_coin")
+        target = next(body for body in self.window.body_states() if body.label == "Dave")
+        with patch.object(self.window.item_rules._rng, "choice", return_value=target):
+            self.assertTrue(self.window.use_inventory_item(coin.instance_id, target.body_id, activation_id="won-coin"))
+            self.assertTrue(self.window.use_inventory_item(coin.instance_id, target.body_id, activation_id="won-coin"))
+        self.assertTrue(self.window.coin_survived_this_run)
+        self.assertNotIn("guardian_angel", self.window.profile.unlocked)
+        self.assertIn(coin, self.window.inventory.entries)
+        for name, data in self.window.characters.items():
+            data["alive"] = False
+        self.window.end_game_screen(5)
+        self.assertIn("guardian_angel", self.window.profile.unlocked)
+        self.assertEqual(self.window.profile.counters["coin_survived_run_alive"], 1)
+        self.window.end_game_screen(5)
+        self.assertEqual(self.window.profile.counters["coin_survived_run_alive"], 1)
+
+    def test_survived_coin_does_not_unlock_guardian_if_player_later_dies(self):
+        self.conversation()
+        coin = self.window.inventory.grant("lucky_coin")
+        target = next(body for body in self.window.body_states() if body.label == "Dave")
+        player = next(body for body in self.window.body_states() if body.label == "Alex")
+        with patch.object(self.window.item_rules._rng, "choice", return_value=target):
+            self.assertTrue(self.window.use_inventory_item(coin.instance_id, target.body_id))
+        self.assertTrue(self.window.coin_survived_this_run)
+        with patch.object(self.window.item_rules._rng, "choice", return_value=player):
+            self.assertTrue(self.window.use_inventory_item(coin.instance_id, self.window.body_id("Hank")))
+        self.assertTrue(self.window.game_over)
+        self.assertFalse(self.window.player_alive)
+        self.assertNotIn("guardian_angel", self.window.profile.unlocked)
+        self.assertNotIn("coin_survived_run_alive", self.window.profile.counters)
 
     def test_watch_controlled_attack_keeps_controller_and_bonus_separate(self):
         self.watch_night("blackmagic", "Hank")

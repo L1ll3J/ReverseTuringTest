@@ -19,7 +19,7 @@ from PyQt5 import sip
 from PyQt5.QtCore import QCoreApplication, QEvent, Qt
 from PyQt5.QtGui import QColor, QFont, QFontInfo, QPalette
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QComboBox, QDialog, QPushButton
 
 import main as game
 
@@ -170,18 +170,18 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.window.message_log.clear()
         self.window.show_transcript()
         text = self.window.transcript_page.editor.toPlainText()
-        self.assertIn("Dave is carrying a Camera", text)
+        self.assertNotIn("Dave is carrying a Camera", text)
         self.assertIn(f"The {empty} is empty and is now also a crime scene.", text)
         self.assertNotIn("You must choose another room.", text)
 
-    def test_known_equipment_moves_from_weapon_selection_to_house_sidebar(self):
+    def test_camera_equipment_stays_private_from_weapon_selection_through_action(self):
         self.window.player_name_input.setText("Alex")
         with patch.object(game.NPCItemState, "allocate", return_value=game.NPCItemState({"Dave": "camera"})):
             self.window.phase = "start"
             self.window.start_game()
         expected = "Known equipment: Dave is carrying a Camera."
         public_equipment = [event for event in self.window.public_events if event.source == "Visible equipment"]
-        self.assertEqual([(event.round_number, event.text) for event in public_equipment], [(0, expected)])
+        self.assertEqual([(event.round_number, event.text) for event in public_equipment], [])
         self.assertTrue(self.window.npc_equipment_label.isHidden())
         self.assertEqual(self.window.layout.indexOf(self.window.npc_equipment_label), -1)
         self.assertIs(self.window.npc_equipment_label.parentWidget(), self.window.house_sidebar_content)
@@ -190,22 +190,22 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.window.select_weapon_and_start(bare)
         self.app.processEvents()
         label = self.window.npc_equipment_label
-        self.assertTrue(label.isVisible())
-        self.assertEqual(label.text(), "Known equipment\nDave: Camera")
+        self.assertTrue(label.isHidden())
+        self.assertEqual(label.text(), "")
         self.assertEqual(label.font().pixelSize(), 18)
         self.assertTrue(all(not record.known_names and record.unknown_remainder
                             for record in self.window.house_view.observations.values()))
         self.assertNotIn("Known equipment", self.window.output_area.toPlainText())
         self.assertEqual([record.text for record in self.window.history_records if record.text == expected],
-                         [expected, expected])
+                         [])
         self.assertEqual([event.text for event in self.window.public_events if event.source == "Visible equipment"],
-                         [expected])
+                         [])
 
-    def test_no_living_equipment_hides_section_but_preserves_nightly_history(self):
+    def test_dead_and_absent_equipment_never_adds_disclosure_history(self):
         self.window.npc_items = game.NPCItemState({"Dave": "camera"})
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.run_action_phase()
-        self.assertEqual(self.window.npc_equipment_label.text(), "Known equipment\nDave: Camera")
+        self.assertEqual(self.window.npc_equipment_label.text(), "")
         self.window.characters["Dave"]["alive"] = False
         self.window.run_action_phase()
         self.assertTrue(self.window.npc_equipment_label.isHidden())
@@ -213,33 +213,33 @@ class PresentationIntegrationTests(unittest.TestCase):
         empty_equipment = "Known equipment: No special equipment is visible."
         self.assertEqual([record.text for record in self.window.history_records
                           if record.round_number == self.window.round_number
-                          and record.text.startswith("Known equipment:")], [empty_equipment])
+                          and record.text.startswith("Known equipment:")], [])
         self.assertNotIn(empty_equipment, self.window.output_area.toPlainText())
         self.window.npc_items = game.NPCItemState()
         self.window.run_action_phase()
         self.assertTrue(self.window.npc_equipment_label.isHidden())
         self.assertEqual([record.text for record in self.window.history_records
                           if record.round_number == self.window.round_number
-                          and record.text.startswith("Known equipment:")], [empty_equipment])
+                          and record.text.startswith("Known equipment:")], [])
 
-    def test_equipment_sidebar_follows_reward_and_discussion_visibility(self):
+    def test_equipment_stays_hidden_across_reward_discussion_and_action(self):
         from items import DraftState
         self.window.npc_items = game.NPCItemState({"Dave": "camera"})
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.item_drafts = DraftState(self.window.player_owner_id, ("banana", "muffle", "spare_paper"))
         self.window.run_action_phase()
-        self.assertTrue(self.window.npc_equipment_label.isVisible())
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
         empty = next(room for room, occupants in self.window.room_assignments.items() if not occupants)
         self.window.choose_room(empty)
         self.assertFalse(self.window.npc_equipment_label.isVisible())
         self.window.draft_page.leave_button.click()
-        self.assertTrue(self.window.npc_equipment_label.isVisible())
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
         self.assertIn("empty", self.window.output_area.toPlainText())
         self.window.victims_last_night = ["Earlier victim"]
         self.window.run_conversation_phase()
         self.assertFalse(self.window.npc_equipment_label.isVisible())
         self.window.run_action_phase()
-        self.assertTrue(self.window.npc_equipment_label.isVisible())
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
 
     def test_action_feedback_has_black_background_and_expanded_phases_restore_style(self):
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
@@ -256,11 +256,11 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.window.run_conversation_phase()
         self.app.processEvents()
         self.assertEqual(self.window.message_log.maximumHeight(), 16777215)
-        self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("#1E1E1E"))
+        self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("black"))
         with patch.object(self.window, "start_ai_request"):
             self.window.run_voting_phase()
         self.assertEqual(self.window.message_log.maximumHeight(), 16777215)
-        self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("#1E1E1E"))
+        self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("black"))
 
     def test_game_over_directly_from_action_restores_normal_output_background(self):
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
@@ -269,7 +269,7 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.window.end_game_screen(4)
         self.app.processEvents()
         self.assertEqual(self.window.message_log.maximumHeight(), 16777215)
-        self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("#1E1E1E"))
+        self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("black"))
         self.assertTrue(editor.isVisible())
 
     def test_controlled_attacker_is_retained_in_private_player_history(self):
@@ -304,6 +304,66 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.window.append_speech("Hank", "After the old page closed.")
         self.window.show_transcript()
         self.assertIn("After the old page closed.", self.window.transcript_page.editor.toPlainText())
+
+    def test_stage_phase_lifecycle_and_body_target_clicks(self):
+        self.window.refresh_conversation_stage()
+        stage = self.window.conversation_stage
+        self.assertTrue(stage.isVisible())
+        ids = {p.body_id for p in stage.participants}
+        self.assertEqual(ids, {self.window.body_id(name) for name in self.window.characters})
+        self.window.append_speech("Hank", "A visible account.")
+        self.assertEqual(stage.active_speaker, self.window.body_id("Hank"))
+        self.window.characters["Dave"]["alive"] = False
+        self.window.refresh_conversation_stage()
+        self.assertNotIn(self.window.body_id("Dave"), {p.body_id for p in stage.participants})
+        body_id = self.window.body_id("Jerry")
+        QTest.mouseClick(stage._buttons[body_id], Qt.LeftButton)
+        self.assertEqual(self.window.recipient_selector.currentData(), body_id)
+        self.assertTrue(self.window.interject_input.isVisible())
+        self.window.selected_weapon = next(w for w in self.window.weapons if w["id"] == "bare")
+        self.window.run_action_phase()
+        self.assertTrue(stage.isHidden())
+        with patch.object(game.random, "choice", return_value="Hank"):
+            self.window.run_conversation_phase()
+        self.assertTrue(stage.isVisible())
+        with patch.object(self.window, "start_ai_request"):
+            self.window.run_voting_phase()
+        self.assertEqual(self.window.phase, "voting")
+        self.assertTrue(stage.isHidden())
+
+    def test_microphone_preferences_and_pause_settings_use_one_overlay_without_recording(self):
+        recorder = self.window.dictation_recorder
+        self.window.preferences.save_player_name("Remembered player")
+        with patch.object(recorder, "input_devices", return_value=[("usb-input", "USB microphone")]), patch.object(
+                recorder, "start", side_effect=AssertionError("Settings must not open audio")):
+            self.window.open_escape_menu()
+            host = self.window.overlay_host
+            menu = host.current_page
+            self.assertIsNone(menu.findChild(QPushButton, "pauseModels"))
+            menu.findChild(QPushButton, "pauseMicrophone").click()
+            selector = host.current_page.findChild(QComboBox, "microphoneDeviceSelector")
+            self.assertEqual(selector.currentData(), "")
+            selector.setCurrentIndex(selector.findData("usb-input"))
+            selector.activated[int].emit(selector.currentIndex())
+            self.assertEqual(recorder.device_name, "usb-input")
+            self.assertEqual(self.window.preferences.microphone_name(), "usb-input")
+            self.assertEqual(self.window.preferences.last_player_name(), "Remembered player")
+            self.window.show_microphone_settings()
+            selector = host.current_page.findChild(QComboBox, "microphoneDeviceSelector")
+            self.assertEqual(selector.currentData(), "usb-input")
+            selector.setCurrentIndex(selector.findData(""))
+            selector.activated[int].emit(selector.currentIndex())
+            self.assertEqual(recorder.device_name, "")
+            self.assertEqual(self.window.preferences.microphone_name(), "")
+            self.assertEqual(len([w for w in self.app.topLevelWidgets() if isinstance(w, QDialog) and w.isVisible()]), 1)
+            current = host.current_page
+            self.window.show_model_configuration()
+            self.assertIs(host.current_page, current)
+            host.current_page.findChild(QPushButton, "settingsBack").click()
+            self.assertEqual(host.current_title, "Menu")
+            host.current_page.findChild(QPushButton, "pauseResume").click()
+            self.assertIsNone(host.current_page)
+            self.assertFalse(recorder.is_recording)
 
     def test_restart_cancels_old_overlay_and_starts_with_empty_history(self):
         self.window.append_speech("Dave", "Previous run.")

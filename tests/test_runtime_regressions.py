@@ -116,7 +116,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertIs(self.window.menu_stack.currentWidget(), self.window.play_page)
         self.window.items_tab_button.click()
         self.assertEqual(self.window.phase, "start")
-        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue_page)
         self.assertTrue(self.window.item_catalogue.isVisible())
         self.assertFalse(self.window.player_name_input.isVisible())
         self.assertTrue(self.window.items_tab_button.isChecked())
@@ -144,7 +144,7 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.assertFalse(rectangle.intersects(self.window.how_to_play_button.geometry()))
 
     def test_browsing_item_catalogue_preserves_existing_profile_data(self):
-        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "coin_survived_run_alive"))
         original = self.window.profile_store.path.read_bytes()
         with patch.object(self.window.profile_store, "set_item_enabled") as toggle:
             for _ in range(2):
@@ -155,7 +155,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(self.window.profile_store.path.read_bytes(), original)
 
     def test_item_menu_pool_toggle_persists_then_freezes_at_run_start(self):
-        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "coin_survived_run_alive"))
         self.window.items_tab_button.click()
         self.window.item_catalogue.checkboxes["guardian_angel"].setChecked(False)
         self.assertIn("guardian_angel", self.window.profile_store.read().disabled_items)
@@ -184,13 +184,13 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(self.window.phase, "action")
 
     def test_item_menu_save_failure_preserves_checkbox_and_shows_error_on_items_page(self):
-        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "coin_survived_run_alive"))
         self.window.items_tab_button.click()
         original = self.window.profile_store.path.read_bytes()
         with patch.object(self.window.profile_store, "set_item_enabled", side_effect=ProfileError("Disk is unavailable.")):
             self.window.item_catalogue.checkboxes["guardian_angel"].setChecked(False)
         self.assertTrue(self.window.item_catalogue.checkboxes["guardian_angel"].isChecked())
-        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue_page)
         self.assertTrue(self.window.progress_notice.isVisible())
         self.assertIn("Disk is unavailable", self.window.progress_notice.text())
         self.assertTrue(self.window.item_catalogue.error_label.isVisible())
@@ -201,13 +201,13 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertTrue(self.window.item_catalogue.error_label.isHidden())
 
     def test_items_page_load_error_preserves_corrupt_file_and_retry_refreshes_same_page(self):
-        self.window.profile_store.record(ProgressEvent("earlier", 1, "survived_vote"))
+        self.window.profile_store.record(ProgressEvent("earlier", 1, "coin_survived_run_alive"))
         original = self.window.profile_store.path.read_bytes()
         self.window.profile_store.path.write_bytes(b"broken profile")
         self.window.items_tab_button.click()
         self.assertTrue(self.window.progress_notice.isVisible())
         self.assertIn("invalid", self.window.progress_notice.text())
-        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue_page)
         self.assertFalse(self.window.item_catalogue.checkboxes)
         self.assertEqual(self.window.profile_store.path.read_bytes(), b"broken profile")
         self.window.progress_retry_button.click()
@@ -216,7 +216,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.window.profile_store.path.write_bytes(original)
         self.window.progress_retry_button.click()
         self.assertTrue(self.window.progress_retry_button.isHidden())
-        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue)
+        self.assertIs(self.window.menu_stack.currentWidget(), self.window.item_catalogue_page)
         self.assertIn("guardian_angel", self.window.item_catalogue.checkboxes)
         self.assertEqual(self.window.profile_store.path.read_bytes(), original)
 
@@ -391,7 +391,7 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.window.phase = "conversation"
         literal = "Jerry's <b>note</b> & a literal &#x27;\nA second line."
         self.window.add_public_event(literal)
-        self.assertEqual(self.window.output_area.toPlainText(), literal)
+        self.assertEqual(self.window.output_area.toPlainText(), "Detective\n" + literal)
         self.assertEqual(self.window.public_events[-1].text, literal)
         self.assertEqual(self.window.history_records[-1].text, literal)
 
@@ -581,14 +581,14 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertTrue(scroll.isVisible())
         self.assertLessEqual(scroll.width(), self.window.width())
         self.assertEqual(self.window.weapon_grid.count(), len(self.window.weapons))
-        self.assertGreater(scroll.verticalScrollBar().maximum(), 0)
         self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
-        last_card = self.window.weapon_grid.itemAt(len(self.window.weapons) - 1).widget()
-        scroll.ensureWidgetVisible(last_card)
-        self.app.processEvents()
-        self.assertTrue(scroll.viewport().rect().intersects(
-            last_card.rect().translated(last_card.mapTo(scroll.viewport(), last_card.rect().topLeft()))
-        ))
+        for index in range(self.window.weapon_grid.count()):
+            card = self.window.weapon_grid.itemAt(index).widget()
+            scroll.ensureWidgetVisible(card)
+            self.app.processEvents()
+            self.assertTrue(scroll.viewport().rect().contains(
+                card.rect().translated(card.mapTo(scroll.viewport(), card.rect().topLeft()))
+            ))
 
     def test_source_resources_load_outside_working_directory(self):
         original_cwd = os.getcwd()
@@ -1077,7 +1077,7 @@ class RuntimeRegressionTests(unittest.TestCase):
                 worker.wait(3000)
             self.app.processEvents()
 
-    def test_camera_equipment_is_action_information_without_revealing_rooms_in_hard_mode(self):
+    def test_camera_equipment_never_leaks_before_morning_in_hard_mode(self):
         self.window.show_room_allocations = False
         self.window.player_name_input.setText("Alex")
         camera = game.NPCItemState({"Hank": "camera"})
@@ -1086,15 +1086,15 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertTrue(self.window.npc_equipment_label.isHidden())
         bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.select_weapon_and_start(bare)
-        self.assertTrue(self.window.npc_equipment_label.isVisible())
-        self.assertEqual(self.window.npc_equipment_label.text(), "Known equipment\nHank: Camera")
+        self.assertTrue(self.window.npc_equipment_label.isHidden())
+        self.assertEqual(self.window.npc_equipment_label.text(), "")
         self.assertFalse(any(room in self.window.npc_equipment_label.text() for room in self.window.rooms))
         text = self.window.output_area.toPlainText()
         self.assertNotIn("Known equipment", text)
         self.assertNotIn("Room Assignments", text)
         self.assertNotIn("Visible room:", text)
         context = self.window.build_character_context("Jerry")
-        self.assertTrue(any(event.source == "Visible equipment" for event in context.public_events))
+        self.assertFalse(any(event.source == "Visible equipment" for event in context.public_events))
         self.assertFalse(any(event.source == "Photograph" for event in context.public_events))
 
     def test_camera_captures_before_attack_and_presents_once_after_owner_dies(self):
