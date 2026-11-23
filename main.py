@@ -3164,10 +3164,15 @@ class GameWindow(QMainWindow):
                 self.c4_cooldown_nights = 2
 
                 if victims:
-                    self.record_history(f"The C4 detonates in the {target_room}. It kills: {', '.join(self.perceived_actor(victim) for victim in victims)}.\n", display=True)
+                    killed_names = []
                     for v in victims:
                         if self.characters.get(v, {}).get("alive"):
-                            self.commit_attack(v, target_room, weapon_id="c4")
+                            name = self.perceived_actor(v)
+                            if self.commit_attack(v, target_room, weapon_id="c4"):
+                                killed_names.append(name)
+                    outcome = ("It kills: " + ", ".join(killed_names) + "."
+                               if killed_names else "No one is killed.")
+                    self.record_history(f"The C4 detonates in the {target_room}. {outcome}\n", display=True)
                     self.new_crime_scenes = [target_room]
                     self._override_murder_room = target_room
                     self.trace_action("explosion_resolved", room=target_room,
