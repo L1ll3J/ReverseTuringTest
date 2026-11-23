@@ -152,7 +152,7 @@ class AppearanceRoutingTests(unittest.TestCase):
         victim = editor.findChild(QComboBox)
         victim.setCurrentIndex(victim.findData(self.window.body_id("Dave")))
         self.assertEqual(victim.currentText(), "Debra")
-        next(button for button in editor.findChildren(QPushButton) if button.text() == "Save").click()
+        next(button for button in editor.findChildren(QPushButton) if button.text() == "Confirm").click()
         self.assertEqual(self.window.knife_extra_target, "Dave")
         self.assertNotIn("#", self.window.history_records[-1].text)
 

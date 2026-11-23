@@ -16,7 +16,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PyQt5.QtCore import QCoreApplication, QEvent, QSize, Qt
-from PyQt5.QtGui import QFont, QPixmap
+from PyQt5.QtGui import QFont, QPixmap, QRegion
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QDialog, QPushButton
 
@@ -37,7 +37,9 @@ class VoiceSettingsIntegrationTests(unittest.TestCase):
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
         self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.dict(os.environ, {
             "ALIBAI_SETTINGS_PATH": str(Path(self.directory.name) / "settings.ini"),
             "ALIBAI_PROFILE_PATH": str(Path(self.directory.name) / "profile.json"),
@@ -160,30 +162,35 @@ class VoiceSettingsIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.pass_button.isEnabled())
         self.assertEqual(self.window.dictation_binding_badge.text(), InputBinding.for_key(Qt.Key_PageUp).label)
 
+    def visible_microphone_image(self, path):
+        artwork = QPixmap(str(path))
+        self.assertFalse(artwork.isNull())
+        bounds = QRegion(artwork.mask()).boundingRect()
+        self.assertFalse(bounds.isEmpty())
+        return artwork.copy(bounds).scaled(48, 48, Qt.KeepAspectRatio, Qt.FastTransformation).toImage()
+
     def test_microphone_sprite_states_accessibility_and_static_active_highlight(self):
         self.open_input()
         button = self.window.dictation_button
         self.assertEqual(button.text(), "")
         self.assertEqual(button.accessibleName(), "Record voice")
-        self.assertIn("Record voice", button.toolTip())
+        self.assertEqual(button.toolTip(), "")
         self.assertEqual(button.iconSize(), QSize(48, 48))
         self.assertGreaterEqual(button.width(), 64)
         self.assertFalse(button.icon().isNull())
         self.assertFalse(button.isChecked())
         self.assertFalse(self.window.dictation_glow.isEnabled())
         idle = button.icon().pixmap(button.iconSize()).toImage()
-        expected_idle = QPixmap(game.resource_path("icons/ui/microphone-idle.png")).scaled(
-            48, 48, Qt.KeepAspectRatio, Qt.FastTransformation).toImage()
+        expected_idle = self.visible_microphone_image(game.resource_path("icons/ui/microphone-idle.png"))
         self.assertEqual(idle, expected_idle)
         before = tuple(self.window.public_dialogue)
         button.click()
         self.assertEqual(button.accessibleName(), "Stop recording")
-        self.assertIn("Stop recording", button.toolTip())
+        self.assertEqual(button.toolTip(), "")
         self.assertTrue(button.isChecked())
         self.assertTrue(self.window.dictation_glow.isEnabled())
         active = button.icon().pixmap(button.iconSize()).toImage()
-        expected_active = QPixmap(game.resource_path("icons/ui/microphone-recording.png")).scaled(
-            48, 48, Qt.KeepAspectRatio, Qt.FastTransformation).toImage()
+        expected_active = self.visible_microphone_image(game.resource_path("icons/ui/microphone-recording.png"))
         self.assertEqual(active, expected_active)
         self.assertNotEqual(active, idle)
         self.window.cancel_dictation()
@@ -198,9 +205,11 @@ class VoiceSettingsIntegrationTests(unittest.TestCase):
         asset_root = Path(self.directory.name) / "bundle"
         sprite_root = asset_root / "icons" / "ui"
         sprite_root.mkdir(parents=True)
+        source_bytes = {}
         for name in ("idle", "recording"):
             original = Path(game.resource_path(f"icons/ui/microphone-{name}.png"))
-            (sprite_root / original.name).write_bytes(original.read_bytes())
+            source_bytes[name] = original.read_bytes()
+            (sprite_root / original.name).write_bytes(source_bytes[name])
         house_asset = Path(game.resource_path("House_images/house-cutaway-v1.png"))
         house_root = asset_root / "House_images"
         house_root.mkdir()
@@ -208,9 +217,10 @@ class VoiceSettingsIntegrationTests(unittest.TestCase):
         with patch.object(sys, "_MEIPASS", str(asset_root), create=True):
             window = self.make_window()
         for recording, name in ((False, "idle"), (True, "recording")):
-            expected = QPixmap(str(sprite_root / f"microphone-{name}.png")).scaled(
-                48, 48, Qt.KeepAspectRatio, Qt.FastTransformation).toImage()
+            packaged = sprite_root / f"microphone-{name}.png"
+            expected = self.visible_microphone_image(packaged)
             self.assertEqual(window.dictation_icons[recording].pixmap(48, 48).toImage(), expected)
+            self.assertEqual(packaged.read_bytes(), source_bytes[name])
 
     def test_microphone_error_and_transcription_keep_idle_state_without_sending(self):
         self.open_input()
@@ -279,6 +289,7 @@ class VoiceSettingsIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.window.overlay_host.current_page)
         self.assertIsNone(self.window._esc_overlay)
 
+    @patch.dict(os.environ, {"ALIBAI_DEV_MODE": "1"})
     def test_settings_replace_one_overlay_and_render_actual_runtime_configuration(self):
         self.window.ai_runtime.config = replace(self.window.ai_runtime.config, speech_model="configured-model", reasoning_effort="medium")
         self.window.open_escape_menu()
@@ -374,6 +385,26 @@ class VoiceSettingsIntegrationTests(unittest.TestCase):
         self.assertTrue(replacement.dictation_bindings._closed)
         self.assertTrue(replacement.dictation_recorder.closed)
         self.assertTrue(replacement.overlay_host.owner_cancelled)
+
+
+class VoiceSettingsFixtureCleanupTests(unittest.TestCase):
+    def test_failed_setup_restores_patches_and_removes_temporary_directory(self):
+        original_transcribe = game.AIRuntime.transcribe
+        original_recorder = game.DictationRecorder
+        original_connect = socket.socket.connect
+        previous_settings = os.environ.get("ALIBAI_SETTINGS_PATH")
+        fixture = VoiceSettingsIntegrationTests("test_controls_are_reachable_from_title_and_persist_without_default_binding")
+        with patch.object(fixture, "make_window", side_effect=RuntimeError("Injected setup failure")):
+            result = unittest.TestResult()
+            fixture.run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("Injected setup failure", result.errors[0][1])
+        self.assertIs(game.AIRuntime.transcribe, original_transcribe)
+        self.assertIs(game.DictationRecorder, original_recorder)
+        self.assertIs(socket.socket.connect, original_connect)
+        self.assertEqual(os.environ.get("ALIBAI_SETTINGS_PATH"), previous_settings)
+        self.assertFalse(Path(fixture.directory.name).exists())
 
 
 if __name__ == "__main__":
