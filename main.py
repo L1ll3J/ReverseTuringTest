@@ -20,7 +20,7 @@ from game_rules import BodyState, ItemUseContext, PlayerItemRules, ItemRuleError
 from muffled import muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
-from item_ui import ItemDraftDialog, InventoryPage
+from item_ui import InlineItemDraftPage, InventoryPage
 from item_catalogue_ui import ItemCataloguePanel
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea
@@ -173,7 +173,8 @@ class GameWindow(QMainWindow):
         self.inventory = Inventory(self.player_owner_id)
         self.item_rules = PlayerItemRules(self.player_owner_id, self.inventory)
         self.item_drafts = None
-        self.draft_dialog = None
+        self.draft_page = None
+        self._draft_room_selection_visible = False
         self.inventory_page = None
         self.transcript_page = None
         self.help_page = None
@@ -352,30 +353,62 @@ class GameWindow(QMainWindow):
         return self.profile
 
     def offer_room_item(self, room, continuation):
-        # The continuation owns the accepted action. Closing an offer is an explicit skip.
-        if self.pending_room_action is not None:
+        # Only an explicit item choice or Leave resumes the accepted room action.
+        if self.phase != "action" or self.game_over or self.pending_room_action is not None:
             return
         offer = self.item_drafts.enter_room(room) if self.item_drafts else None
         if offer is None:
             continuation()
             return
         self.pending_room_action = continuation
+        self._draft_room_selection_visible = not self.room_buttons_widget.isHidden()
         self.trace_action("item_offer_created", offer=offer)
         self.set_room_buttons_enabled(False)
+        self.room_buttons_widget.hide()
+        self.weapon_action_panel.hide()
         self.show_item_offer(offer)
 
     def show_item_offer(self, offer):
-        if self.draft_dialog is not None:
-            self.draft_dialog.resolve()
-            self.draft_dialog.deleteLater()
-        self.draft_dialog = ItemDraftDialog(
-            offer, ITEM_CATALOGUE, self.item_drafts.rerolls_remaining,
-            bool(set(self.item_drafts.eligible_item_ids) - set(offer.options)),
-            self.choose_item_offer, self.reroll_item_offer,
-            lambda: self.skip_item_offer(offer.offer_id), readable_body_font(), self)
-        self.draft_dialog.open()
+        self.retire_item_offer_page()
+        self.draft_page = InlineItemDraftPage(
+            offer, ITEM_CATALOGUE, self.choose_item_offer,
+            self.reroll_item_offer, self.skip_item_offer,
+            reroll_count=self.item_drafts.rerolls_remaining,
+            can_reroll=bool(set(self.item_drafts.eligible_item_ids) - set(offer.options)),
+            body_font=readable_body_font(), title_font=self.speaker_font,
+        )
+        self.layout.insertWidget(self.layout.indexOf(self.room_buttons_widget), self.draft_page, 1)
+        self.draft_page.show()
+        self.layout.activate()
+        self.position_corner_controls()
+        self.draft_page.take_buttons[0].setFocus(Qt.OtherFocusReason)
+
+    def item_offer_is_current(self, offer_id):
+        offer = self.item_drafts.pending_offer if self.item_drafts is not None else None
+        return (self.phase == "action" and not self.game_over
+                and self.pending_room_action is not None
+                and offer is not None and offer.offer_id == offer_id)
+
+    def retire_item_offer_page(self):
+        page = self.draft_page
+        self.draft_page = None
+        if page is not None:
+            self.layout.removeWidget(page)
+            page.hide()
+            # A choice or reroll may still be executing this page's signal.
+            page.deleteLater()
+
+    def cancel_item_offer(self):
+        """Invalidate an obsolete phase's offer without accepting its room action."""
+        self.pending_room_action = None
+        self._draft_room_selection_visible = False
+        if self.item_drafts is not None and self.item_drafts.pending_offer is not None:
+            self.item_drafts.skip(self.item_drafts.pending_offer.offer_id)
+        self.retire_item_offer_page()
 
     def choose_item_offer(self, offer_id, slot):
+        if not self.item_offer_is_current(offer_id):
+            return
         try:
             entry = self.item_drafts.choose(offer_id, slot, self.inventory)
         except InventoryError:
@@ -385,6 +418,8 @@ class GameWindow(QMainWindow):
         self.finish_item_offer()
 
     def skip_item_offer(self, offer_id):
+        if not self.item_offer_is_current(offer_id):
+            return
         try:
             self.item_drafts.skip(offer_id)
         except InventoryError:
@@ -394,6 +429,8 @@ class GameWindow(QMainWindow):
         self.finish_item_offer()
 
     def reroll_item_offer(self, offer_id, slot):
+        if not self.item_offer_is_current(offer_id):
+            return
         try:
             offer = self.item_drafts.reroll(offer_id, slot)
         except InventoryError:
@@ -405,14 +442,16 @@ class GameWindow(QMainWindow):
     def finish_item_offer(self):
         continuation = self.pending_room_action
         self.pending_room_action = None
-        if self.draft_dialog is not None:
-            self.draft_dialog.resolve()
-            self.draft_dialog.deleteLater()
-            self.draft_dialog = None
+        restore_rooms = self._draft_room_selection_visible
+        self._draft_room_selection_visible = False
+        self.retire_item_offer_page()
         self.update_inventory_button()
         if self.phase != "action" or self.game_over:
             return
+        if restore_rooms:
+            self.room_buttons_widget.show()
         self.apply_weapon_gating()
+        self.position_weapon_panel()
         if continuation is not None:
             continuation()
 
@@ -841,6 +880,7 @@ class GameWindow(QMainWindow):
         if not restarting:
             self.save_player_name_preference()
         self.game_over = True
+        self.cancel_item_offer()
         self.dictation_bindings.close()
         self.overlay_host.cancel_owner()
         self.invalidate_prepared_turn("closed", changed=True)
@@ -1445,6 +1485,12 @@ class GameWindow(QMainWindow):
         for button in (self.how_to_play_button, self.transcript_button):
             button.setGeometry(self.width() - width - 10, 10, width, height)
         self.mute_button.setGeometry(0, 10, width // 2, height)
+        if self.draft_page is not None:
+            controls = (self.how_to_play_button, self.transcript_button, self.mute_button)
+            bottom = max((button.geometry().bottom() + 1 for button in controls
+                          if not button.isHidden()), default=0)
+            top = max(0, self.draft_page.mapFrom(self, QPoint(0, bottom + 8)).y()) if bottom else 0
+            self.draft_page.layout().setContentsMargins(0, top, 0, 0)
 
     def eventFilter(self, obj, event):
         if (obj is getattr(self, "overlay_host", None) and event.type() == QEvent.KeyPress
@@ -1719,6 +1765,7 @@ class GameWindow(QMainWindow):
     def show_weapon_select_screen(self):
         """Populate and show a grid of square weapon buttons with image + name; tooltip on hover."""
         self.invalidate_prepared_turn("weapon_selection", changed=True)
+        self.cancel_item_offer()
         self.phase = "weapon_select"
         self.cancel_dictation()
         self.menu_widget.hide()
@@ -1864,8 +1911,8 @@ class GameWindow(QMainWindow):
         return False
 
     def separate_surface_open(self):
-        surfaces = (*self._weapon_windows.values(), self.draft_dialog)
-        return any(surface is not None and surface.isVisible() for surface in surfaces)
+        return any(surface is not None and surface.isVisible()
+                   for surface in self._weapon_windows.values())
 
     def build_weapon_action_panel(self):
         """Right-side card for the currently equipped weapon during Action Phase."""
@@ -1994,6 +2041,7 @@ class GameWindow(QMainWindow):
         if not getattr(self, "weapon_action_panel", None):
             return
         if (self.phase != "action" or self.game_over or not self.selected_weapon
+                or self.pending_room_action is not None
                 or self.room_buttons_widget.isHidden()):
             self.weapon_action_panel.hide()
             return
@@ -2068,6 +2116,7 @@ class GameWindow(QMainWindow):
         return True
 
     def set_room_buttons_enabled(self, enabled: bool):
+        enabled = enabled and self.pending_room_action is None
         unavailable = set(self.old_crime_scenes) | set(getattr(self, "new_crime_scenes", []))
         for room, btn in self.room_buttons.items():
             btn.setEnabled(enabled and room not in unavailable)
@@ -2096,6 +2145,7 @@ class GameWindow(QMainWindow):
     def run_action_phase(self):
         if self.game_over:
             return
+        self.cancel_item_offer()
         self.invalidate_prepared_turn("night_started", changed=True)
         self.phase = "action"
         self.cancel_dictation()
@@ -2193,7 +2243,7 @@ class GameWindow(QMainWindow):
         self.offer_room_item(selected_room, lambda: self.finish_room_choice(selected_room))
 
     def finish_room_choice(self, selected_room):
-        if (self.phase != "action" or self.game_over
+        if (self.phase != "action" or self.game_over or self.pending_room_action is not None
                 or self.room_buttons_widget.isHidden()
                 or not self.room_buttons[selected_room].isEnabled()):
             return
@@ -2894,6 +2944,7 @@ class GameWindow(QMainWindow):
     def run_voting_phase(self):
         if self.phase != "conversation" or self.game_over or self.ai_busy or self.player_reply_required():
             return
+        self.cancel_item_offer()
         self.invalidate_prepared_turn("voting_started", changed=True)
         self.phase = "voting"
         self.cancel_dictation()
@@ -3119,6 +3170,7 @@ class GameWindow(QMainWindow):
         """Displays the game over screen with the final message."""
         if self.game_over:
             return
+        self.cancel_item_offer()
         self.game_over = True
         self.invalidate_prepared_turn("game_over", changed=True)
         self.phase = "game_over"
@@ -3221,6 +3273,7 @@ class GameWindow(QMainWindow):
         self.trace_action("restart_requested")
         self.trace.end("restart")
         self.game_over = True
+        self.cancel_item_offer()
         self.invalidate_prepared_turn("restarting", changed=True)
         self.phase = "restarting"
         self.dictation_bindings.close()
@@ -3283,6 +3336,7 @@ class GameWindow(QMainWindow):
     def run_conversation_phase(self):
         if self.game_over:
             return
+        self.cancel_item_offer()
         self.invalidate_prepared_turn("discussion_started", changed=True)
         self.direct_replies.begin_discussion(self.round_number)
         self.refresh_recipient_choices()
@@ -3464,6 +3518,8 @@ class GameWindow(QMainWindow):
 
     # Weapon-specific windows
     def open_pen_editor(self):
+        if self.pending_room_action is not None:
+            return
         if self._weapon_windows.get("pen") and self._weapon_windows["pen"].isVisible():
             self._weapon_windows["pen"].raise_()
             self._weapon_windows["pen"].activateWindow()
@@ -3560,6 +3616,8 @@ class GameWindow(QMainWindow):
         w.raise_()
 
     def open_blackmagic_dialog(self):
+        if self.pending_room_action is not None:
+            return
         if self._weapon_windows.get("blackmagic") and self._weapon_windows["blackmagic"].isVisible():
             self._weapon_windows["blackmagic"].raise_()
             self._weapon_windows["blackmagic"].activateWindow()
@@ -3686,6 +3744,8 @@ class GameWindow(QMainWindow):
         w.raise_()
 
     def open_knife_dialog(self):
+        if self.pending_room_action is not None:
+            return
         if self._weapon_windows.get("knife") and self._weapon_windows["knife"].isVisible():
             self._weapon_windows["knife"].raise_()
             self._weapon_windows["knife"].activateWindow()
@@ -3771,6 +3831,8 @@ class GameWindow(QMainWindow):
         w.show(); w.raise_()
 
     def open_c4_dialog(self):
+        if self.pending_room_action is not None:
+            return
         if self._weapon_windows.get("c4") and self._weapon_windows["c4"].isVisible():
             self._weapon_windows["c4"].raise_()
             self._weapon_windows["c4"].activateWindow()
