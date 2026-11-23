@@ -701,6 +701,7 @@ class RuntimeRegressionTests(unittest.TestCase):
 
     def test_c4_cooldown_does_not_close_sleeping_room(self):
         self.window.phase = "action"
+        self.window.round_number = 1
         self.window.selected_weapon = {"id": "c4"}
         self.window.c4_cooldown_nights = 1
         self.window.rooms_visited = []
