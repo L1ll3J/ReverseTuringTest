@@ -194,6 +194,26 @@ class HouseIntegrationTests(unittest.TestCase):
             self.assertEqual(description.font().pixelSize(), 18)
             self.assertEqual(QFontInfo(name.font()).family(), self.window.pixel_font_family)
 
+    def test_victory_directly_from_action_restores_expanded_visible_result(self):
+        self.start_night()
+        self.window.resize(800, 600)
+        QTest.qWait(10)
+        self.assertEqual(self.window.phase, "action")
+        self.assertEqual(self.window.message_log.maximumHeight(), 128)
+        for name, character in self.window.characters.items():
+            character['alive'] = name == 'Jerry'
+        self.assertTrue(self.window.check_victory())
+        QTest.qWait(10)
+        self.assertEqual(self.window.phase, "game_over")
+        self.assertTrue(self.window.game_over)
+        self.assertEqual(self.window.message_log.maximumHeight(), 16777215)
+        self.assertGreater(self.window.message_log.height(), 128)
+        self.assertTrue(self.window.room_buttons_widget.isHidden())
+        score = self.window.output_area.document().find("Final Score: 4/5")
+        self.assertFalse(score.isNull())
+        self.assertTrue(self.window.output_area.viewport().rect().contains(
+            self.window.output_area.cursorRect(score)))
+
     def test_artwork_resource_is_exact_reviewed_asset(self):
         import main
         path = Path(main.resource_path('House_images/house-cutaway-v1.png'))

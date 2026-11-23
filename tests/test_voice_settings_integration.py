@@ -201,6 +201,10 @@ class VoiceSettingsIntegrationTests(unittest.TestCase):
         for name in ("idle", "recording"):
             original = Path(game.resource_path(f"icons/ui/microphone-{name}.png"))
             (sprite_root / original.name).write_bytes(original.read_bytes())
+        house_asset = Path(game.resource_path("House_images/house-cutaway-v1.png"))
+        house_root = asset_root / "House_images"
+        house_root.mkdir()
+        (house_root / house_asset.name).write_bytes(house_asset.read_bytes())
         with patch.object(sys, "_MEIPASS", str(asset_root), create=True):
             window = self.make_window()
         for recording, name in ((False, "idle"), (True, "recording")):
