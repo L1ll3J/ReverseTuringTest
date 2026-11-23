@@ -1,4 +1,4 @@
-"""Mechanical item combinations without Qt, API calls or new NPC prose."""
+"""Mechanical item combinations and individually approved observations."""
 
 from dataclasses import replace
 import random
@@ -68,7 +68,14 @@ class ExpandedItemRulesTests(unittest.TestCase):
                 if item_id in {"lucky_match", "deep_pockets"}:
                     kwargs["drafts"] = DraftState("owner", tuple(ITEM_CATALOGUE))
                 events = rules.use_item(inventory.grant(item_id).instance_id, context, target, **kwargs)
-                self.assert_mechanical(events)
+                approved = {
+                    "throw_voice": (None, 'You heard your own voice say: "I heard the window open." You did not say those words.'),
+                    "divine_revelation": (None, 'You hear a voice inside your mind that seems to come from a higher power: "I heard the window open."'),
+                    "dark_whisper": ('Everyone hears the unmistakeable voice of the dead Hank, loudly and clearly they speak:\n\n"I heard the window open."', None),
+                }
+                self.assertEqual((events[0].public_text, events[0].private_text), approved.get(item_id, (None, None)))
+                self.assertIsNone(events[0].disposition_text)
+                self.assert_mechanical(events[1:])
 
     def test_payload_validation_precedes_consumption_and_preserves_apostrophes(self):
         entry = self.inventory.grant("throw_voice")
@@ -84,7 +91,88 @@ class ExpandedItemRulesTests(unittest.TestCase):
         self.assertEqual(events[0].origin, "projected_voice")
         self.assertEqual(events[0].actor_body_id, "p")
         self.assertEqual(events[0].target_body_id, "j")
-        self.assert_mechanical(events)
+        self.assertEqual(events[0].private_text,
+                         'You heard your own voice say: "' + text + '" You did not say those words.')
+        self.assertIsNone(events[0].public_text)
+        self.assertIsNone(events[0].disposition_text)
+        self.assert_mechanical(events[1:])
+
+    def test_approved_private_observations_preserve_raw_payload_and_hide_true_actor(self):
+        text = '  Don\'t trust "a quotation" <tag> & {braces}.\nSecond line; literal \\n stays.  '
+        expected = {
+            "throw_voice": 'You heard your own voice say: "' + text + '" You did not say those words.',
+            "divine_revelation": 'You hear a voice inside your mind that seems to come from a higher power: "' + text + '"',
+        }
+        for item_id in expected:
+            with self.subTest(item=item_id):
+                entry, events = self.grant_use(item_id, "j", message=text)
+                effect = events[0]
+                self.assertEqual(effect.private_text, expected[item_id])
+                self.assertEqual(effect.message, text)
+                self.assertEqual(effect.actor_body_id, self.player.body_id)
+                self.assertEqual(effect.target_body_id, self.jerry.body_id)
+                self.assertEqual(effect.owner_id, "owner")
+                self.assertIsNone(effect.public_text)
+                self.assertIsNone(effect.disposition_text)
+                self.assertNotIn(self.player.label, effect.private_text)
+                self.assertNotIn("owner", effect.private_text)
+                self.assertNotIn(entry.instance_id, effect.private_text)
+                self.assert_mechanical(events[1:])
+
+    def test_dark_whisper_uses_explicit_pronoun_and_exact_multiline_approved_observation(self):
+        for pronoun, phrase in (("he", "he speaks"), ("she", "she speaks"), ("they", "they speak")):
+            with self.subTest(pronoun=pronoun):
+                dead = replace(self.dead, subject_pronoun=pronoun)
+                context = replace(self.context, bodies=(*self.bodies[:3], dead))
+                entry = self.inventory.grant("dark_whisper")
+                events = self.rules.use_item(entry.instance_id, context, dead.body_id, message="Remember the Cellar.")
+                effect = events[0]
+                expected = ('Everyone hears the unmistakeable voice of the dead Hank, loudly and clearly '
+                            + phrase + ':\n\n"Remember the Cellar."')
+                self.assertEqual(effect.public_text, expected)
+                self.assertEqual(effect.public_text.count('"'), 2)
+                self.assertIn(':\n\n"', effect.public_text)
+                self.assertNotIn(r"\n", effect.public_text)
+                self.assertEqual(effect.message, "Remember the Cellar.")
+                self.assertEqual(effect.target_body_id, dead.body_id)
+                self.assertEqual(effect.actor_body_id, self.player.body_id)
+                self.assertEqual(effect.origin, "paranormal_voice")
+                self.assertIsNone(effect.private_text)
+                self.assertIsNone(effect.disposition_text)
+                self.assertNotIn(self.player.label, effect.public_text)
+                self.assert_mechanical(events[1:])
+
+    def test_unknown_pronoun_is_they_without_guessing_from_name_and_preserves_message_text(self):
+        dead = BodyState("unknown", "Lady Mystery", False, True)
+        self.assertEqual(dead.subject_pronoun, "they")
+        context = replace(self.context, bodies=(*self.bodies, dead))
+        message = '"Nested quotation", apostrophe\'s & <markup> {literal}\n\nNext paragraph.'
+        entry = self.inventory.grant("dark_whisper")
+        effect = self.rules.use_item(entry.instance_id, context, dead.body_id, message=message)[0]
+        self.assertEqual(effect.public_text,
+                         'Everyone hears the unmistakeable voice of the dead Lady Mystery, loudly and clearly they speak:\n\n"'
+                         + message + '"')
+        self.assertEqual(effect.message, message)
+        for invalid in (None, "", "He", "it", "she/her", True):
+            with self.subTest(pronoun=invalid), self.assertRaises(ItemRuleError):
+                replace(dead, subject_pronoun=invalid)
+
+    def test_observation_target_failures_never_consume_or_disclose_a_message(self):
+        for item_id, invalid_targets, valid_target in (
+            ("throw_voice", (None, "missing", "x", "p"), "j"),
+            ("divine_revelation", (None, "missing", "x", "p"), "j"),
+            ("dark_whisper", (None, "missing", "j", "p"), "x"),
+        ):
+            with self.subTest(item=item_id):
+                entry = self.inventory.grant(item_id)
+                for target in invalid_targets:
+                    with self.subTest(target=target), self.assertRaises(ItemRuleError):
+                        self.rules.use_item(entry.instance_id, self.context, target, message="A private payload.")
+                    self.assertIn(entry, self.inventory.entries)
+                effect = self.rules.use_item(entry.instance_id, self.context, valid_target,
+                                             message="A private payload.")[0]
+                self.assertEqual(effect.target_body_id, valid_target)
+                self.assertEqual(effect.message, "A private payload.")
 
     def test_projected_and_paranormal_voice_do_not_change_physical_muffle(self):
         self.grant_use("muffle", "j")

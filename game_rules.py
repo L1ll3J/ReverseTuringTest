@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 import random
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import Iterable, Literal, Mapping
 from uuid import uuid4
 
 from ai_context import MemoryRecord, SpeechProposal
@@ -25,6 +25,12 @@ MUFFLE_EXPIRED = (
 )
 WEIGHTED_BALLOT_PUBLIC = "{voter}'s vote for {target} counted as {weight} votes."
 GUARDIAN_PUBLIC = "Against all expectation, {target} survives."
+THROW_VOICE_PRIVATE = 'You heard your own voice say: "{message}" You did not say those words.'
+DIVINE_REVELATION_PRIVATE = 'You hear a voice inside your mind that seems to come from a higher power: "{message}"'
+DARK_WHISPER_PUBLIC = (
+    "Everyone hears the unmistakeable voice of the dead {apparent_speaker}, "
+    'loudly and clearly {subject_pronoun} {speak_verb}:\n\n"{message}"'
+)
 
 
 class ItemRuleError(ValueError):
@@ -59,10 +65,13 @@ class BodyState:
     label: str
     alive: bool
     is_npc: bool
+    subject_pronoun: Literal["he", "she", "they"] = "they"
 
     def __post_init__(self):
         if not self.body_id or self.body_id == "NONE" or not self.label:
             raise ItemRuleError("Each body requires an identifier and a label")
+        if self.subject_pronoun not in ("he", "she", "they"):
+            raise ItemRuleError("A body subject pronoun must be he, she or they")
 
 
 @dataclass(frozen=True)
@@ -481,7 +490,16 @@ class PlayerItemRules:
                 "dark_whisper": ("apparent_speech", "paranormal_voice"),
                 "divine_revelation": ("private_revelation", "apparent_divine_voice"),
             }[entry.item_id]
-            effect = self._event(kind, context.day, **values, message=message, origin=origin)
+            observation = {}
+            if entry.item_id == "throw_voice":
+                observation["private_text"] = THROW_VOICE_PRIVATE.format(message=message)
+            elif entry.item_id == "divine_revelation":
+                observation["private_text"] = DIVINE_REVELATION_PRIVATE.format(message=message)
+            else:
+                observation["public_text"] = DARK_WHISPER_PUBLIC.format(
+                    apparent_speaker=target.label, subject_pronoun=target.subject_pronoun,
+                    speak_verb="speak" if target.subject_pronoun == "they" else "speaks", message=message)
+            effect = self._event(kind, context.day, **values, message=message, origin=origin, **observation)
         elif entry.item_id == "listening_glass":
             effect = self._event("private_memory_revealed", context.day, **values,
                                  message=memory.text, observed_day=memory.round_number,
