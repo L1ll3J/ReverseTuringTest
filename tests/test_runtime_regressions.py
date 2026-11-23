@@ -410,6 +410,68 @@ class RuntimeRegressionTests(unittest.TestCase):
             replacement.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
+    def test_start_game_name_policy_preserves_literal_preference(self):
+        cases = (
+            ("Detective", "Einstein"),
+            ("  dEtEcTiVe Holmes  ", "Einstein"),
+            ("DETECTIVE", "Einstein"),
+            ("  aLeX Smith  ", "Alex"),
+            ("Detectives", "Detectives"),
+            ("Jerry", "Einstein"),
+            ("Jerryman", "Einstein"),
+            ("David", "Einstein"),
+            ("Debbie", "Einstein"),
+        )
+        for literal, expected in cases:
+            with self.subTest(literal=literal):
+                self.window.phase = "start"
+                self.window.player_name_input.setText(literal)
+                self.window.start_game()
+                self.assertEqual(self.window.phase, "weapon_select")
+                self.assertEqual(self.window.player_name, expected)
+                self.assertEqual(self.window.entered_player_name, literal)
+                self.assertEqual(self.window.player_name_input.text(), literal)
+                self.assertEqual(self.window.preferences.last_player_name(), literal)
+                self.assertEqual(set(self.window.characters), {"Jerry", "Dave", "Owen", "Hank", "Debra"})
+
+    def test_detective_name_keeps_narrator_separate_and_routes_player_reply(self):
+        literal = "  dEtEcTiVe Holmes  "
+        self.window.player_name_input.setText(literal)
+        self.window.start_game()
+        bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
+        self.window.select_weapon_and_start(bare)
+        with patch.object(game.random, "choice", return_value=self.window.player_name), patch.object(
+            self.window, "run_multiple_responses"
+        ) as group, patch.object(self.window, "run_single_response") as single:
+            self.window.run_conversation_phase()
+            invitation = self.window.public_dialogue[-1]
+            self.assertEqual(invitation.speaker, "Detective")
+            self.assertEqual(invitation.addressee, "Einstein")
+            narrator = next(record for record in reversed(self.window.history_records)
+                            if record.kind == "speech")
+            self.assertEqual(narrator.speaker, "Detective")
+            self.assertIsNone(narrator.speaker_id)
+            self.assertNotIn("Detective", self.window.body_ids)
+            self.assertEqual(set(self.window.NPCs), {"Jerry", "Dave", "Owen", "Hank", "Debra"})
+            self.assertTrue(all(data["alive"] for data in self.window.characters.values()))
+            self.assertTrue(self.window.player_reply_required())
+            self.assertFalse(self.window.pass_button.isEnabled())
+            self.assertTrue(self.window.interject_input.isVisible())
+            self.assertTrue(self.window.say_button.isVisible())
+            group.assert_not_called()
+            single.assert_not_called()
+            self.window.pass_button.click()
+            group.assert_not_called()
+            self.window.interject_input.setText("I was in the lounge.")
+            self.window.send_interjection()
+            group.assert_called_once()
+            single.assert_not_called()
+            self.assertEqual(self.window.public_dialogue[-1], game.DialogueLine(
+                self.window.round_number, "Einstein", "I was in the lounge."
+            ))
+            self.assertFalse(self.window.player_reply_required())
+        self.assertEqual(self.window.preferences.last_player_name(), literal)
+
     def test_name_save_failure_does_not_block_start_or_reset_preferences(self):
         self.window.player_name_input.setText("Josh")
         with patch.object(self.window.preferences, "save_player_name", return_value=False):

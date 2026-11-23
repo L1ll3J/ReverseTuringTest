@@ -1820,7 +1820,7 @@ class GameWindow(QMainWindow):
 
         for character in self.characters:
             self.characters[character]["muffle_style"] = character
-            if character in self.player_name or self.player_name == "David" or self.player_name == "Debbie":
+            if character in self.player_name or self.player_name in ("David", "Debbie", "Detective"):
                 self.player_name = "Einstein"
 
         self.old_crime_scenes = []
