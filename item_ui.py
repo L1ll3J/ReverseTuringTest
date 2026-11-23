@@ -11,18 +11,18 @@ from PyQt5.QtWidgets import (
 )
 
 
-def item_sprite(item_id, parent=None, *, icon_root=None):
+def item_sprite(item_id, parent=None, *, icon_root=None, size=64):
     """Return a bounded sprite label using source or packaged resources."""
     root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     directory = Path(icon_root) if icon_root is not None else root / "icons" / "items"
     label = QLabel(parent)
     label.setObjectName(f"itemIcon_{item_id}")
     label.setTextFormat(Qt.PlainText)
-    label.setFixedSize(64, 64)
+    label.setFixedSize(size, size)
     label.setAlignment(Qt.AlignCenter)
     pixmap = QPixmap(str(directory / f"{item_id}.png"))
     if not pixmap.isNull():
-        label.setPixmap(pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.FastTransformation))
+        label.setPixmap(pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.FastTransformation))
     return label
 
 
@@ -387,20 +387,19 @@ class InlineItemDraftPage(QWidget):
             self._title_font.setBold(True)
         self.setFont(self._body_font)
         self.setStyleSheet('''
-            QWidget#inlineItemDraftPage { background: #1e1e1e; color: #e0e0e0; }
-            QFrame#inlineItemCard { background: #252525; border: 1px solid #555; }
-            QWidget#inlineItemContents { background: transparent; }
+            QWidget#inlineItemDraftPage { background: #000000; color: #e0e0e0; }
+            QWidget#inlineItemContents { background: #000000; }
             QWidget#inlineItemDraftPage QLabel {
                 color: #e0e0e0; background: transparent; border: none;
             }
             QWidget#inlineItemDraftPage QScrollArea { background: transparent; border: none; }
             QWidget#inlineItemDraftPage QPushButton {
-                color: #e0e0e0; background: #2a2a2a; border: 1px solid #777;
+                color: #e0e0e0; background: #0b0b0b; border: 1px solid #444;
                 padding: 9px 16px; min-height: 24px;
             }
-            QWidget#inlineItemDraftPage QPushButton:hover { background: #3a3a3a; border-color: #dedede; }
+            QWidget#inlineItemDraftPage QPushButton:hover { background: #161616; border-color: #dedede; }
             QWidget#inlineItemDraftPage QPushButton:focus { border: 2px solid #dedede; }
-            QWidget#inlineItemDraftPage QPushButton:pressed { background: #444; }
+            QWidget#inlineItemDraftPage QPushButton:pressed { background: #202020; }
             QWidget#inlineItemDraftPage QPushButton:disabled { color: #777; border-color: #555; }
         ''')
         self.take_buttons = {}
@@ -450,20 +449,21 @@ class InlineItemDraftPage(QWidget):
             take.setObjectName(f"inlineItemTake_{slot}")
             take.setAccessibleName(f"Take {definition.name}")
             take.setAccessibleDescription(definition.description + " " + definition.flavour)
+            take.setMinimumHeight(380)
+            color = RARITY_COLORS.get(getattr(definition, "rarity", "green"), RARITY_COLORS["green"])
             selector = f"QPushButton#{take.objectName()}"
-            take.setStyleSheet(selector + " { " + take.styleSheet() + " padding: 0; border: 1px solid #888; }"
-                               + selector + ":hover, " + selector + ":focus { border: 2px solid white; background: #363636; }"
-                               + selector + ":pressed { background: #444; }")
+            take.setStyleSheet(selector + " { " + take.styleSheet() + f" padding: 0; background: #0b0b0b; border: 1px solid #333; border-top: 2px solid {color}; }}"
+                               + selector + ":hover, " + selector + ":focus { border: 2px solid white; background: #161616; }"
+                               + selector + ":pressed { background: #202020; }")
             contents = QVBoxLayout(take)
-            contents.setContentsMargins(18, 18, 18, 18)
+            contents.setContentsMargins(24, 24, 24, 20)
             contents.setSpacing(12)
-            sprite = item_sprite(item_id)
+            sprite = item_sprite(item_id, size=128)
             sprite.setAttribute(Qt.WA_TransparentForMouseEvents)
             sprite.setAccessibleName(definition.name)
             contents.addWidget(sprite, 0, Qt.AlignHCenter)
             name = self._label(definition.name, self._title_font)
             name.setObjectName(f"inlineItemName_{slot}")
-            color = RARITY_COLORS.get(getattr(definition, "rarity", "green"), RARITY_COLORS["green"])
             name.setStyleSheet(name.styleSheet() + f"color: {color};")
             name.setAlignment(Qt.AlignCenter)
             contents.addWidget(name)
@@ -473,6 +473,7 @@ class InlineItemDraftPage(QWidget):
             if definition.flavour:
                 flavour = self._label(definition.flavour, self._body_font)
                 flavour.setObjectName(f"inlineItemFlavour_{slot}")
+                flavour.setStyleSheet(flavour.styleSheet() + "color: #999999;")
                 contents.addWidget(flavour)
             for label in take.findChildren(QLabel):
                 label.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -484,10 +485,11 @@ class InlineItemDraftPage(QWidget):
             reroll = self._button("\u21bb", f"inlineItemReroll_{slot}", f"Reroll {definition.name}")
             available = can_reroll.get(slot, False) if hasattr(can_reroll, "get") else can_reroll
             reroll.setEnabled(reroll_count > 0 and available)
-            reroll.setFixedWidth(54)
+            reroll.setFixedSize(40, 40)
             reroll_font = QFont(self._body_font)
             reroll_font.setPixelSize(24)
             InventoryPage._font(reroll, reroll_font)
+            reroll.setStyleSheet(reroll.styleSheet() + "padding: 0; min-height: 0;")
             if reroll_count <= 0:
                 reroll.setToolTip("No rerolls remaining.")
             elif not available:
@@ -506,6 +508,10 @@ class InlineItemDraftPage(QWidget):
         rows.addStretch()
         self.scroll.setWidget(content)
         layout.addWidget(self.scroll)
+
+    def sizeHint(self):
+        natural = super().sizeHint()
+        return QSize(1280, natural.height())
 
     def _label(self, text, font):
         label = QLabel(text)

@@ -1,7 +1,7 @@
 """Main-menu item catalogue driven by the caller's progression snapshot."""
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QImage, QPainter, QPixmap
+from PyQt5.QtCore import QRect, QSize, Qt
+from PyQt5.QtGui import QFont, QFontMetrics, QImage, QPainter, QPixmap
 from PyQt5.QtWidgets import QFrame, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from item_ui import InventoryPage, ItemCardButton, RARITY_COLORS, ResponsiveItemGrid, item_sprite
@@ -15,19 +15,19 @@ class ItemCataloguePanel(QWidget):
         self.setObjectName("itemCataloguePanel")
         self.setFont(body_font)
         self.setStyleSheet('''
-            QWidget#itemCataloguePanel { background: #1e1e1e; color: #dedede; }
+            QWidget#itemCataloguePanel { background: #000000; color: #dedede; }
             QWidget#itemCataloguePanel QLabel { color: #dedede; background: transparent; border: none; }
             QWidget#itemCataloguePanel QScrollArea { border: none; background: transparent; }
-            QWidget#itemCatalogueContents { background: #1e1e1e; }
+            QWidget#itemCatalogueContents { background: #000000; }
             QWidget#itemCataloguePanel QPushButton {
-                background: #252525; color: #dedede; border: 1px solid #777; padding: 4px;
+                background: #0b0b0b; color: #dedede; border: 1px solid #333; padding: 4px;
             }
             QWidget#itemCataloguePanel QPushButton:hover,
-            QWidget#itemCataloguePanel QPushButton:focus { background: #363636; border: 2px solid white; }
-            QWidget#itemCataloguePanel QPushButton[locked="true"] { background: #202020; border-color: #444; }
+            QWidget#itemCataloguePanel QPushButton:focus { background: #161616; border: 2px solid white; }
+            QWidget#itemCataloguePanel QPushButton[locked="true"] { background: #070707; border-color: #222; }
             QWidget#itemCataloguePanel QPushButton[locked="true"] QLabel { color: #777; }
             QWidget#itemCataloguePanel QLabel#itemCatalogueError { color: #ffb3a9; }
-            QFrame#itemCatalogueDetails { background: #252525; border: 1px solid #777; }
+            QFrame#itemCatalogueDetails { background: #0b0b0b; border: 1px solid #333; }
         ''')
         self._definitions = dict(definitions)
         self._unlock_goals = dict(unlock_goals)
@@ -43,19 +43,24 @@ class ItemCataloguePanel(QWidget):
         self.cards = {}
         self._sprites = {}
         layout = QVBoxLayout(self)
-        layout.addWidget(self._label("Discover items during a run. Click unlocked optional items to enable or disable them."))
+        self.setAccessibleDescription(
+            "Click unlocked optional items to enable or disable them. "
+            "Hover over an item or focus it with Tab to inspect its effect and unlock goal."
+        )
         self.details = QFrame()
         self.details.setObjectName("itemCatalogueDetails")
         detail_layout = QVBoxLayout(self.details)
         detail_layout.setContentsMargins(12, 10, 12, 10)
-        self.detail_name = self._label("Inspect an item", self._title_font)
-        self.detail_description = self._label("Hover over an item or focus it with Tab to see its effect and unlock goal.")
+        self.detail_name = self._label("", self._title_font)
+        self.detail_description = self._label("")
         self.detail_flavour = self._label("")
+        self.detail_flavour.setStyleSheet(self.detail_flavour.styleSheet() + "color: #999999;")
         self.detail_goal = self._label("")
         for label in (self.detail_name, self.detail_description, self.detail_flavour, self.detail_goal):
             detail_layout.addWidget(label)
         self.detail_flavour.hide()
         self.detail_goal.hide()
+        detail_layout.addStretch()
         layout.addWidget(self.details)
         self.error_label = self._label("")
         self.error_label.setObjectName("itemCatalogueError")
@@ -110,6 +115,34 @@ class ItemCataloguePanel(QWidget):
         rows.addStretch()
         self.scroll.setWidget(content)
         self.refresh(profile)
+        self._size_details()
+        if self._definitions:
+            self._inspect(next(iter(self._definitions)))
+
+    def sizeHint(self):
+        natural = super().sizeHint()
+        return QSize(1440, natural.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._size_details()
+
+    def _size_details(self):
+        """Reserve the tallest detail at this width so inspection cannot move cards."""
+        width = max(1, self.width() - 50)
+        title_metrics = QFontMetrics(self._title_font)
+        body_metrics = QFontMetrics(self._body_font)
+        heights = []
+        for item_id, definition in self._definitions.items():
+            fields = [(definition.name, title_metrics), (definition.description, body_metrics)]
+            if definition.flavour:
+                fields.append((definition.flavour, body_metrics))
+            if not definition.default:
+                fields.append(("Unlock: " + self._unlock_goals.get(item_id, ""), body_metrics))
+            height = sum(metrics.boundingRect(QRect(0, 0, width, 10000), Qt.TextWordWrap, text).height()
+                         for text, metrics in fields)
+            heights.append(height + 24 + self.details.layout().spacing() * (len(fields) - 1))
+        self.details.setFixedHeight(max(heights, default=0))
 
     @property
     def profile(self):
@@ -124,6 +157,7 @@ class ItemCataloguePanel(QWidget):
         return label
 
     def _inspect(self, item_id):
+        self.details.show()
         self._inspected = item_id
         definition = self._definitions[item_id]
         self.detail_name.setText(definition.name)

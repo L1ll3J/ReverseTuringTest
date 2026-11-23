@@ -216,7 +216,7 @@ class ItemCatalogueTests(unittest.TestCase):
                 self.app.processEvents()
                 point = widget.mapTo(panel, QPoint(widget.width() - 2, widget.height() - 2))
                 image = panel.grab().toImage()
-                self.assertEqual(image.pixelColor(point).name(), "#252525")
+                self.assertEqual(image.pixelColor(point).name(), "#0b0b0b")
         self.callback.side_effect = ProfileError("Could not save preferences.")
         checkbox.setChecked(False)
         self.app.processEvents()
