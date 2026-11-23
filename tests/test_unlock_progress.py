@@ -79,7 +79,8 @@ class UnlockProgressTests(unittest.TestCase):
 
     def test_actual_store_batches_weapon_and_item_unlocks_once_and_retry_is_silent(self):
         event = self.event(1, "survived_vote")
-        self.assertTrue(self.save(event))
+        coin_event = self.event(2, "coin_survived_run_alive")
+        self.assertTrue(self.save(event, coin_event))
         self.assertIn("pen", self.window.profile.unlocked)
         self.assertIn("guardian_angel", self.window.profile.unlocked)
         host = self.window.overlay_host
@@ -94,13 +95,13 @@ class UnlockProgressTests(unittest.TestCase):
             QTest.keyClick(host.current_page.continue_button, Qt.Key_Return)
             self.events()
         self.assertCountEqual(pages, ("pen", "guardian_angel"))
-        self.assertTrue(self.save(event))
+        self.assertTrue(self.save(event, coin_event))
         self.assertEqual(host.pending_unlock_count, 0)
         self.assertIsNone(host.current_page)
         self.assertTrue(self.window.progress_notice.isHidden())
 
     def test_partial_save_keeps_successful_unlock_and_unsaved_event_retryable(self):
-        first, second = self.event(1, "player_kill"), self.event(2, "survived_vote")
+        first, second = self.event(1, "three_kills_one_run"), self.event(2, "coin_survived_run_alive")
         original = self.window.profile_store.record
 
         def record(event):
@@ -111,7 +112,7 @@ class UnlockProgressTests(unittest.TestCase):
         with patch.object(self.window.profile_store, "record", side_effect=record):
             self.assertFalse(self.save(first, second))
         self.assertEqual(self.window.pending_progress, [second])
-        self.assertEqual(self.window.overlay_host.current_page.presentation.content_id, "knife")
+        self.assertEqual(self.window.overlay_host.current_page.presentation.content_id, "c4")
         self.assertFalse(self.window.progress_retry_button.isHidden())
         self.assertIn("Disk unavailable", self.window.progress_notice.text())
         self.assertTrue(self.save())

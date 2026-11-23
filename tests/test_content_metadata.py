@@ -15,7 +15,7 @@ class ContentMetadataTests(unittest.TestCase):
         items = {entry.content_id: entry for entry in CONTENT_CATALOGUE if entry.category == "item"}
         self.assertEqual(tuple(items), tuple(ITEM_CATALOGUE))
         self.assertEqual(len(items), 24)
-        self.assertEqual(sum(entry.default for entry in items.values()), 16)
+        self.assertEqual(sum(entry.default for entry in items.values()), 17)
         self.assertTrue(items["love_potion"].default)
         self.assertTrue({"soul_transfusion"}.isdisjoint(items))
         for item_id, entry in items.items():
@@ -28,13 +28,12 @@ class ContentMetadataTests(unittest.TestCase):
 
     def test_optional_routes_use_completed_conditions_and_enable_only_after_unlock(self):
         routes = {
-            "guardian_angel": "survived_vote",
+            "guardian_angel": "coin_survived_run_alive",
             "booby_trap": "marked_kill_completed",
             "presidential_decree": "survived_spare_paper_vote",
             "occult_ritual": "reserved_room_kill",
             "spin_the_dagger": "three_item_types_victory",
             "revolver": "three_kills_one_run",
-            "lucky_coin": "guardian_intervention_run_survived",
             "mass_discombobulator": "five_item_types_used",
         }
         for item_id, event_type in routes.items():
@@ -48,6 +47,16 @@ class ContentMetadataTests(unittest.TestCase):
                 self.assertNotIn(item_id, store.item_pool())
                 store.set_item_enabled(item_id, True)
                 self.assertIn(item_id, store.item_pool())
+
+    def test_coin_is_always_default_and_obsolete_events_do_not_unlock_guardian(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProfileStore(Path(directory) / "profile.json", CONTENT_CATALOGUE)
+            self.assertIn("lucky_coin", store.item_pool())
+            for sequence, kind in enumerate(("survived_vote", "guardian_intervention_run_survived"), 1):
+                update = store.record(ProgressEvent("run", sequence, kind))
+                self.assertNotIn("guardian_angel", update.profile.unlocked)
+            update = store.record(ProgressEvent("run", 3, "coin_survived_run_alive"))
+            self.assertEqual(update.newly_unlocked, ("guardian_angel",))
 
     def test_fresh_pool_and_legacy_earned_unlocks_survive_changed_requirements(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -80,6 +89,8 @@ class ContentMetadataTests(unittest.TestCase):
             update = store.record(ProgressEvent("run", 3, "three_kills_one_run"))
             self.assertEqual(update.newly_unlocked, ("c4", "revolver"))
             update = store.record(ProgressEvent("run", 4, "soul_transfusion_used"))
+            self.assertEqual(update.newly_unlocked, ())
+            update = store.record(ProgressEvent("run", 5, "former_body_killed_following_night"))
             self.assertEqual(update.newly_unlocked, ("voodoo",))
 
 
