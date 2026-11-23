@@ -120,102 +120,13 @@ def button(text, action, pixel, *, size=12):
     return widget
 
 
-class HouseView(QWidget):
-    """A country house viewed across dark grounds, drawn on a low-res canvas."""
-
-    def __init__(self, background=None, parent=None):
-        super().__init__(parent)
-        self.background = QPixmap(str(background)) if background is not None else QPixmap()
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setMinimumSize(200, 240)
-        self.setAccessibleName("An isolated country house beyond dark trees and a long drive")
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.fillRect(self.rect(), Qt.black)
-        if not self.background.isNull():
-            image = self.background.scaled(self.size(), Qt.KeepAspectRatio, Qt.FastTransformation)
-            p.drawPixmap((self.width() - image.width()) // 2,
-                         (self.height() - image.height()) // 2, image)
-            return
-        p.scale(self.width() / 640, self.height() / 440)
-        p.setRenderHint(QPainter.Antialiasing, False)
-        p.setPen(QPen(QColor("#252525"), 1))
-        p.drawPolyline(QPolygonF([QPointF(0, 272), QPointF(70, 258), QPointF(160, 268),
-                                 QPointF(260, 254), QPointF(360, 263), QPointF(475, 250),
-                                 QPointF(640, 270)]))
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#737373"))
-        p.drawEllipse(QRect(447, 65, 27, 27))
-        p.setBrush(Qt.black)
-        p.drawEllipse(QRect(455, 61, 27, 27))
-        # A modest Georgian country house, not a fortress or city skyline.
-        p.fillRect(188, 192, 302, 99, QColor("#121212"))
-        p.fillRect(226, 153, 228, 138, QColor("#191919"))
-        p.setPen(QPen(QColor("#606060"), 1))
-        p.drawRect(226, 153, 228, 138)
-        p.drawRect(188, 192, 38, 99)
-        p.drawRect(454, 192, 36, 99)
-        p.setBrush(QColor("#0b0b0b"))
-        p.drawPolygon(QPolygonF([QPointF(218, 153), QPointF(247, 124), QPointF(431, 124), QPointF(461, 153)]))
-        p.drawLine(188, 192, 203, 174)
-        p.drawLine(203, 174, 225, 174)
-        p.drawLine(454, 174, 475, 174)
-        p.drawLine(475, 174, 490, 192)
-        p.fillRect(262, 107, 13, 24, QColor("#383838"))
-        p.fillRect(404, 108, 11, 23, QColor("#383838"))
-        p.fillRect(259, 104, 19, 4, QColor("#636363"))
-        p.fillRect(401, 105, 17, 4, QColor("#636363"))
-        p.setPen(QPen(QColor("#333333"), 1))
-        for y in range(163, 288, 7):
-            p.drawLine(228, y, 451, y)
-        for y in (169, 208, 248):
-            for x in (246, 290, 374, 418):
-                lit = (x == 290 and y == 248) or (x == 418 and y == 208)
-                p.fillRect(x, y, 17, 24, QColor("#b5b5b5" if lit else "#343434"))
-                p.setPen(QPen(QColor("#060606"), 2))
-                p.drawLine(x + 8, y, x + 8, y + 24)
-                p.drawLine(x, y + 11, x + 17, y + 11)
-                p.setPen(QPen(QColor("#737373"), 1))
-                p.drawLine(x - 2, y + 25, x + 20, y + 25)
-        for x in (198, 466):
-            p.fillRect(x, 213, 14, 19, QColor("#303030"))
-            p.fillRect(x, 251, 14, 19, QColor("#303030"))
-        p.fillRect(328, 251, 26, 40, Qt.black)
-        p.setPen(QPen(QColor("#777777"), 1))
-        p.drawRect(323, 246, 36, 45)
-        p.drawLine(317, 244, 365, 244)
-        p.drawLine(325, 238, 358, 238)
-        for y in (293, 297, 301):
-            p.drawLine(319 - (y - 293), y, 363 + (y - 293), y)
-        p.setPen(QPen(QColor("#323232"), 1))
-        p.drawLine(319, 302, 267, 440)
-        p.drawLine(365, 302, 464, 440)
-        # Gravel and dead grass are fixed, not animated noise over readable text.
-        rng = random.Random(44)
-        for _ in range(480):
-            y = rng.randrange(302, 440)
-            x = rng.randrange(5, 637)
-            p.setPen(QColor("#252525" if x < 265 or x > 465 else "#414141"))
-            p.drawPoint(x, y)
-        for x, height, direction in ((44, 230, 1), (104, 168, -1), (578, 218, -1), (617, 150, 1)):
-            p.setPen(QPen(QColor("#282828"), 3))
-            p.drawLine(x, 315, x + direction * 11, 315 - height)
-            for step in (38, 70, 105, 130):
-                if step >= height:
-                    continue
-                anchor = 315 - step
-                p.setPen(QPen(QColor("#343434"), 1))
-                p.drawLine(x + direction * 4, anchor, x - 29, anchor - 33)
-                p.drawLine(x + direction * 6, anchor - 15, x + 32, anchor - 51)
-
-
 class SuspectStage(QWidget):
     """Dim cast placement is fixed until a new illustrative run is requested."""
 
-    def __init__(self, pixel, parent=None):
+    def __init__(self, pixel, parent=None, *, idle=False):
         super().__init__(parent)
         self.pixel = pixel
+        self.idle = idle
         self.cast_order = list(CAST)
         self.reduced_motion = False
         self.speaker = "Dave"
@@ -224,11 +135,13 @@ class SuspectStage(QWidget):
         self.setMinimumHeight(166)
         self.setMaximumHeight(270)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setAccessibleName("Suspects seated in a dark sitting room; the speaking suspect is illuminated")
+        self.setAccessibleName("A quiet sitting room with a table, a lamp and anonymous silhouettes" if idle else
+                               "Suspects seated in a dark sitting room; the speaking suspect is illuminated")
         self.arrange(37)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
-        self.timer.start(80)
+        if not idle:
+            self.timer.start(80)
 
     def arrange(self, seed):
         self.cast_order = list(CAST)
@@ -247,7 +160,7 @@ class SuspectStage(QWidget):
         self.update()
 
     def tick(self):
-        if self.reduced_motion or not self.isVisible():
+        if self.idle or self.reduced_motion or not self.isVisible():
             return
         self.frame += 1
         target = self.position(self.speaker)
@@ -271,12 +184,14 @@ class SuspectStage(QWidget):
         p.setPen(QPen(QColor("#444444"), 1))
         p.drawLine(283, 64, 304, 43)
         p.drawLine(337, 23, 356, 12)
-        visible = self.reduced_motion or self.frame < 60
-        intensity = 1.0 if self.reduced_motion or self.frame < 47 else max(0, (60 - self.frame) / 13)
+        visible = self.idle or self.reduced_motion or self.frame < 60
+        intensity = 0.36 if self.idle else (
+            1.0 if self.reduced_motion or self.frame < 47 else max(0, (60 - self.frame) / 13))
+        light_x = 320.0 if self.idle else self.light_x
         if visible:
             # A coarse cone of light, with no glow, blur, or colour accent.
-            cone = QPolygonF([QPointF(320, -14), QPointF(self.light_x - 46, 127),
-                              QPointF(self.light_x + 46, 127)])
+            cone = QPolygonF([QPointF(320, -14), QPointF(light_x - 46, 127),
+                              QPointF(light_x + 46, 127)])
             p.save()
             p.setClipRegion(QRegion(cone.toPolygon()))
             p.setPen(QColor(int(36 * intensity), int(36 * intensity), int(36 * intensity)))
@@ -284,10 +199,13 @@ class SuspectStage(QWidget):
                 for x in range(y % 2, 640, 4):
                     p.drawPoint(x, y)
             p.restore()
+        if self.idle:
+            p.fillRect(312, 0, 16, 3, QColor("#707070"))
+            p.fillRect(308, 3, 24, 2, QColor("#555555"))
         for name in self.cast_order:
             x = self.position(name)
-            proximity = max(0.0, 1 - abs(self.light_x - x) / 45)
-            active = visible and name == self.speaker and proximity > 0.8
+            proximity = max(0.0, 1 - abs(light_x - x) / 45)
+            active = not self.idle and visible and name == self.speaker and proximity > 0.8
             bob = 0 if self.reduced_motion or not active else ((self.frame // 3) % 2)
             tone = int(27 + 163 * intensity * proximity) if visible else 27
             p.setPen(Qt.NoPen)
@@ -417,10 +335,9 @@ class ItemInspection(QDialog):
 
 
 class GrittyStudy(QWidget):
-    def __init__(self, assets, background=None):
+    def __init__(self, assets):
         super().__init__()
         self.assets = Path(assets).expanduser().resolve()
-        self.background = background
         self._validate_assets()
         font_id = QFontDatabase.addApplicationFont(str(self.assets / "fonts/PressStart2P-Regular.ttf"))
         families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
@@ -466,15 +383,18 @@ class GrittyStudy(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(28, 18, 28, 16)
         outer.setSpacing(12)
-        top = QHBoxLayout()
-        self.location = label("WICKMERE HOUSE", pixel=self.pixel, size=11)
+        self.header = QWidget()
+        top = QHBoxLayout(self.header)
+        top.setContentsMargins(0, 0, 0, 0)
+        self.location = label("", pixel=self.pixel, size=11)
         top.addWidget(self.location)
         top.addStretch()
         self.motion = QCheckBox("Reduced motion")
         self.motion.toggled.connect(self.set_reduced_motion)
         top.addWidget(self.motion)
-        outer.addLayout(top)
-        outer.addWidget(rule())
+        outer.addWidget(self.header)
+        self.header_rule = rule()
+        outer.addWidget(self.header_rule)
         self.stack = QStackedWidget()
         outer.addWidget(self.stack, 1)
         self.menu_page = self.make_menu()
@@ -482,13 +402,17 @@ class GrittyStudy(QWidget):
         self.rooms_page = self.make_rooms()
         for page in (self.menu_page, self.conversation_page, self.rooms_page):
             self.stack.addWidget(page)
-        outer.addWidget(rule())
-        bottom = QHBoxLayout()
+        self.navigation_rule = rule()
+        outer.addWidget(self.navigation_rule)
+        self.navigation = QWidget()
+        bottom = QHBoxLayout(self.navigation)
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(12)
         for title, page in (("HOUSE", "menu"), ("ROOMS", "rooms"), ("CONVERSATION", "conversation")):
             bottom.addWidget(button(title, lambda checked=False, page=page: self.go(page), self.pixel, size=9))
         bottom.addStretch()
         bottom.addWidget(button("POCKETS  [I]", self.open_items, self.pixel, size=9))
-        outer.addLayout(bottom)
+        outer.addWidget(self.navigation)
         self.shortcuts = []
         for sequence, action in (("Alt+1", lambda: self.go("menu")), ("Alt+2", lambda: self.go("rooms")),
                                  ("Alt+3", lambda: self.go("conversation")), ("I", self.open_items),
@@ -507,28 +431,32 @@ class GrittyStudy(QWidget):
         for path in required[1:]:
             if QPixmap(str(path)).isNull():
                 raise ValueError(f"Unreadable item artwork: {path}")
-        if self.background is not None and QPixmap(str(self.background)).isNull():
-            raise ValueError(f"Unreadable country-house image: {self.background}")
 
     def make_menu(self):
         page = QWidget()
-        row = QHBoxLayout(page)
-        row.setContentsMargins(14, 18, 0, 12)
-        row.setSpacing(20)
-        left = QVBoxLayout()
-        left.addStretch(2)
-        left.addWidget(label("AlibAi", pixel=self.pixel, size=45))
-        left.addSpacing(18)
-        left.addWidget(label("A house full of alibis.\nOne of them is yours.", size=19, color=GREY, wrap=True))
-        left.addSpacing(35)
-        left.addWidget(button("ENTER THE HOUSE", self.new_run, self.pixel, size=13))
-        left.addWidget(button("LOOK AROUND", lambda: self.go("rooms"), self.pixel, size=13))
-        left.addWidget(button("QUIT", self.close, self.pixel, size=13))
-        left.addStretch(3)
-        left.addWidget(label("It is a very long way to the nearest neighbour.", size=14, color=GREY, wrap=True))
-        row.addLayout(left, 2)
-        self.house = HouseView(self.background)
-        row.addWidget(self.house, 3)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+        layout.addStretch(2)
+        self.menu_logo = label("AlibAi", pixel=self.pixel, size=45)
+        self.menu_logo.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.menu_logo)
+        layout.addSpacing(10)
+        self.menu_stage = SuspectStage(self.pixel, idle=True)
+        layout.addWidget(self.menu_stage, 3)
+        actions = QWidget()
+        actions.setFixedWidth(240)
+        controls = QVBoxLayout(actions)
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(4)
+        self.play_button = button("PLAY", self.new_run, self.pixel, size=13)
+        self.items_button = button("ITEMS", self.open_items, self.pixel, size=13)
+        self.quit_button = button("QUIT", self.close, self.pixel, size=13)
+        for control in (self.play_button, self.items_button, self.quit_button):
+            control.setStyleSheet("text-align: center;")
+            controls.addWidget(control)
+        layout.addWidget(actions, alignment=Qt.AlignHCenter)
+        layout.addStretch(2)
         return page
 
     def make_conversation(self):
@@ -605,7 +533,9 @@ class GrittyStudy(QWidget):
         self.room_description.setText(description)
 
     def new_run(self):
-        self.stage.arrange(random.SystemRandom().randrange(2 ** 32))
+        seed = random.SystemRandom().randrange(2 ** 32)
+        self.stage.arrange(seed)
+        self.menu_stage.arrange(seed)
         self.line_index = 0
         self.set_line(0)
         self.go("conversation")
@@ -626,11 +556,15 @@ class GrittyStudy(QWidget):
             return
         pages = {"menu": self.menu_page, "rooms": self.rooms_page, "conversation": self.conversation_page}
         self.stack.setCurrentWidget(pages[page])
-        self.location.setText({"menu": "WICKMERE HOUSE", "rooms": "NIGHT TWO", "conversation": "THE SITTING ROOM"}[page])
+        self.location.setText({"menu": "", "rooms": "NIGHT TWO", "conversation": "THE SITTING ROOM"}[page])
+        for widget in (self.header, self.header_rule, self.navigation, self.navigation_rule):
+            widget.setVisible(page != "menu")
         if page == "conversation":
             self.listen_button.setFocus()
         elif page == "rooms":
             self.room_list.setFocus()
+        else:
+            self.play_button.setFocus()
 
     def set_reduced_motion(self, checked):
         if hasattr(self, "stage"):
@@ -661,6 +595,7 @@ class GrittyStudy(QWidget):
         if self.item_dialog is not None:
             self.item_dialog.reject()
         self.stage.timer.stop()
+        self.menu_stage.timer.stop()
         super().closeEvent(event)
 
 
@@ -672,6 +607,7 @@ def export_study(window, destination):
     destination.mkdir(parents=True, exist_ok=True)
     window.stage.timer.stop()
     window.stage.arrange(37)
+    window.menu_stage.arrange(37)
     window.show()
     app = QApplication.instance()
 
@@ -725,8 +661,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--assets", type=Path, default=ASSET_ROOT,
                         help="Game asset root. Defaults only to this study's own worktree.")
-    parser.add_argument("--background", type=Path,
-                        help="Optional monochrome rural country-house scene.")
     parser.add_argument("--export", type=Path,
                         help="Write deterministic offscreen screenshots outside the asset worktree, then exit.")
     args = parser.parse_args()
@@ -734,10 +668,8 @@ def main():
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
     app = QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
-    optional = ASSET_ROOT / "design/country_house.png"
-    background = args.background if args.background is not None else (optional if optional.is_file() else None)
     try:
-        window = GrittyStudy(args.assets, background)
+        window = GrittyStudy(args.assets)
         if args.export:
             export_study(window, args.export)
             return 0
