@@ -3873,7 +3873,9 @@ class GameWindow(QMainWindow):
         self.most_recent_messageS = []
         self.alive_characters = list(self.public_state().alive)
         self.NPCs = [char for char, data in self.characters.items() if data["alive"]]
-        for scene in self.new_crime_scenes:
+        item_crime_scenes = (record.room_id for record in self.item_deaths.values()
+                             if record.day == self.round_number and record.room_id is not None)
+        for scene in (*self.new_crime_scenes, *item_crime_scenes):
             if scene not in self.old_crime_scenes:
                 self.old_crime_scenes.append(scene)
         self.conversation_buttons_widget.show()

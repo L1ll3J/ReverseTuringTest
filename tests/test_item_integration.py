@@ -256,10 +256,41 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertEqual((record.room_id, record.day, record.cause), ("Attic", 2, game.DeathCause.TRAP))
         self.assertEqual(self.window.profile_store.read().counters["reserved_room_kill"], 1)
         self.assertEqual(self.window.night_attacks, [])
-        self.window.run_conversation_phase()
+        self.window.finish_night()
         self.assertFalse(any("no murder occurred" in event.text for event in self.window.public_events))
         self.assertEqual(sum("Dave's body was found in the Attic" in event.text
                              for event in self.window.public_events), 1)
+        self.assertIn("Attic", self.window.old_crime_scenes)
+        self.assertNotIn("Attic", self.window.item_use_context().available_rooms)
+        living = next(name for name, data in self.window.characters.items() if data["alive"])
+        reservation = self.window.inventory.grant("room_reservation")
+        self.assertFalse(self.window.use_inventory_item(
+            reservation.instance_id, self.window.body_id(living), room_id="Attic"))
+        self.assertIn(reservation, self.window.inventory.entries)
+        self.window.run_action_phase()
+        self.assertEqual(self.window.room_assignments["Attic"], [])
+        self.assertNotIn("Attic", self.window.night_rooms)
+        self.assertFalse(self.window.room_buttons["Attic"].isEnabled())
+
+    def test_prevented_trap_without_corpse_does_not_close_its_room(self):
+        self.conversation()
+        self.give("guardian_angel")
+        self.arm_optional("booby_trap", room="Attic")
+        self.window.selected_weapon = self.weapon()
+        with patch.object(game.random, "choice", side_effect=lambda choices: choices[-1]):
+            self.window.run_action_phase()
+        self.assertEqual(self.window.room_assignments["Attic"], [])
+        self.assertFalse(self.window.resolve_room_entry_items(
+            "shielded-player-entry", "Attic", {self.window.body_id("Alex")}))
+        self.assertTrue(self.window.player_alive)
+        self.assertFalse(self.window.item_rules.protection_armed)
+        self.assertFalse(self.window.item_deaths)
+        self.window.finish_night()
+        self.assertNotIn("Attic", self.window.old_crime_scenes)
+        self.assertIn("Attic", self.window.item_use_context().available_rooms)
+        self.window.run_action_phase()
+        self.assertIn("Attic", self.window.night_rooms)
+        self.assertTrue(self.window.room_buttons["Attic"].isEnabled())
 
     def test_how_to_play_covers_current_items_progression_and_evidence(self):
         guide = game.HowToPlayPage(self.window)
