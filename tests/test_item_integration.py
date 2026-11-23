@@ -181,6 +181,86 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.commit_attack("Jerry", "Kitchen"))
         self.assertEqual(self.window.profile_store.read().counters["reserved_room_kill"], 1)
 
+    def test_reservation_follows_actual_exchanged_mind_and_unlocks_on_its_corpse(self):
+        self.conversation()
+        dave_body = self.window.body_id("Dave")
+        original_body = self.window.body_id("Alex")
+        dave_mind = self.window.mind_id("Dave")
+        entry = self.window.inventory.grant("room_reservation")
+        self.assertTrue(self.window.use_inventory_item(entry.instance_id, dave_body, room_id="Kitchen"))
+        self.window.exchange_player_mind(dave_body)
+        self.window.selected_weapon = self.weapon()
+        self.window.run_action_phase()
+        self.assertEqual(self.window.mind_id("Alex"), dave_mind)
+        self.assertIn("Alex", self.window.room_assignments["Kitchen"])
+        self.assertNotIn("Dave", self.window.characters)
+        self.assertTrue(self.window.commit_attack("Alex", "Kitchen"))
+        attack = self.window.night_attacks[-1]
+        self.assertEqual(attack["corpse_body_id"], original_body)
+        self.assertEqual(attack["target_body_id"], original_body)
+        self.assertEqual(self.window.profile_store.read().counters["reserved_room_kill"], 1)
+        self.assertIn("occult_ritual", self.window.profile_store.read().unlocked)
+
+    def test_muffle_and_due_curse_remain_on_body_after_actual_exchange(self):
+        self.conversation()
+        self.give("muffle", "Dave")
+        self.arm_optional("occult_ritual", target="Dave")
+        target_body = self.window.body_id("Dave")
+        old_body = self.window.body_id("Alex")
+        dave_data = self.window.characters["Dave"]
+        self.window.exchange_player_mind(target_body)
+        self.assertTrue(self.window.item_rules.is_muffled(target_body))
+        self.assertFalse(self.window.item_rules.is_muffled(old_body))
+        self.assertIs(self.window.characters["Alex"], dave_data)
+        self.window.phase = "action"
+        self.window.round_number = 3
+        self.assertTrue(self.window.resolve_action_curses())
+        self.assertFalse(self.window.player_alive)
+        self.assertTrue(self.window.characters["Alex"]["alive"])
+        record, = self.window.item_deaths.values()
+        self.assertEqual(record.body_id, target_body)
+        self.assertEqual(record.cause, game.DeathCause.CURSE)
+        self.assertEqual(self.window.run_player_kills, 0)
+        self.assertEqual(self.window.night_attacks, [])
+
+    def test_reserved_mind_voodoo_corpse_unlock_and_original_attack_identity(self):
+        self.conversation()
+        target_body = self.window.body_id("Dave")
+        original_body = self.window.body_id("Alex")
+        target_mind = self.window.mind_id("Dave")
+        entry = self.window.inventory.grant("room_reservation")
+        self.assertTrue(self.window.use_inventory_item(entry.instance_id, target_body, room_id="Kitchen"))
+        self.window.selected_weapon = self.weapon("voodoo")
+        self.window.run_action_phase()
+        self.assertTrue(self.window.commit_attack("Dave", "Kitchen"))
+        attack, = self.window.night_attacks
+        self.assertEqual(attack["attacker_body_id"], original_body)
+        self.assertEqual(attack["target_body_id"], target_body)
+        self.assertEqual(attack["corpse_body_id"], original_body)
+        self.assertEqual(self.window.identity_state.mind_for_body(original_body), target_mind)
+        self.assertFalse(self.window.characters["Alex"]["alive"])
+        self.assertEqual(self.window.victims_last_night, ["Alex"])
+        self.assertEqual(self.window.run_player_kills, 1)
+        self.assertEqual(self.window.profile_store.read().counters["reserved_room_kill"], 1)
+
+    def test_actual_night_assignment_trap_records_reserved_corpse_once(self):
+        self.conversation()
+        target_body = self.window.body_id("Dave")
+        entry = self.window.inventory.grant("room_reservation")
+        self.assertTrue(self.window.use_inventory_item(entry.instance_id, target_body, room_id="Attic"))
+        self.arm_optional("booby_trap", room="Attic")
+        self.window.selected_weapon = self.weapon()
+        self.window.run_action_phase()
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        record, = (record for record in self.window.item_deaths.values() if record.body_id == target_body)
+        self.assertEqual((record.room_id, record.day, record.cause), ("Attic", 2, game.DeathCause.TRAP))
+        self.assertEqual(self.window.profile_store.read().counters["reserved_room_kill"], 1)
+        self.assertEqual(self.window.night_attacks, [])
+        self.window.run_conversation_phase()
+        self.assertFalse(any("no murder occurred" in event.text for event in self.window.public_events))
+        self.assertEqual(sum("Dave's body was found in the Attic" in event.text
+                             for event in self.window.public_events), 1)
+
     def test_how_to_play_covers_current_items_progression_and_evidence(self):
         guide = game.HowToPlayPage(self.window)
         text = guide.findChild(QTextEdit).toPlainText()
