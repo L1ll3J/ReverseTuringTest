@@ -283,6 +283,47 @@ class OverlayHostTests(unittest.TestCase):
         self.assertEqual(factory.call_count, 1)
         self.assertEqual(self.host.current_title, "Deferred")
 
+    def test_owner_choice_predicate_retains_queue_until_explicit_resume(self):
+        ready = [False]
+        host = OverlayHost(self.owner, unlock_ready=lambda: ready[0])
+        factory = Mock(side_effect=lambda: QLabel("A saved unlock"))
+        host.enqueue_unlock(factory, title="New Unlock!")
+        self.events()
+        factory.assert_not_called()
+        self.assertEqual(host.pending_unlock_count, 1)
+        ready[0] = True
+        host.resume_unlocks()
+        self.events()
+        self.assertEqual(factory.call_count, 1)
+        self.assertEqual(host.current_title, "New Unlock!")
+        host.cancel_owner()
+        host.deleteLater()
+
+    def test_predicate_deferred_unlock_cannot_survive_cancel_owner(self):
+        host = OverlayHost(self.owner, unlock_ready=lambda: False)
+        factory = Mock(side_effect=lambda: QLabel("Old owner"))
+        host.enqueue_unlock(factory, title="New Unlock!")
+        self.events()
+        host.cancel_owner()
+        host.resume_unlocks()
+        self.events()
+        factory.assert_not_called()
+        self.assertEqual(host.pending_unlock_count, 0)
+        host.deleteLater()
+
+    def test_minimized_owner_retains_unlock_until_restored(self):
+        self.owner.showMinimized()
+        self.events()
+        factory = Mock(side_effect=lambda: QLabel("A saved unlock"))
+        self.host.enqueue_unlock(factory, title="New Unlock!")
+        self.events()
+        factory.assert_not_called()
+        self.assertEqual(self.host.pending_unlock_count, 1)
+        self.owner.showNormal()
+        self.events()
+        self.assertEqual(factory.call_count, 1)
+        self.assertEqual(self.host.current_title, "New Unlock!")
+
     def test_failed_factory_is_sanitized_and_next_notification_can_open(self):
         failed = QSignalSpy(self.host.unlock_failed)
         self.host.enqueue_unlock(Mock(side_effect=ValueError("private exception detail")), title="Broken")

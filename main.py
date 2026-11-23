@@ -14,6 +14,7 @@ from conversation_flow import DirectReplyPolicy, GroupTurnSnapshot, TurnPreparat
 from conversation_widgets import DialogueView
 from message_view import DisplayRecord, MessageLog
 from overlay_host import OverlayHost
+from unlock_ui import UnlockPage, unlock_presentation
 from npc_items import NPCItemState
 from items import ITEM_CATALOGUE, Inventory, DraftState, InventoryError
 from game_rules import BodyState, DeathCause, ItemUseContext, NightMemoryView, PlayerItemRules, ItemRuleError, GUARDIAN_PUBLIC
@@ -311,6 +312,7 @@ class GameWindow(QMainWindow):
             try:
                 update = self.profile_store.record(self.pending_progress[0])
             except ProfileError as error:
+                self.enqueue_unlock_celebrations(unlocked)
                 self.show_profile_error(str(error))
                 return False
             self.profile = update.profile
@@ -321,15 +323,36 @@ class GameWindow(QMainWindow):
             self.pending_progress.pop(0)
         had_failure = not self.progress_retry_button.isHidden()
         self.progress_retry_button.hide()
-        if unlocked:
-            names = {weapon["id"]: weapon["name"] for weapon in self.weapons}
-            names.update({item_id: item.name for item_id, item in ITEM_CATALOGUE.items()})
-            self.progress_notice.setText("Unlocked for your next run: " + ", ".join(names.get(key, key) for key in unlocked))
-            self.progress_notice.show()
-        elif had_failure:
+        self.enqueue_unlock_celebrations(unlocked)
+        if had_failure:
             self.progress_notice.setText("Progress saved.")
             self.progress_notice.show()
         return True
+
+    def enqueue_unlock_celebrations(self, unlocked):
+        # ProfileStore is authoritative: never infer unlocks from loaded profiles.
+        for content_id in unlocked:
+            self.overlay_host.enqueue_unlock(
+                lambda key=content_id: self.build_unlock_page(key), title="New Unlock!")
+
+    def build_unlock_page(self, content_id):
+        presentation = unlock_presentation(content_id, self.weapons, ITEM_CATALOGUE)
+        page = UnlockPage(presentation, self.overlay_host.close_page,
+                          body_font=readable_body_font(), title_font=self.speaker_font)
+        fit_window_to_screen(self.overlay_host, 620, 560)
+        return page
+
+    def unlock_celebrations_ready(self):
+        return (self.phase not in ("weapon_select", "restarting", "closed")
+                and self.pending_room_action is None and not self.separate_surface_open())
+
+    def show_unlock_error(self, message):
+        # Presentation failures must not suggest retrying already persisted events.
+        notice = message + " Your unlock is saved and available next run."
+        if not self.progress_retry_button.isHidden():
+            notice = self.progress_notice.text() + " " + notice
+        self.progress_notice.setText(notice)
+        self.progress_notice.show()
 
     def retry_progress(self):
         if self.flush_progress() and self.load_profile():
@@ -417,6 +440,7 @@ class GameWindow(QMainWindow):
         if self.item_drafts is not None and self.item_drafts.pending_offer is not None:
             self.item_drafts.skip(self.item_drafts.pending_offer.offer_id)
         self.retire_item_offer_page()
+        self.overlay_host.resume_unlocks()
 
     def choose_item_offer(self, offer_id, slot):
         if not self.item_offer_is_current(offer_id):
@@ -470,6 +494,7 @@ class GameWindow(QMainWindow):
         self.position_weapon_panel()
         if continuation is not None:
             continuation()
+        self.overlay_host.resume_unlocks()
 
     def can_use_items(self):
         return self.phase == "conversation" and not self.ai_busy and not self.game_over and self.player_alive
@@ -1010,13 +1035,14 @@ class GameWindow(QMainWindow):
         self.message_log = MessageLog(self.output_area, body_font=body_font,
                                       speaker_font=self.speaker_font, name_format=self.speaker_display_format)
         self.message_log.hide()
-        self.overlay_host = OverlayHost(self, body_font=body_font, title_font=self.speaker_font)
+        self.overlay_host = OverlayHost(self, body_font=body_font, title_font=self.speaker_font,
+                                        unlock_ready=self.unlock_celebrations_ready)
         self.overlay_host.setStyleSheet("QDialog#gameOverlayHost { background: #2A2A2A; border: 3px solid white; } "
                                        "QLabel { color: #E0E0E0; } "
                                        "QToolButton { color: white; background: #333; border: 1px solid #777; padding: 8px; } "
                                        "QToolButton:hover, QToolButton:focus { background: #444; border-color: white; }")
         self.overlay_host.page_closed.connect(self.overlay_page_closed)
-        self.overlay_host.unlock_failed.connect(self.show_profile_error)
+        self.overlay_host.unlock_failed.connect(self.show_unlock_error)
         self.overlay_host.installEventFilter(self)
 
 
@@ -1586,6 +1612,9 @@ class GameWindow(QMainWindow):
             self.draft_page.layout().setContentsMargins(0, top, 0, 0)
 
     def eventFilter(self, obj, event):
+        if (event.type() in (QEvent.Hide, QEvent.Close)
+                and obj in getattr(self, "_weapon_windows", {}).values()):
+            self.overlay_host.resume_unlocks()
         if (obj is getattr(self, "overlay_host", None) and event.type() == QEvent.KeyPress
                 and event.key() == Qt.Key_Escape and self.pause_settings_active()):
             self.show_pause_menu_page()
@@ -1978,6 +2007,7 @@ class GameWindow(QMainWindow):
         self.message_log.show()
         self.room_buttons_widget.show() 
         self.run_action_phase()
+        self.overlay_host.resume_unlocks()
 
     def show_how_to_play(self):
         if self.overlay_host.current_page is not None or self.separate_surface_open():
@@ -2207,6 +2237,7 @@ class GameWindow(QMainWindow):
     def forget_weapon_editor(self, weapon_id, editor):
         if self._weapon_windows.get(weapon_id) is editor:
             self._weapon_windows[weapon_id] = None
+            self.overlay_host.resume_unlocks()
 
     def weapon_is_mandatory(self):
         if self.bonus_action_pending:
@@ -3748,6 +3779,7 @@ class GameWindow(QMainWindow):
         w.setAttribute(Qt.WA_StyledBackground, True)
         w.setStyleSheet("background-color:#2A2A2A;")
         self._weapon_windows["pen"] = w
+        w.installEventFilter(self)
         w.destroyed.connect(lambda: self.forget_weapon_editor("pen", w))
 
         lay = QVBoxLayout(w)
@@ -3851,6 +3883,7 @@ class GameWindow(QMainWindow):
         w.setAttribute(Qt.WA_StyledBackground, True)
         w.setStyleSheet("background-color:#2A2A2A;")
         self._weapon_windows["blackmagic"] = w
+        w.installEventFilter(self)
         w.destroyed.connect(lambda: self.forget_weapon_editor("blackmagic", w))
         outer = QVBoxLayout(w); outer.setContentsMargins(0,0,0,0); outer.setSpacing(0)
 
@@ -3976,6 +4009,7 @@ class GameWindow(QMainWindow):
         w.setAttribute(Qt.WA_StyledBackground, True)
         w.setStyleSheet("background-color:#2A2A2A;")
         self._weapon_windows["knife"] = w
+        w.installEventFilter(self)
         w.destroyed.connect(lambda: self.forget_weapon_editor("knife", w))
         outer = QVBoxLayout(w); outer.setContentsMargins(0,0,0,0)
 
@@ -4068,6 +4102,7 @@ class GameWindow(QMainWindow):
         w.setAttribute(Qt.WA_StyledBackground, True)
         w.setStyleSheet("background-color:#2A2A2A;")
         self._weapon_windows["c4"] = w
+        w.installEventFilter(self)
         w.destroyed.connect(lambda: self.forget_weapon_editor("c4", w))
         outer = QVBoxLayout(w); outer.setContentsMargins(0,0,0,0)
 

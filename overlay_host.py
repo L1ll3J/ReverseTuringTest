@@ -36,7 +36,7 @@ class OverlayHost(QDialog):
     page_closed = pyqtSignal(str)
     unlock_failed = pyqtSignal(str)
 
-    def __init__(self, parent, *, body_font=None, title_font=None):
+    def __init__(self, parent, *, body_font=None, title_font=None, unlock_ready=None):
         if not isinstance(parent, QWidget):
             raise TypeError("OverlayHost requires its owning window")
         super().__init__(parent, Qt.Dialog | Qt.FramelessWindowHint)
@@ -47,6 +47,7 @@ class OverlayHost(QDialog):
         self._current_page = None
         self._current_title = ""
         self._queue = deque()
+        self._unlock_ready = unlock_ready
         self._cancelled = False
         self._draining = False
         self._generation = 0
@@ -302,6 +303,10 @@ class OverlayHost(QDialog):
         self._schedule_next()
         return True
 
+    def resume_unlocks(self):
+        """Recheck deferred notifications after caller-owned choice state changes."""
+        self._schedule_next()
+
     def _schedule_next(self):
         if (self._cancelled or self._draining or self._current_page is not None
                 or not self._queue):
@@ -316,6 +321,8 @@ class OverlayHost(QDialog):
     def _drain_queue(self):
         if (self._cancelled or self._queue_generation != self._generation
                 or self._current_page is not None or not self._owner_available() or not self._queue):
+            return
+        if self._unlock_ready is not None and not self._unlock_ready():
             return
         queued = self._queue.popleft()
         self._draining = True
