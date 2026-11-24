@@ -56,6 +56,11 @@ class HouseIntegrationTests(unittest.TestCase):
                 art = view.image_rect.toAlignedRect().translated(view.mapTo(self.window, QPoint()))
                 side = sidebar.rect().translated(sidebar.mapTo(self.window, QPoint()))
                 control = self.window.transcript_button.geometry()
+                timeline = self.window.house_timeline
+                timeline_rect = timeline.rect().translated(timeline.mapTo(self.window, QPoint()))
+                self.assertTrue(self.window.rect().contains(timeline_rect))
+                self.assertLess(timeline_rect.right(), art.left())
+                self.assertFalse(timeline_rect.intersects(side))
                 self.assertFalse(art.intersects(side))
                 self.assertGreaterEqual(side.left() - art.right(), 16)
                 self.assertLessEqual(side.left() - art.right(), 28)
@@ -99,6 +104,13 @@ class HouseIntegrationTests(unittest.TestCase):
             self.window.run_conversation_phase()
         self.assertIs(log.parentWidget(), self.window.centralWidget())
         self.assertTrue(self.window.house_timeline.isHidden())
+        native_id, geometry = int(self.window.winId()), self.window.geometry()
+        self.window.restart_game()
+        self.app.processEvents()
+        self.assertEqual(int(self.window.winId()), native_id)
+        self.assertEqual(self.window.geometry(), geometry)
+        self.assertTrue(self.window.menu_widget.isVisible())
+        self.assertEqual(self.window.message_log.records, ())
 
     def test_action_open_initializes_native_room_masks_without_event_dispatch(self):
         self.window.player_name_input.setText("Alex")

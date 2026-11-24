@@ -1706,7 +1706,7 @@ class GameWindow(QMainWindow):
         InventoryPage._font(timeline_title, self.speaker_font)
         timeline_title.setStyleSheet(timeline_title.styleSheet() + "color:#aaa;")
         self.house_timeline_layout.addWidget(timeline_title)
-        self.house_sidebar_layout.addWidget(self.house_timeline, 1)
+        room_layout.insertWidget(0, self.house_timeline)
         self.house_timeline.hide()
         self.house_sidebar.setWidget(self.house_sidebar_content)
         room_layout.addWidget(self.house_sidebar)
@@ -2853,10 +2853,12 @@ class GameWindow(QMainWindow):
         if not getattr(self, "weapon_action_panel", None):
             return
         # Fit the composition to the proportional artwork instead of the monitor width.
-        self.house_sidebar.setFixedWidth(max(280, min(420, int(self.width() * 0.23))))
+        self.house_sidebar.setFixedWidth(max(260, min(320, int(self.width() * 0.16))))
+        self.house_timeline.setFixedWidth(max(200, min(420, int(self.width() * 0.20))))
         height = max(1, self.room_buttons_widget.contentsRect().height() - 16)
         art_width = int(height * ARTWORK_SIZE[0] / ARTWORK_SIZE[1])
-        row_width = art_width + 16 + self.house_sidebar.width() + self.house_row.layout().spacing()
+        row_width = (art_width + 16 + self.house_timeline.width() + self.house_sidebar.width()
+                     + 2 * self.house_row.layout().spacing())
         self.house_row.setMinimumWidth(0)
         self.house_row.setMaximumWidth(min(self.room_buttons_widget.contentsRect().width(), row_width))
         self.room_buttons_widget.layout().activate()
