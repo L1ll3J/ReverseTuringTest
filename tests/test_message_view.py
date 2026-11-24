@@ -73,6 +73,7 @@ class MessageViewTests(unittest.TestCase):
         self.assertEqual(body_cursor.charFormat().anchorHref(), "")
         self.assertEqual(body_cursor.charFormat().font().pixelSize(), 18)
         self.assertEqual(header_cursor.charFormat().font().pixelSize(), 12)
+        self.assertEqual(header_cursor.charFormat().foreground().color(), QColor(Qt.white))
         self.assertFalse(body_cursor.charFormat().hasProperty(QTextCharFormat.ForegroundBrush))
         clicked = QSignalSpy(self.editor.speaker_chosen)
         cursor = QTextCursor(self.editor.document())
@@ -93,6 +94,56 @@ class MessageViewTests(unittest.TestCase):
         cursor = self.editor.document().find("Detective")
         self.assertFalse(cursor.charFormat().isAnchor())
         self.assertEqual(cursor.charFormat().anchorHref(), "")
+
+    def test_action_blocks_are_inset_without_changing_literal_records_or_speech(self):
+        records = (
+            DisplayRecord("before", "speech", "A spoken account.", speaker="Dave"),
+            DisplayRecord("gift", "event", "Alex gave Dave a banana."),
+            DisplayRecord("discovery", "event", "A <literal> discovery.\nIts second line.", speaker="Detective"),
+            DisplayRecord("after", "speech", "Another spoken account.", speaker="Hank"),
+        )
+        self.view.append_records(records)
+        self.app.processEvents()
+        self.assertEqual(self.editor.toPlainText(), "Dave\nA spoken account.\nAlex gave Dave a banana.\n"
+                         "Detective\nA <literal> discovery.\nIts second line.\nHank\nAnother spoken account.")
+        speech = self.editor.document().find("A spoken account.")
+        action = self.editor.document().find("Alex gave Dave")
+        later_speech = self.editor.document().find("Another spoken account.")
+        self.assertGreater(action.blockFormat().leftMargin(), speech.blockFormat().leftMargin())
+        self.assertEqual(later_speech.blockFormat().leftMargin(), speech.blockFormat().leftMargin())
+        self.assertNotEqual(action.blockFormat().background(), speech.blockFormat().background())
+        self.assertTrue(action.charFormat().hasProperty(QTextCharFormat.ForegroundBrush))
+        self.assertFalse(later_speech.charFormat().hasProperty(QTextCharFormat.ForegroundBrush))
+        self.assertFalse(action.charFormat().isAnchor())
+        live_formats = [self.editor.document().find(text).blockFormat()
+                        for text in ("A spoken account.", "Alex gave Dave", "A <literal>", "Another spoken account.")]
+        self.view.set_records(records)
+        transcript_formats = [self.editor.document().find(text).blockFormat()
+                              for text in ("A spoken account.", "Alex gave Dave", "A <literal>", "Another spoken account.")]
+        self.assertEqual(live_formats, transcript_formats)
+        self.assertEqual(self.view.records, records)
+
+    def test_action_marker_tracks_native_wrapping_and_scrolling_without_intercepting_input(self):
+        self.editor.setStyleSheet("background: black; color: #e0e0e0;")
+        self.view.append_records((DisplayRecord("before", "speech", "An account. " * 30, speaker="Dave"),
+                                  DisplayRecord("event", "event", "A long observed event. " * 30),
+                                  DisplayRecord("after", "speech", "Another account. " * 30, speaker="Hank")))
+        marker = self.view._event_markers
+        self.assertTrue(marker.testAttribute(Qt.WA_TransparentForMouseEvents))
+        for width in (520, 380):
+            self.view.resize(width, 320)
+            cursor = self.editor.document().find("A long observed event.")
+            cursor.setPosition(cursor.selectionStart())
+            self.editor.setTextCursor(cursor)
+            self.editor.ensureCursorVisible()
+            self.app.processEvents()
+            self.assertEqual(marker.geometry(), self.editor.viewport().geometry())
+            position = self.editor.cursorRect(cursor)
+            image = self.editor.grab(self.editor.viewport().geometry()).toImage()
+            marker_color = image.pixelColor(position.left() - 11, position.center().y())
+            gutter_color = image.pixelColor(position.left() - 15, position.center().y())
+            self.assertGreater(marker_color.lightness(), gutter_color.lightness())
+            self.assertEqual(self.editor.horizontalScrollBar().maximum(), 0)
 
     def test_tail_follows_append_without_moving_a_selection(self):
         self.fill()
