@@ -1701,6 +1701,7 @@ class GameWindow(QMainWindow):
         self.loiter_button.hide()
         self.arrival_status.hide()
         self.house_sidebar_layout.addWidget(self.house_view.info_panel)
+        self.house_sidebar_layout.addStretch(1)
         self.house_timeline = QWidget()
         self.house_timeline.setObjectName("houseTimeline")
         self.house_timeline_layout = QVBoxLayout(self.house_timeline)

@@ -100,6 +100,8 @@ class HouseIntegrationTests(unittest.TestCase):
         self.assertFalse(any("Choose a room in the house." in record.text
                              for record in self.window.history_records))
         self.assertEqual(QFontInfo(self.window.loiter_button.font()).family(), self.window.pixel_font_family)
+        self.assertLess(self.window.arrival_controls.height(), 200)
+        self.assertLess(self.window.house_view.info_panel.height(), 150)
         with patch.object(self.window, 'run_conversation_loop'):
             self.window.run_conversation_phase()
         self.assertIs(log.parentWidget(), self.window.centralWidget())
