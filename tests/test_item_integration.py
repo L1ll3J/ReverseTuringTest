@@ -1,4 +1,4 @@
-﻿"""Offline integration checks for real room offers, item effects and progression."""
+"""Offline integration checks for real room offers, item effects and progression."""
 
 import contextlib
 from dataclasses import replace
@@ -167,13 +167,15 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.active_workers)
 
     def test_offer_inventory_and_unlock_goals_resolve_readable_body_fonts(self):
-        goals = [label for label in self.window.weapon_picker_widget.findChildren(QLabel)
-                 if "\n\nLocked:" in label.text()]
-        self.assertTrue(goals)
-        self.assertTrue(all(QFontInfo(label.font()).family() != self.window.pixel_font_family for label in goals))
         for weapon in self.window.weapons:
-            if weapon["id"] != "bare":
-                self.assertTrue(any(label.text().startswith(weapon["desc"]) for label in goals))
+            if weapon["id"] == "bare":
+                continue
+            self.window.inspect_weapon(weapon)
+            details = self.window.weapon_details
+            self.assertEqual(details.description.text(), weapon["desc"])
+            self.assertEqual(details.goal.text(), "Unlock: " + game.UNLOCK_GOALS[weapon["id"]])
+            for label in (details.description, details.goal):
+                self.assertNotEqual(QFontInfo(label.font()).family(), self.window.pixel_font_family)
         self.night()
         self.window.choose_room("Basement")
         self.app.processEvents()
