@@ -624,7 +624,8 @@ class GameWindow(QMainWindow):
         self.draft_page.show()
         self.layout.activate()
         self.position_corner_controls()
-        self.draft_page.take_buttons[0].setFocus(Qt.OtherFocusReason)
+        self.draft_page.setFocusPolicy(Qt.StrongFocus)
+        self.draft_page.setFocus(Qt.OtherFocusReason)
 
     def item_offer_is_current(self, offer_id):
         offer = self.item_drafts.pending_offer if self.item_drafts is not None else None
@@ -1629,7 +1630,7 @@ class GameWindow(QMainWindow):
         outer_room_layout.setContentsMargins(0, 0, 0, 0)
         self.house_row = QWidget()
         outer_room_layout.addStretch(1)
-        outer_room_layout.addWidget(self.house_row)
+        outer_room_layout.addWidget(self.house_row, 100)
         outer_room_layout.addStretch(1)
         room_layout = QHBoxLayout(self.house_row)
         room_layout.setContentsMargins(0, 0, 0, 0)
@@ -1647,6 +1648,7 @@ class GameWindow(QMainWindow):
         self.house_sidebar.setFrameShape(QFrame.NoFrame)
         self.house_sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.house_sidebar.setWidgetResizable(True)
+        self.house_sidebar.setStyleSheet(ITEM_SCROLLBAR_STYLE)
         self.house_sidebar_content = QWidget()
         self.house_sidebar_layout = QVBoxLayout(self.house_sidebar_content)
         self.house_sidebar_layout.setContentsMargins(0, 0, 0, 0)
@@ -1664,12 +1666,12 @@ class GameWindow(QMainWindow):
         self.loiter_button.setObjectName("loiterButton")
         self.loiter_button.setAccessibleName("Wait outside for the next guest")
         self.loiter_button.setFocusPolicy(Qt.StrongFocus)
-        InventoryPage._font(self.loiter_button, body_font)
+        InventoryPage._font(self.loiter_button, self.speaker_font)
         self.loiter_button.setMinimumHeight(44)
         self.loiter_button.setCursor(Qt.PointingHandCursor)
         self.loiter_button.setStyleSheet(
-            f'QPushButton {{ font-family:"{body_family}"; font-size:18px; color:#ddd; '
-            'background:#141414; border:none; padding:12px 16px; text-align:left; } '
+            f'QPushButton {{ font-family:"{font_family}"; font-size:12px; color:#ddd; '
+            'background:#111; border:none; padding:16px 12px; text-align:center; } '
             'QPushButton:enabled:hover, QPushButton:focus { color:white; background:#292929; } '
             'QPushButton:pressed { background:#353535; } '
             'QPushButton:disabled { color:#666; background:#0b0b0b; }')
@@ -1684,7 +1686,17 @@ class GameWindow(QMainWindow):
         self.loiter_button.hide()
         self.arrival_status.hide()
         self.house_sidebar_layout.addWidget(self.house_view.info_panel)
-        self.house_sidebar_layout.addStretch(1)
+        self.house_timeline = QWidget()
+        self.house_timeline.setObjectName("houseTimeline")
+        self.house_timeline_layout = QVBoxLayout(self.house_timeline)
+        self.house_timeline_layout.setContentsMargins(0, 0, 0, 0)
+        self.house_timeline_layout.setSpacing(8)
+        timeline_title = QLabel("Tonight")
+        InventoryPage._font(timeline_title, self.speaker_font)
+        timeline_title.setStyleSheet(timeline_title.styleSheet() + "color:#aaa;")
+        self.house_timeline_layout.addWidget(timeline_title)
+        self.house_sidebar_layout.addWidget(self.house_timeline, 1)
+        self.house_timeline.hide()
         self.house_sidebar.setWidget(self.house_sidebar_content)
         room_layout.addWidget(self.house_sidebar)
 
@@ -2121,12 +2133,23 @@ class GameWindow(QMainWindow):
     def set_action_output_mode(self, compact):
         if hasattr(self, "conversation_stage"):
             self.conversation_stage.setVisible(not compact and self.phase == "conversation" and not self.game_over)
-        self.message_log.setMaximumHeight(128 if compact else 16777215)
-        background = "black"
+        visible = not self.message_log.isHidden()
+        in_sidebar = self.message_log.parentWidget() is self.house_timeline
+        if compact and not in_sidebar:
+            self.layout.removeWidget(self.message_log)
+            self.house_timeline_layout.addWidget(self.message_log, 1)
+        elif not compact and in_sidebar:
+            self.house_timeline_layout.removeWidget(self.message_log)
+            self.layout.insertWidget(self.layout.indexOf(self.conversation_stage) + 1,
+                                     self.message_log, 1, Qt.AlignHCenter)
+        self.house_timeline.setVisible(compact)
+        self.message_log.setMinimumHeight(220 if compact else 0)
+        self.message_log.setMaximumHeight(16777215)
+        self.message_log.setVisible(visible)
+        padding = 'padding-left: 0px; padding-right: 0px;' if compact else 'padding-left: 16px; padding-right: 24px;'
         self.output_area.setStyleSheet(
-            f'background-color: {background}; color: #E0E0E0; border: none; '
-            f'font-family: "{readable_body_font().family()}"; font-size: 18px; '
-            'padding-left: 16px; padding-right: 24px;')
+            'background-color: black; color: #E0E0E0; border: none; '
+            f'font-family: "{readable_body_font().family()}"; font-size: 18px; ' + padding)
 
     def refresh_conversation_stage(self):
         if not hasattr(self, "conversation_stage"):
@@ -2819,10 +2842,12 @@ class GameWindow(QMainWindow):
         if not getattr(self, "weapon_action_panel", None):
             return
         # Fit the composition to the proportional artwork instead of the monitor width.
+        self.house_sidebar.setFixedWidth(max(280, min(420, int(self.width() * 0.23))))
         height = max(1, self.room_buttons_widget.contentsRect().height() - 16)
         art_width = int(height * ARTWORK_SIZE[0] / ARTWORK_SIZE[1])
         row_width = art_width + 16 + self.house_sidebar.width() + self.house_row.layout().spacing()
-        self.house_row.setFixedWidth(min(self.room_buttons_widget.contentsRect().width(), row_width))
+        self.house_row.setMinimumWidth(0)
+        self.house_row.setMaximumWidth(min(self.room_buttons_widget.contentsRect().width(), row_width))
         self.room_buttons_widget.layout().activate()
         self.house_row.layout().activate()
         visible = (self.phase == "action" and not self.game_over and bool(self.selected_weapon)
@@ -2979,8 +3004,7 @@ class GameWindow(QMainWindow):
             self.record_history(f"Initial room arrivals;\n{assignments_output}")
         self.update_arrival_controls()
 
-        # Ask the player to choose a room
-        self.append_output_text("Choose a room in the house. Point at a room to inspect it.")
+        # Room instructions belong to the sidebar controls, not the event log.
         self.rooms_visited = []  # Track rooms visited during the night
         self.new_crime_scenes = []  # Track new crime scenes
         self.had_to_change_rooms = False  # Track if the player moved rooms
@@ -3230,6 +3254,7 @@ class GameWindow(QMainWindow):
 
         # ---- Special weapons decouple sleep room from kill ----
         if wpn_id in ("c4", "blackmagic", "love"):
+            self.set_action_output_mode(False)
             self.room_buttons_widget.hide()
             self.weapon_action_panel.hide()
 
@@ -3327,6 +3352,7 @@ class GameWindow(QMainWindow):
             return  # Let the player choose again
 
         # If the room is occupied
+        self.set_action_output_mode(False)
         self.room_buttons_widget.hide()
         self.weapon_action_panel.hide()
         self.handle_room_occupants(selected_room, occupants)
@@ -3451,6 +3477,7 @@ class GameWindow(QMainWindow):
                 for room, button in self.room_buttons.items():
                     button.setEnabled(room in self.night_rooms)
                 self.update_room_button_states()
+                self.set_action_output_mode(True)
                 self.room_buttons_widget.show()
                 self.append_output_text("Watch This Drive: choose a room for one extra basic attack.")
             return

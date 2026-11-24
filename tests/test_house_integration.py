@@ -45,7 +45,7 @@ class HouseIntegrationTests(unittest.TestCase):
     def test_actual_house_and_sidebar_are_disjoint_at_all_target_sizes(self):
         self.start_night()
         self.window.transcript_button.show()
-        for width, height in ((800, 600), (1280, 800), (2560, 1440), (3440, 1440)):
+        for width, height in ((800, 600), (1280, 800), (2560, 1440), (3440, 1440), (800, 600)):
             with self.subTest(size=(width, height)):
                 self.window.resize(width, height)
                 self.window.position_corner_controls()
@@ -74,10 +74,31 @@ class HouseIntegrationTests(unittest.TestCase):
                 self.assertTrue(self.window.rect().contains(side))
                 self.assertIs(view.info_panel.parentWidget(), self.window.house_sidebar_content)
                 self.assertIs(self.window.weapon_action_panel.parentWidget(), self.window.house_sidebar_content)
-                self.assertLessEqual(self.window.message_log.height(), 128)
+                self.assertIs(self.window.message_log.parentWidget(), self.window.house_timeline)
                 view.buttons['library'].setFocus()
                 self.app.processEvents()
                 self.assertIn('LIBRARY', view.info_title.text())
+
+    def test_timeline_uses_sidebar_height_and_instructions_stay_outside_events(self):
+        self.start_night()
+        self.window.resize(2560, 1440)
+        self.app.processEvents()
+        self.window.loiter_button.click()
+        self.window.loiter_button.click()
+        self.app.processEvents()
+        log = self.window.message_log
+        self.assertIs(log.parentWidget(), self.window.house_timeline)
+        self.assertGreater(log.height(), 400)
+        self.assertEqual(self.window.house_sidebar.verticalScrollBar().maximum(), 0)
+        self.assertEqual(self.window.output_area.verticalScrollBar().maximum(), 0)
+        self.assertNotIn("Choose a room in the house.", self.window.output_area.toPlainText())
+        self.assertFalse(any("Choose a room in the house." in record.text
+                             for record in self.window.history_records))
+        self.assertEqual(QFontInfo(self.window.loiter_button.font()).family(), self.window.pixel_font_family)
+        with patch.object(self.window, 'run_conversation_loop'):
+            self.window.run_conversation_phase()
+        self.assertIs(log.parentWidget(), self.window.centralWidget())
+        self.assertTrue(self.window.house_timeline.isHidden())
 
     def test_action_open_initializes_native_room_masks_without_event_dispatch(self):
         self.window.player_name_input.setText("Alex")
@@ -217,7 +238,7 @@ class HouseIntegrationTests(unittest.TestCase):
         self.window.resize(800, 600)
         QTest.qWait(10)
         self.assertEqual(self.window.phase, "action")
-        self.assertEqual(self.window.message_log.maximumHeight(), 128)
+        self.assertIs(self.window.message_log.parentWidget(), self.window.house_timeline)
         for name, character in self.window.characters.items():
             character['alive'] = name == 'Jerry'
         self.assertTrue(self.window.check_victory())

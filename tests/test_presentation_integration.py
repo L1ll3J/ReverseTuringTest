@@ -253,7 +253,7 @@ class PresentationIntegrationTests(unittest.TestCase):
         editor = self.window.output_area
         self.assertTrue(editor.isVisible())
         self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("black"))
-        self.assertEqual(self.window.message_log.maximumHeight(), 128)
+        self.assertIs(self.window.message_log.parentWidget(), self.window.house_timeline)
         self.window.append_output_text("A weapon effect.\nAn action error.")
         self.assertIn("An action error.", editor.toPlainText())
         self.assertEqual(editor.document().find("An action error.").charFormat().font().pixelSize(), 18)
