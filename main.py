@@ -30,8 +30,8 @@ from love_potion import LoveDose, LovePotionHistory
 from muffled import TONES, TONE_LABELS, muffled_sound
 from progression import ProfileStore, ProfileSnapshot, ProgressEvent, ProfileError
 from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
-from item_ui import InlineItemDraftPage, InventoryPage, GameComboBox, ITEM_SCROLLBAR_STYLE
-from item_catalogue_ui import ItemCataloguePanel
+from item_ui import InlineItemDraftPage, InventoryPage, GameComboBox, CollectionTileButton, ITEM_SCROLLBAR_STYLE, dimmed_sprite
+from item_catalogue_ui import ItemCataloguePanel, CatalogueDetails, details_scroll
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea, QStyle, QStyleOptionButton
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
@@ -1899,10 +1899,42 @@ class GameWindow(QMainWindow):
         # Weapon Picker
         self.weapon_grid = QGridLayout()
         self.weapon_grid.setSpacing(16)
+        self.weapon_grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.weapon_picker_widget = QWidget()
-        self.weapon_picker_widget.setLayout(self.weapon_grid)
+        self.weapon_picker_widget.setFocusPolicy(Qt.StrongFocus)
+        self.weapon_picker_widget.setMaximumWidth(1780)
+        self.weapon_browser_layout = QHBoxLayout(self.weapon_picker_widget)
+        self.weapon_browser_layout.setContentsMargins(20, 76, 20, 20)
+        self.weapon_browser_layout.setSpacing(28)
+        self.weapon_grid_widget = QWidget()
+        weapon_collection_layout = QVBoxLayout(self.weapon_grid_widget)
+        weapon_collection_layout.setContentsMargins(0, 0, 0, 0)
+        weapon_collection_layout.setSpacing(18)
+        weapon_collection_layout.setAlignment(Qt.AlignTop)
+        weapon_heading = QLabel("Choose a weapon")
+        weapon_heading.setObjectName("weaponSelectionHeading")
+        weapon_heading.setTextFormat(Qt.PlainText)
+        InventoryPage._font(weapon_heading, self.speaker_font)
+        weapon_collection_layout.addWidget(weapon_heading)
+        weapon_collection_layout.addLayout(self.weapon_grid)
+        self.weapon_group_headings = {}
+        self.weapon_grid_scroll = QScrollArea()
+        self.weapon_grid_scroll.setWidgetResizable(True)
+        self.weapon_grid_scroll.setFrameShape(QFrame.NoFrame)
+        self.weapon_grid_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.weapon_grid_scroll.setStyleSheet(ITEM_SCROLLBAR_STYLE)
+        self.weapon_grid_scroll.setWidget(self.weapon_grid_widget)
+        self.weapon_browser_layout.addWidget(self.weapon_grid_scroll, 1)
+        self.weapon_details = CatalogueDetails(body_font, self.speaker_font)
+        self.weapon_details_scroll = details_scroll(self.weapon_details)
+        self.weapon_details_scroll.setFixedWidth(360)
+        self.weapon_details_scroll.setMaximumHeight(700)
+        self.weapon_browser_layout.addWidget(self.weapon_details_scroll, 0, Qt.AlignTop)
         self.weapon_scroll = QScrollArea()
         self.weapon_scroll.setWidgetResizable(True)
+        self.weapon_scroll.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        self.weapon_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.weapon_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.weapon_scroll.setFrameShape(QFrame.NoFrame)
         self.weapon_scroll.setWidget(self.weapon_picker_widget)
         self.weapon_scroll.hide()
@@ -1967,7 +1999,7 @@ class GameWindow(QMainWindow):
             ITEM_CATALOGUE, self.profile, UNLOCK_GOALS, self.set_menu_item_enabled,
             body_font, self.menu_widget, icon_root=resource_path("icons/items"),
             title_font=self.speaker_font)
-        self.item_catalogue.setMaximumWidth(1440)
+        self.item_catalogue.setMaximumWidth(1780)
         self.item_catalogue_page = QWidget()
         catalogue_row = QHBoxLayout(self.item_catalogue_page)
         catalogue_row.setContentsMargins(0, 0, 0, 0)
@@ -2555,116 +2587,107 @@ class GameWindow(QMainWindow):
             if w:
                 w.deleteLater()
 
+        self.weapon_group_headings = {}
+        for group in ("Available", "Locked"):
+            heading = QLabel(group)
+            heading.setTextFormat(Qt.PlainText)
+            InventoryPage._font(heading, self.speaker_font)
+            heading.setStyleSheet(heading.styleSheet() + "color:#aaaaaa; background:transparent;")
+            self.weapon_group_headings[group] = heading
         self.weapon_cards = []
-        icon_sz = 180
-
-        for wpn in self.weapons:
-            unlocked = wpn["id"] in available_content(self.profile, "weapon")
-
-            card = QFrame(self.weapon_picker_widget)
-            card.setProperty("weapon_id", wpn["id"])
-            card.setCursor(Qt.PointingHandCursor)
-            card.setFocusPolicy(Qt.NoFocus)
+        available = set(available_content(self.profile, "weapon"))
+        ordered = sorted(self.weapons, key=lambda weapon: weapon["id"] not in available)
+        for weapon in ordered:
+            unlocked = weapon["id"] in available
+            card = CollectionTileButton(self.weapon_grid_widget)
+            card.setProperty("weapon_id", weapon["id"])
+            card.setProperty("locked", not unlocked)
             card.setObjectName("weaponCard")
+            card.setAccessibleName(weapon["name"])
+            card.setAccessibleDescription(weapon["desc"] + (" Unlock: " + UNLOCK_GOALS[weapon["id"]] if not unlocked else ""))
+            card.setCursor(Qt.PointingHandCursor if unlocked else Qt.ArrowCursor)
             card.setStyleSheet("""
-                QFrame#weaponCard {
-                    border: 1px solid #555;
-                    background-color: #090909;
-                }
-            """ + ("""
-                QFrame#weaponCard:hover {
-                    background-color: #151515;
-                    border-color: #ddd;
-                }
-            """ if unlocked else ""))
-
-            v = QVBoxLayout(card)
-            v.setContentsMargins(16, 16, 16, 16)
-            v.setSpacing(12)
-
-            # --- Image ---
-            img = QLabel(card)
-            img.setObjectName(f"weaponIcon_{wpn['id']}")
-            img.setAlignment(Qt.AlignCenter)
-            img.setFocusPolicy(Qt.NoFocus)
-            img.setStyleSheet("border: none; background: transparent;")  # no outline
-            pix = QPixmap(resource_path(wpn.get("image", "")))
-            if pix.isNull():
-                ph = QPixmap(icon_sz, icon_sz); ph.fill(Qt.transparent); pix = ph
-            img.setPixmap(pix.scaled(icon_sz, icon_sz, Qt.KeepAspectRatio, Qt.FastTransformation))
-            card.weapon_pixmap = pix
-            # Make child transparent to mouse so the FRAME gets hover/click even over the image
-            img.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            v.addWidget(img, alignment=Qt.AlignHCenter)
-
-            # --- Name ---
-            name = QLabel(wpn["name"], card)
-            name.setObjectName(f"weaponName_{wpn['id']}")
+                QPushButton#weaponCard { background:#090909; border:1px solid transparent;
+                    border-bottom-color:#333333; padding:0; }
+                QPushButton#weaponCard[locked="false"]:hover,
+                QPushButton#weaponCard[locked="false"]:focus { background:#141414; border-color:#dddddd; }
+                QPushButton#weaponCard[locked="true"] { background:#070707; border-bottom-color:#222222; }
+                QPushButton#weaponCard[locked="true"]:focus { border-color:#666666; }
+            """)
+            column = QVBoxLayout(card)
+            column.setContentsMargins(12, 16, 12, 16)
+            column.setSpacing(12)
+            icon = QLabel(card)
+            icon.setObjectName(f"weaponIcon_{weapon['id']}")
+            icon.setAlignment(Qt.AlignCenter)
+            icon.setStyleSheet("border:none; background:transparent;")
+            source = QPixmap(resource_path(weapon["image"]))
+            card.weapon_pixmap = source
+            card.weapon_display_pixmap = source if unlocked else dimmed_sprite(source)
+            column.addWidget(icon, 0, Qt.AlignHCenter)
+            name = QLabel(weapon["name"], card)
+            name.setObjectName(f"weaponName_{weapon['id']}")
+            name.setTextFormat(Qt.PlainText)
             name.setWordWrap(True)
+            name.setAlignment(Qt.AlignCenter)
             name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            name.setAlignment(Qt.AlignHCenter)
-            name.setFocusPolicy(Qt.NoFocus)
-            name.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {'white' if unlocked else '#888'}; border: none; background: transparent;")
-            name.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            v.addWidget(name)
-
-            # --- Description (smaller, grey, wrapped) ---
-            description = wpn["desc"]
-            if not unlocked:
-                description += "\n\nLocked: " + UNLOCK_GOALS[wpn["id"]]
-            desc = QLabel(description, card)
-            desc.setObjectName(f"weaponDescription_{wpn['id']}")
-            desc.setWordWrap(True)
-            desc.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
-            desc.setFocusPolicy(Qt.NoFocus)
-            desc.setFont(readable_body_font())
-            desc.setStyleSheet(f'font-family: "{readable_body_font().family()}"; font-size: 18px; color: #B8B8B8; border: none; background: transparent;')
-            desc.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            v.addWidget(desc, stretch=1)
-
-            # Click anywhere on the card to select
-            def _click_handler(_evt=None, wpn=wpn, allowed=unlocked):
-                if allowed:
-                    self.select_weapon_and_start(wpn)
-            if not unlocked:
-                card.setCursor(Qt.ArrowCursor)
-            card.mousePressEvent = _click_handler
-
+            InventoryPage._font(name, self.speaker_font)
+            name.setStyleSheet(name.styleSheet() + f"color:{'white' if unlocked else '#666666'}; border:none; background:transparent;")
+            column.addWidget(name)
+            for child in card.findChildren(QLabel):
+                child.setAttribute(Qt.WA_TransparentForMouseEvents)
+                child.setFocusPolicy(Qt.NoFocus)
+            card.inspected.connect(lambda wpn=weapon: self.inspect_weapon(wpn))
+            card.clicked.connect(lambda _checked=False, wpn=weapon, allowed=unlocked:
+                                 self.select_weapon_and_start(wpn) if allowed else self.inspect_weapon(wpn))
             self.weapon_cards.append(card)
-
+        self.inspect_weapon(ordered[0])
         self.weapon_scroll.show()
         self.weapon_scroll.setStyleSheet(ITEM_SCROLLBAR_STYLE)
         self.resize_weapon_cards()
+        self.weapon_picker_widget.setFocus()
+
+    def inspect_weapon(self, weapon):
+        unlocked = weapon["id"] in available_content(self.profile, "weapon")
+        card = next(card for card in self.weapon_cards if card.property("weapon_id") == weapon["id"])
+        self.weapon_details.show_entry(
+            name=weapon["name"], description=weapon["desc"], status="Available" if unlocked else "Locked",
+            goal="Unlock: " + UNLOCK_GOALS[weapon["id"]] if not unlocked else "", pixmap=card.weapon_pixmap)
 
     def resize_weapon_cards(self):
-        """Fit every wrapped field before assigning a common row height."""
+        """Keep compact weapon choices beside a stable scrollable inspector."""
         cards = getattr(self, "weapon_cards", ())
         if self.phase != "weapon_select" or not cards:
             return
-        available_width = max(220, self.centralWidget().width() - 60)
-        columns = max(1, min(4, available_width // 300))
+        inspector_width = max(248, min(380, self.width() // 3))
+        self.weapon_details_scroll.setFixedWidth(inspector_width)
+        self.weapon_details_scroll.setMinimumHeight(0)
+        available_width = max(150, min(1780, self.centralWidget().width()) - inspector_width - 120)
+        columns = max(1, min(4, available_width // 210))
         spacing = self.weapon_grid.spacing()
-        card_width = min(340, (available_width - spacing * (columns - 1)) // columns)
-        icon_size = min(180, card_width - 48)
-        heights = []
+        card_width = max(150, min(260, (available_width - spacing * (columns - 1)) // columns))
+        icon_size = min(112, card_width - 40)
         for card in cards:
-            card.ensurePolished()
             icon = card.findChild(QLabel, f"weaponIcon_{card.property('weapon_id')}")
-            icon.setPixmap(card.weapon_pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.FastTransformation))
-            layout = card.layout()
-            margins = layout.contentsMargins()
-            text_width = card_width - margins.left() - margins.right() - 2
-            fields = [layout.itemAt(index).widget() for index in range(layout.count())]
-            height = sum(field.heightForWidth(text_width) if field.hasHeightForWidth()
-                         else field.sizeHint().height() for field in fields)
-            heights.append(height + margins.top() + margins.bottom()
-                           + layout.spacing() * (len(fields) - 1) + 4)
-        card_height = max(400, *heights)
+            icon.setFixedSize(icon_size, icon_size)
+            icon.setPixmap(card.weapon_display_pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.FastTransformation))
+            name = card.findChild(QLabel, f"weaponName_{card.property('weapon_id')}")
+            height = max(174, icon_size + name.heightForWidth(card_width - 28) + 48)
+            card.setFixedSize(card_width, height)
         while self.weapon_grid.count():
             self.weapon_grid.takeAt(0)
-        for index, card in enumerate(cards):
-            card.setFixedSize(card_width, card_height)
-            self.weapon_grid.addWidget(card, index // columns, index % columns)
+        row = 0
+        for group, locked in (("Available", False), ("Locked", True)):
+            group_cards = [card for card in cards if card.property("locked") == locked]
+            heading = self.weapon_group_headings[group]
+            heading.setVisible(bool(group_cards))
+            if not group_cards:
+                continue
+            self.weapon_grid.addWidget(heading, row, 0, 1, columns)
+            row += 1
+            for index, card in enumerate(group_cards):
+                self.weapon_grid.addWidget(card, row + index // columns, index % columns)
+            row += (len(group_cards) + columns - 1) // columns
 
 
     def select_weapon_and_start(self, weapon):

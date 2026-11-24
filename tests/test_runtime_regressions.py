@@ -167,10 +167,10 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertFalse(self.window.menu_widget.isVisible())
         self.assertFalse(self.window.play_tab_button.isVisible())
         self.assertFalse(self.window.item_catalogue.isVisible())
-        goals = [label.text() for label in self.window.weapon_picker_widget.findChildren(QLabel)
-                 if "\n\nLocked:" in label.text()]
         knife = next(weapon for weapon in self.window.weapons if weapon["id"] == "knife")
-        self.assertIn(knife["desc"] + "\n\nLocked: Kill your first victim.", goals)
+        self.window.inspect_weapon(knife)
+        self.assertEqual(self.window.weapon_details.description.text(), knife["desc"])
+        self.assertEqual(self.window.weapon_details.goal.text(), "Unlock: Kill your first victim.")
         bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.select_weapon_and_start(bare)
         self.assertEqual(self.window.phase, "action")
@@ -588,14 +588,14 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertIsInstance(scroll, QScrollArea)
         self.assertTrue(scroll.isVisible())
         self.assertLessEqual(scroll.width(), self.window.width())
-        self.assertEqual(self.window.weapon_grid.count(), len(self.window.weapons))
+        self.assertEqual(len(self.window.weapon_cards), len(self.window.weapons))
+        self.assertEqual(set(self.window.weapon_group_headings), {"Available", "Locked"})
         self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
-        for index in range(self.window.weapon_grid.count()):
-            card = self.window.weapon_grid.itemAt(index).widget()
-            scroll.ensureWidgetVisible(card)
+        for card in self.window.weapon_cards:
+            self.window.weapon_grid_scroll.ensureWidgetVisible(card)
             self.app.processEvents()
-            self.assertTrue(scroll.viewport().rect().contains(
-                card.rect().translated(card.mapTo(scroll.viewport(), card.rect().topLeft()))
+            self.assertTrue(self.window.weapon_grid_scroll.viewport().rect().contains(
+                card.rect().translated(card.mapTo(self.window.weapon_grid_scroll.viewport(), card.rect().topLeft()))
             ))
 
     def test_source_resources_load_outside_working_directory(self):

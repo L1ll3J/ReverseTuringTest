@@ -221,7 +221,7 @@ class MenuNavigationTests(unittest.TestCase):
         self.assertEqual(window.phase, "weapon_select")
         self.assertTrue(window.weapon_scroll.isVisible())
         self.assertFalse(window.menu_widget.isVisible())
-        bare = window.weapon_grid.itemAtPosition(0, 0).widget()
+        bare = window.weapon_cards[0]
         self.assertTrue(bare.isEnabled())
         QTest.mouseClick(bare, Qt.LeftButton)
         self.app.processEvents()
