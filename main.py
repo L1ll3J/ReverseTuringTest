@@ -33,7 +33,7 @@ from content import CONTENT_CATALOGUE, UNLOCK_GOALS, available_content
 from item_ui import InlineItemDraftPage, InventoryPage, GameComboBox, CollectionTileButton, ITEM_SCROLLBAR_STYLE, dimmed_sprite
 from item_catalogue_ui import ItemCataloguePanel, CatalogueDetails, details_scroll
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea, QStyle, QStyleOptionButton
+from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QTextEdit, QLineEdit, QLabel, QHBoxLayout, QGridLayout, QSlider, QStackedLayout, QGraphicsDropShadowEffect, QToolButton, QFrame, QDialog, QDialogButtonBox, QComboBox, QSizePolicy, QScrollArea, QStyle, QStyleOptionButton, QLayout
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPoint, QUrl, QEvent
 from PyQt5.QtGui import QColor, QTextCursor, QTextCharFormat, QFontDatabase, QFont, QPixmap, QIcon, QGuiApplication, QTextBlockFormat, QTextOption, QPalette, QRegion
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
@@ -3414,14 +3414,15 @@ class GameWindow(QMainWindow):
         # Handle the outcome based on room occupants
         if len(occupants) == 0:
             self.observe_house_room(selected_room, ())
-            self.record_history(f"The {selected_room} is empty and is now also a crime scene.", display=True)
             if self.knife_stage == "attack":
+                self.record_history(f"The {selected_room} is empty. Your extra Knife attack ends here.", display=True)
                 self.knife_stage = "done"
                 self.set_action_output_mode(False)
                 self.room_buttons_widget.hide()
                 self.weapon_action_panel.hide()
                 self.finish_night()
                 return
+            self.record_history(f"The {selected_room} is empty and is now also a crime scene.", display=True)
             self.append_output_text("You must choose another room.")
             self.had_to_change_rooms = True
             
@@ -3567,14 +3568,15 @@ class GameWindow(QMainWindow):
         layout.setSpacing(14)
         title = QLabel("You are covered in blood." if self.knife_used_bloodlust else "Your target survived.")
         title.setFont(self.speaker_font)
-        title.setStyleSheet('color:#ef7777; border:none; background:transparent;')
+        title.setStyleSheet(f'font-family:"{self.pixel_font_family}"; font-size:12px; color:#ef7777; border:none; background:transparent;')
         layout.addWidget(title)
         hint = QLabel("Clean up to hide the blood, or push on for one attack in another room."
                       if self.knife_used_bloodlust else
                       "End your Knife action, or push on for one attack in another room.")
+        hint.setObjectName("knifeChoiceHint")
         hint.setFont(readable_body_font())
         hint.setWordWrap(True)
-        hint.setStyleSheet('color:#ccc; border:none; background:transparent;')
+        hint.setStyleSheet(f'font-family:"{readable_body_font().family()}"; font-size:18px; color:#ccc; border:none; background:transparent;')
         layout.addWidget(hint)
         row = QHBoxLayout()
         run, night, body = self.run_id, self.round_number, self.body_id(self.player_name)
@@ -3588,7 +3590,7 @@ class GameWindow(QMainWindow):
             button.setFont(self.speaker_font)
             button.setMinimumHeight(48)
             button.setCursor(Qt.PointingHandCursor)
-            button.setStyleSheet(f'QPushButton {{ color:{color}; background:transparent; border:none; padding:12px 18px; }} '
+            button.setStyleSheet(f'QPushButton {{ font-family:"{self.pixel_font_family}"; font-size:12px; color:{color}; background:transparent; border:none; padding:12px 18px; }} '
                                 'QPushButton:hover, QPushButton:focus { background:#191919; } '
                                 'QPushButton:disabled { color:#666; }')
             row.addWidget(button)
@@ -3596,6 +3598,8 @@ class GameWindow(QMainWindow):
         self.knife_push_button.clicked.connect(lambda: self.choose_knife_followup(run, night, body, True))
         layout.addLayout(row)
         self.knife_choice_panel = panel
+        panel.ensurePolished()
+        layout.setSizeConstraint(QLayout.SetFixedSize)
         self.layout.addWidget(panel, 0, Qt.AlignHCenter)
         panel.show()
 

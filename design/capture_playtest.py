@@ -69,15 +69,21 @@ def capture(output):
             with patch.object(game.random, "choice", side_effect=lambda choices: choices[0]):
                 window.select_weapon_and_start(knife)
             save(window, "house-2560")
-            window.open_knife_dialog()
-            save(window._weapon_windows["knife"], "knife-editor")
-            window._weapon_windows["knife"].close()
             window.item_drafts = DraftState(window.player_owner_id, ("banana", "muffle", "spare_paper"))
             window.choose_room("Attic")
             save(window, "room-offer-2560")
             offer = window.item_drafts.pending_offer
             window.draft_page.take_buttons[offer.options.index("banana")].click()
-            window.kill_victim("Jerry")
+            if window.knife_stage != "choice":
+                victim = next(name for name in window.room_assignments["Attic"]
+                              if window.characters[name]["alive"])
+                window.kill_victim(victim)
+            if window.knife_stage != "choice":
+                raise AssertionError("The capture fixture did not reach the Knife choice")
+            for width, height in ((1280, 800), (1920, 1080), (2560, 1440)):
+                window.resize(width, height)
+                save(window, f"knife-choice-{width}")
+            window.knife_cleanup_button.click()
             if window.weapon_aftermath_panel is not None:
                 save(window, "weapon-aftermath")
                 window.keep_weapon_button.click()

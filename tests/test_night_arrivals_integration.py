@@ -393,36 +393,31 @@ class NightArrivalIntegrationTests(unittest.TestCase):
         self.assertIn('Dave', self.window.room_assignments['Attic'])
         self.assertNotIn('Dave', self.window.room_assignments['Kitchen'])
 
-    def test_hidden_dead_knife_extra_target_saves_without_probe_and_adds_no_attack_or_bloodlust(self):
+    def test_hidden_dead_optional_knife_room_adds_no_phantom_attack(self):
         self.hidden_dead_target_night('knife')
-        self.window.open_knife_dialog()
-        editor = self.window._weapon_windows['knife']
-        box, = editor.findChildren(game.QComboBox)
-        self.assertGreaterEqual(box.findData(self.window.body_id('Dave')), 0)
-        box.setCurrentIndex(box.findData(self.window.body_id('Dave')))
-        next(button for button in editor.findChildren(game.QPushButton) if button.text() == 'Confirm').click()
-        self.assertTrue(editor.isHidden())
-        self.assertEqual(self.window.knife_extra_target, 'Dave')
+        self.assertIn('Dave', self.window.night_weapon_targets())
         self.window.choose_room('Kitchen')
         self.window.draft_page.leave_button.click()
+        self.window.knife_push_button.click()
+        self.window.choose_room('Attic')
+        if self.window.draft_page is not None:
+            self.window.draft_page.leave_button.click()
         self.assertEqual([attack['target_label'] for attack in self.window.night_attacks], ['Hank'])
-        self.assertFalse(self.window.knife_used_bloodlust)
+        self.assertTrue(self.window.knife_used_bloodlust)
+        self.assertEqual(self.window.knife_stage, 'done')
         self.assertIsNone(self.window.pending_room_action)
         self.assertEqual(len(self.window.item_deaths), 1)
-        self.assertFalse(any('covered in blood' in line.text for line in self.window.public_dialogue))
 
-    def test_available_knife_extra_target_still_resolves_second_attack_and_bloodlust(self):
+    def test_available_optional_knife_room_resolves_second_attack_and_bloodlust(self):
         self.open_night(normal=False)
         self.window.selected_weapon = self.weapon('knife')
-        self.window.open_knife_dialog()
-        editor = self.window._weapon_windows['knife']
-        box, = editor.findChildren(game.QComboBox)
-        box.setCurrentIndex(box.findData(self.window.body_id('Hank')))
-        next(button for button in editor.findChildren(game.QPushButton) if button.text() == 'Confirm').click()
         self.window.choose_room('Attic')
         self.window.draft_page.leave_button.click()
+        self.window.knife_push_button.click()
+        self.window.choose_room('Kitchen')
         self.assertEqual(self.window.item_drafts.pending_offer.room_id, 'Kitchen')
         self.window.draft_page.leave_button.click()
+        self.window.kill_victim('Hank')
         self.assertEqual([attack['target_label'] for attack in self.window.night_attacks], ['Jerry','Hank'])
         self.assertTrue(self.window.knife_used_bloodlust)
 
@@ -435,11 +430,11 @@ class NightArrivalIntegrationTests(unittest.TestCase):
         self.window.loiter_button.click()
         self.assertFalse(self.window.characters['Dave']['alive'])
         self.assertNotIn('Dave', self.window.night_weapon_targets())
-        self.window.selected_weapon = self.weapon('knife')
-        self.window.open_knife_dialog()
-        editor = self.window._weapon_windows['knife']
-        box, = editor.findChildren(game.QComboBox)
-        self.assertEqual(box.findData(self.window.body_id('Dave')), -1)
+        self.window.selected_weapon = self.weapon('blackmagic')
+        self.window.open_blackmagic_dialog()
+        editor = self.window._weapon_windows['blackmagic']
+        for box in editor.findChildren(game.QComboBox):
+            self.assertEqual(box.findData(self.window.body_id('Dave')), -1)
 
     def test_bonus_new_room_offers_first_reward_without_restarting_arrivals(self):
         state = self.open_night()

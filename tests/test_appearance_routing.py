@@ -147,7 +147,7 @@ class AppearanceRoutingTests(unittest.TestCase):
         self.assertEqual([(line.speaker, line.text) for line in self.window.recalled_dialogue()], [("Debra", "After.")])
         self.assertEqual(len(self.window.public_dialogue), 2)
 
-    def test_action_editors_use_identical_canonical_text_and_distinct_body_data(self):
+    def test_action_editors_and_room_targets_use_distinct_body_data(self):
         self.clone("Dave")
         self.window.phase = "action"
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "blackmagic")
@@ -160,13 +160,17 @@ class AppearanceRoutingTests(unittest.TestCase):
         next(button for button in editor.findChildren(QPushButton) if button.text() == "Save").click()
         self.assertEqual((self.window.black_magic_controller, self.window.black_magic_target), ("Dave", "Debra"))
         self.window.selected_weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == "knife")
-        self.window.open_knife_dialog()
-        editor = self.window._weapon_windows["knife"]
-        victim = editor.findChild(QComboBox)
-        victim.setCurrentIndex(victim.findData(self.window.body_id("Dave")))
-        self.assertEqual(victim.currentText(), "Debra")
-        next(button for button in editor.findChildren(QPushButton) if button.text() == "Confirm").click()
-        self.assertEqual(self.window.knife_extra_target, "Dave")
+        self.window.rooms_visited = ["Kitchen"]
+        self.window.room_assignments = {"Kitchen": ["Dave", "Debra"]}
+        self.window.display_victim_selection(["Dave", "Debra"])
+        buttons = self.window.victim_buttons_widget.findChildren(QPushButton)
+        self.assertTrue(all(button.text().startswith("Kill Debra #") for button in buttons))
+        self.assertNotEqual(buttons[0].text(), buttons[1].text())
+        victim = next(button for button in buttons
+                      if button.property("target_body_id") == self.window.body_id("Dave"))
+        victim.click()
+        self.assertFalse(self.window.characters["Dave"]["alive"])
+        self.assertTrue(self.window.characters["Debra"]["alive"])
         self.assertNotIn("#", self.window.history_records[-1].text)
 
     def test_love_giver_is_captured_canonically_and_never_renamed(self):

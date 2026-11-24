@@ -69,12 +69,18 @@ class WeaponAftermathIntegrationTests(unittest.TestCase):
         self.assertEqual(w.selected_weapon["id"], "bare")
 
     def test_knife_bloodlust_survives_ditch_and_later_physical_entry_sets_location(self):
-        w = self.settled_action()
-        with patch.object(w, "finish_night"):
-            w.finish_knife_attack("Hank", "Kitchen")
-        w.finish_night()
+        arrival_fixtures.NightArrivalIntegrationTests.open_night(self)
+        w = self.window
+        w.selected_weapon = self.weapon("knife")
+        w.choose_room("Kitchen")
+        w.draft_page.leave_button.click()
+        w.kill_victim("Hank")
+        w.knife_push_button.click()
+        w.choose_room("Attic")
+        w.draft_page.leave_button.click()
         w.ditch_weapon_button.click()
-        self.assertEqual(w.weapon_aftermath.drop.room, "Kitchen")
+        self.assertEqual([attack["target_label"] for attack in w.night_attacks], ["Hank", "Jerry"])
+        self.assertEqual(w.weapon_aftermath.drop.room, "Attic")
         self.assertTrue(w.weapon_aftermath.nights[1].bloodlust)
         self.assertTrue(any("covered in blood" in event.text for event in w.public_events))
 

@@ -417,7 +417,7 @@ class ItemIntegrationTests(unittest.TestCase):
         self.window.choose_room("Attic")
         self.window.finish_room_choice("Attic")
         for configure in (self.window.open_pen_editor, self.window.open_blackmagic_dialog,
-                          self.window.open_knife_dialog, self.window.open_c4_dialog):
+                          self.window.open_c4_dialog):
             configure()
         self.assertTrue(all(surface is None for surface in self.window._weapon_windows.values()))
         self.assertEqual(self.window.rooms_visited, [])
@@ -448,14 +448,13 @@ class ItemIntegrationTests(unittest.TestCase):
                              for record in self.window.history_records), 1)
 
     def test_preexisting_weapon_editors_cannot_save_after_room_action_is_accepted(self):
-        editors = (("knife", self.window.open_knife_dialog),
-                   ("pen", self.window.open_pen_editor),
+        editors = (("pen", self.window.open_pen_editor),
                    ("blackmagic", self.window.open_blackmagic_dialog),
                    ("c4", self.window.open_c4_dialog))
 
         def configuration():
             return (self.window.pending_pen_note_text, self.window.black_magic_controller,
-                    self.window.black_magic_target, self.window.knife_extra_target,
+                    self.window.black_magic_target, self.window.knife_stage,
                     self.window.knife_used_bloodlust, self.window.c4_target_room)
 
         for weapon_id, open_editor in editors:
@@ -475,9 +474,8 @@ class ItemIntegrationTests(unittest.TestCase):
                     editor.findChild(QTextEdit).setPlainText("Unsaved replacement")
                 else:
                     boxes = editor.findChildren(QComboBox)
-                    boxes[-1].setCurrentText("Hank" if weapon_id == "knife"
-                                             else "Jerry" if weapon_id == "blackmagic" else "Cellar")
-                save = next(button for button in editor.findChildren(QPushButton) if button.text() == ("Confirm" if weapon_id == "knife" else "Save"))
+                    boxes[-1].setCurrentText("Jerry" if weapon_id == "blackmagic" else "Cellar")
+                save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Save")
                 before = configuration()
                 QTest.mouseClick(self.window.room_buttons["Basement"], Qt.LeftButton)
                 offer = self.window.item_drafts.pending_offer
@@ -513,8 +511,7 @@ class ItemIntegrationTests(unittest.TestCase):
                 replacement.close()
 
     def test_weapon_editor_saves_still_configure_current_unaccepted_action(self):
-        editors = (("knife", self.window.open_knife_dialog),
-                   ("pen", self.window.open_pen_editor),
+        editors = (("pen", self.window.open_pen_editor),
                    ("blackmagic", self.window.open_blackmagic_dialog),
                    ("c4", self.window.open_c4_dialog))
         for weapon_id, open_editor in editors:
@@ -531,7 +528,7 @@ class ItemIntegrationTests(unittest.TestCase):
                     if weapon_id == "blackmagic":
                         boxes[0].setCurrentText("Dave")
                     boxes[-1].setCurrentText("Kitchen" if weapon_id == "c4" else "Hank")
-                save = next(button for button in editor.findChildren(QPushButton) if button.text() == ("Confirm" if weapon_id == "knife" else "Save"))
+                save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Save")
                 QTest.mouseClick(save, Qt.LeftButton)
                 self.assertTrue(editor.isHidden())
                 self.assertTrue(self.window.room_buttons["Basement"].isEnabled())
@@ -540,28 +537,26 @@ class ItemIntegrationTests(unittest.TestCase):
                 elif weapon_id == "blackmagic":
                     self.assertEqual((self.window.black_magic_controller, self.window.black_magic_target),
                                      ("Dave", "Hank"))
-                elif weapon_id == "knife":
-                    self.assertEqual(self.window.knife_extra_target, "Hank")
-                    self.assertTrue(self.window.knife_used_bloodlust)
                 else:
                     self.assertEqual(self.window.c4_target_room, "Kitchen")
 
     def test_room_acceptance_retires_editor_when_room_has_no_new_reward(self):
-        self.night("knife")
+        self.night("pen")
+        self.window.pending_pen_note_text = "Accepted note"
+        self.window.apply_weapon_gating()
         previous = self.window.item_drafts.enter_room("Basement", self.window.inventory.snapshot())
         self.window.item_drafts.skip(previous.offer_id)
-        self.window.open_knife_dialog()
-        editor = self.window._weapon_windows["knife"]
-        editor.findChild(QComboBox).setCurrentText("Hank")
-        save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Confirm")
+        self.window.open_pen_editor()
+        editor = self.window._weapon_windows["pen"]
+        editor.findChild(QTextEdit).setPlainText("Stale replacement")
+        save = next(button for button in editor.findChildren(QPushButton) if button.text() == "Save")
         QTest.mouseClick(self.window.room_buttons["Basement"], Qt.LeftButton)
         self.assertIsNone(self.window.draft_page)
         self.assertIsNone(self.window.pending_room_action)
         self.assertEqual(self.window.rooms_visited, ["Basement"])
         self.assertTrue(editor.isHidden())
         save.click()
-        self.assertIsNone(self.window.knife_extra_target)
-        self.assertFalse(self.window.knife_used_bloodlust)
+        self.assertEqual(self.window.pending_pen_note_text, "Accepted note")
 
     def test_offer_reroll_invalidates_old_buttons_and_only_spends_with_alternative(self):
         self.night()
@@ -850,15 +845,16 @@ class ItemIntegrationTests(unittest.TestCase):
 
     def test_knife_attacks_two_actual_rooms_and_rewards_second_physical_entry(self):
         self.night("knife")
-        self.window.knife_extra_target = "Hank"
-        self.window.knife_used_bloodlust = True
         self.window.choose_room("Attic")
         self.settle_offer()
         self.window.kill_victim("Dave")
         self.assertFalse(self.window.characters["Dave"]["alive"])
         self.assertTrue(self.window.characters["Hank"]["alive"])
+        self.window.knife_push_button.click()
+        self.window.choose_room("Kitchen")
         self.assertEqual(self.window.item_drafts.pending_offer.room_id, "Kitchen")
         self.settle_offer("muffle")
+        self.window.kill_victim("Hank")
         self.assertFalse(self.window.characters["Hank"]["alive"])
         self.assertEqual([(attack["target_label"], attack["room"]) for attack in self.window.night_attacks],
                          [("Dave", "Attic"), ("Hank", "Kitchen")])
@@ -870,6 +866,8 @@ class ItemIntegrationTests(unittest.TestCase):
                         f"At {event.time}, {victim} was already in the {room} when you entered."]
             if witness == "Jerry":
                 expected.append(f"At {event.time}, Alex was already in the {room} when you entered.")
+            if witness == "Owen":
+                expected.append(f"At {self.window.night_arrivals.clock}, you saw Alex enter the {room}.")
             self.assertEqual(len(memories), len(expected) + 1)
             self.assertEqual([record.text for record in memories[:-1]], expected)
             self.assertIn(f"Alex kill {victim} in the {room}", memories[-1].text)
@@ -879,9 +877,9 @@ class ItemIntegrationTests(unittest.TestCase):
 
     def test_knife_does_not_kill_primary_twice(self):
         self.night("knife")
-        self.window.knife_extra_target = "Debra"
         self.window.choose_room("Library")
         self.settle_offer()
+        self.window.knife_cleanup_button.click()
         self.assertEqual(len(self.window.night_attacks), 1)
         self.assertEqual(self.window.profile.counters["player_kill"], 1)
 

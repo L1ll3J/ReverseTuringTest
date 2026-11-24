@@ -56,6 +56,20 @@ class KnifeCleanupTests(unittest.TestCase):
         self.assertIn("first kill", text)
         self.assertIn("another room", text)
 
+    def test_choice_wraps_its_hint_without_clipping_at_supported_sizes(self):
+        from PyQt5.QtWidgets import QLabel
+        from PyQt5.QtTest import QTest
+        self.start()
+        self.first_kill()
+        for width, height in ((1280, 800), (1920, 1080), (2560, 1440)):
+            self.window.showNormal()
+            self.window.resize(width, height)
+            QTest.qWait(10)
+            panel = self.window.knife_choice_panel
+            hint = panel.findChild(QLabel, "knifeChoiceHint")
+            self.assertGreaterEqual(hint.height(), hint.heightForWidth(hint.width()))
+            self.assertLessEqual(panel.geometry().bottom(), self.window.centralWidget().height())
+
     def test_cleanup_removes_visible_blood_but_not_the_kill_or_witness(self):
         self.start()
         self.first_kill()

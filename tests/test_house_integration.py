@@ -236,9 +236,8 @@ class HouseIntegrationTests(unittest.TestCase):
     def test_action_weapon_description_uses_readable_body_font(self):
         import main
         self.start_night()
-        for weapon_id, extra in (("bare", None), ("knife", "Jerry")):
+        for weapon_id in ("bare", "knife"):
             self.window.selected_weapon = next(w for w in self.window.weapons if w['id'] == weapon_id)
-            self.window.knife_extra_target = extra
             self.window.build_weapon_action_panel()
             self.app.processEvents()
             description = self.window.weapon_action_panel.findChild(QLabel, "actionWeaponDescription")
