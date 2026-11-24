@@ -830,7 +830,11 @@ class ItemIntegrationTests(unittest.TestCase):
         # The first real night starts at round 2 from this round-1 decision point.
         self.assertEqual(self.window.round_number, 2)
         self.assertIsNone(self.window.item_rules.speech_override(self.window.body_id("Dave")))
-        self.assertEqual(self.window.characters["Dave"]["experiences"][-1].text, MUFFLE_EXPIRED)
+        memories = self.window.characters["Dave"]["experiences"]
+        self.assertEqual(memories[-2].text, MUFFLE_EXPIRED)
+        event = next(event for event in self.window.night_arrivals.initial
+                     if event.body_id == self.window.body_id("Dave"))
+        self.assertEqual(memories[-1].text, f"At {event.time}, you entered the {event.room}.")
 
     def test_spare_paper_stacks_weights_freeze_and_resolve_once(self):
         self.conversation()
