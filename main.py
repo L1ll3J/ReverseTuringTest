@@ -3071,8 +3071,10 @@ class GameWindow(QMainWindow):
                 or self.phase != "action" or self.game_over or self.pending_room_action is not None
                 or state.committed_room is not None or self.room_buttons_widget.isHidden()):
             return
+        started_at = state.clock
         event = state.advance(f"night:{night}:wait:{cursor}")
         if event is not None:
+            self.record_history(f"You loitered outside from {started_at} to {state.clock}.", display=True)
             self.apply_arrival(event, observed=True, outside=True)
         self.update_arrival_controls()
 
@@ -3096,6 +3098,28 @@ class GameWindow(QMainWindow):
             "event_id": event_id, "recipient_body_id": body_id, "recipient_mind_id": mind_id,
             "source": source, "speaker_body_id": speaker_body_id, "text": text})
 
+    def remember_room_entry(self, event_id, entrant_body_id, room, time):
+        """Project a physical entry to the people who actually encounter it."""
+        self.ensure_identity_state()
+        others = [(self.body_id(name), self.perceived_actor(name))
+                  for name in self.room_assignments[room]
+                  if self.characters.get(name, {}).get("alive")
+                  and self.body_id(name) != entrant_body_id]
+        player_body = self.body_id(self.player_name)
+        if (self.night_arrivals is not None and self.night_arrivals.committed_room == room
+                and self.player_alive and player_body != entrant_body_id):
+            others.append((player_body, self.perceived_name(player_body)))
+        entrant = self.perceived_name(entrant_body_id)
+        entry_key = f"{event_id}:encounter:{room}:{entrant_body_id}"
+        for observer_body, person in others:
+            # The human's visible arrival history is projected separately.
+            if self.identity_state.mind_for_body(observer_body) != self.player_owner_id:
+                self.remember_arrival(entry_key, observer_body,
+                    f"At {time}, you saw {entrant} enter the {room}.", source="eyewitness")
+            if self.identity_state.mind_for_body(entrant_body_id) != self.player_owner_id:
+                self.remember_arrival(f"{entry_key}:present:{observer_body}", entrant_body_id,
+                    f"At {time}, {person} was already in the {room} when you entered.", source="eyewitness")
+
     def arrival_is_visible(self, room, *, outside=False):
         state = self.night_arrivals
         return outside or (state.committed_room is None and self.show_room_allocations) or state.committed_room == room
@@ -3118,6 +3142,7 @@ class GameWindow(QMainWindow):
         room = event.room
         reports = []
         while True:
+            self.remember_room_entry(event.event_id, event.body_id, room, event.time)
             visible = observed if room == event.room else self.arrival_is_visible(room, outside=outside)
             if visible:
                 self.project_arrival(replace(event, room=room))
@@ -3183,6 +3208,13 @@ class GameWindow(QMainWindow):
             state.commit(selected_room)
         self.update_arrival_controls()
         self._player_entry_receipts.add(key)
+        if state is not None:
+            entered_at = state.clock
+            self.record_history(f"At {entered_at}, you entered the {selected_room}.", display=True)
+            self.remember_room_entry(f"night:{self.round_number}:player:{len(self.rooms_visited)}",
+                                     self.body_id(self.player_name), selected_room, entered_at)
+        else:
+            self.record_history(f"You entered the {selected_room}.", display=True)
         self.weapon_aftermath.visit(("entry", *key), self.round_number, selected_room)
         if self.resolve_room_entry_items(
                 f"{self.run_id}:night:{self.round_number}:player:{len(self.rooms_visited)}:{selected_room}",
@@ -3253,7 +3285,6 @@ class GameWindow(QMainWindow):
             return
         if not self.prepare_room_entry(selected_room):
             return
-        self.record_history(f"\nYou have chosen to stay in the {selected_room}.\n", display=True)
         occupants = [name for name in self.room_assignments[selected_room]
                      if self.characters.get(name, {}).get("alive")]
 

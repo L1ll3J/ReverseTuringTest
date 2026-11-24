@@ -866,9 +866,13 @@ class ItemIntegrationTests(unittest.TestCase):
             event = next(event for event in self.window.night_arrivals.events
                          if event.body_id == self.window.body_id(witness))
             memories = self.window.characters[witness]["experiences"]
-            self.assertEqual(len(memories), 2)
-            self.assertEqual(memories[0].text, f"At {event.time}, you entered the {room}.")
-            self.assertIn(f"Alex kill {victim} in the {room}", memories[1].text)
+            expected = [f"At {event.time}, you entered the {room}.",
+                        f"At {event.time}, {victim} was already in the {room} when you entered."]
+            if witness == "Jerry":
+                expected.append(f"At {event.time}, Alex was already in the {room} when you entered.")
+            self.assertEqual(len(memories), len(expected) + 1)
+            self.assertEqual([record.text for record in memories[:-1]], expected)
+            self.assertIn(f"Alex kill {victim} in the {room}", memories[-1].text)
         self.assertEqual(self.window.profile.counters["player_kill"], 2)
         self.assertEqual(self.window.item_drafts.seen_rooms, {"Attic", "Kitchen"})
         self.assertEqual(len(self.window.inventory.entries), 1)
