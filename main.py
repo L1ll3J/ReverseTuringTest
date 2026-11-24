@@ -165,7 +165,7 @@ class GameWindow(QMainWindow):
             {"id": "pen", "name": "Pen", "desc": "Before a kill, write a fake 'last note' your victim will be found with. "+
                                                   f"{int(self.weapon_pen_backfire*100)}% chance to implicate yourself.", "image": "icons/weapons/pen.png"},
             {"id": "knife", "name": "Knife",
-            "desc": "Gain the ability to kill twice per night, but your bloodlust will be visible.",
+            "desc": "Your first kill leaves you bloodied. Clean up to hide the blood, or push on for one attack in another room.",
             "image": "icons/weapons/knife.png"},
 
             {"id": "c4", "name": "C4",
@@ -295,7 +295,9 @@ class GameWindow(QMainWindow):
         self.pending_pen_note_text = None          
         self.black_magic_controller = None
         self.black_magic_target = None
-        self.knife_extra_target = None      
+        self.knife_stage = "ready"
+        self.knife_first_room = None
+        self.knife_choice_panel = None
         self.knife_used_bloodlust = False
         self.c4_target_room = None
         self.c4_cooldown_nights = 0
@@ -306,13 +308,14 @@ class GameWindow(QMainWindow):
         self.victims_last_night = []
         self._override_murder_room = None          
         self.pen_last_victim_name = None 
-        self._weapon_windows = {"pen": None, "blackmagic": None, "knife": None, "c4": None}
+        self._weapon_windows = {"pen": None, "blackmagic": None, "c4": None}
         self.rooms_visited = []
         self.new_crime_scenes = []
         self.expected_voters = set()
         self.dictation_worker = None
         self._player_muffle_active = False
         self.victim_buttons_widget = None
+        self._victim_selection_context = None
         self.awaiting_player_vote = False
         self.vote_requests_started = False
         self.vote_bodies = ()
@@ -391,7 +394,6 @@ class GameWindow(QMainWindow):
         self.pending_pen_note_text = None
         self.black_magic_controller = None
         self.black_magic_target = None
-        self.knife_extra_target = None
         self.c4_target_room = None
         weapon = self.selected_weapon
         if weapon:
@@ -1092,6 +1094,8 @@ class GameWindow(QMainWindow):
                 self.trace_action("voodoo_survived", room=room, attack=attack)
             return False
         self.night_attacks.append(attack)
+        if weapon_id == "knife" and attack["player_attack"]:
+            self.knife_used_bloodlust = True
         if weapon_id == "pen":
             self.pen_last_victim_name = attack["corpse_label"]
         self.victims_last_night.append(attack["corpse_label"])
@@ -1134,7 +1138,7 @@ class GameWindow(QMainWindow):
         fields = ("identity_state", "body_weapons", "mind_weapons", "player_name", "characters", "rooms", "room_assignments", "round_number", "phase",
                   "game_over", "show_room_allocations", "old_crime_scenes", "new_crime_scenes",
                   "rooms_visited", "night_rooms", "selected_weapon", "weapon_pen_backfire", "pending_pen_note_text",
-                  "black_magic_controller", "black_magic_target", "knife_extra_target",
+                  "black_magic_controller", "black_magic_target", "knife_stage", "knife_first_room",
                   "knife_used_bloodlust", "c4_target_room", "c4_cooldown_nights",
                   "player_sleep_room", "voodoo_current_identity", "stopwatch_selected",
                   "victims_last_night", "public_events", "public_dialogue", "votes",
@@ -2775,7 +2779,7 @@ class GameWindow(QMainWindow):
         card = QFrame(self.weapon_action_panel)
         card.setFixedSize(QSize(card_w, card_h))
         card.setCursor(Qt.PointingHandCursor)
-        interactive = wpn["id"] in ("pen", "blackmagic", "knife", "c4") and not (
+        interactive = wpn["id"] in ("pen", "blackmagic", "c4") and not (
             wpn["id"] == "c4" and self.c4_cooldown_nights > 0
         )
 
@@ -2791,16 +2795,6 @@ class GameWindow(QMainWindow):
             }}
             {'QFrame:hover { background-color: rgba(255,255,255,0.10); border-color: #777; }' if interactive else ''}
         """)
-
-        if wpn["id"] == "knife" and self.knife_extra_target:
-            card.setStyleSheet(f"""
-                QFrame {{
-                    border: 2px solid #C62828; 
-                    border-radius: 16px;
-                    background-color: rgba(198,40,40,0.12);
-                }}
-                {'QFrame:hover { background-color: rgba(198,40,40,0.18); border-color: #EF5350; }' if interactive else ''}
-            """)
 
         v = QVBoxLayout(card)
         v.setContentsMargins(10, 10, 10, 10)
@@ -2831,10 +2825,8 @@ class GameWindow(QMainWindow):
         elif wpn["id"] == "blackmagic":
             desc_text = "Choose victims."
         elif wpn["id"] == "knife":
-            if self.knife_extra_target:
-                desc_text = f"\nACTIVE \n({self.perceived_actor(self.knife_extra_target)})"
-            else:
-                desc_text = "Choose extra victim. \n (optional)"
+            desc_text = ("Bloodied. Choose another room." if self.knife_used_bloodlust
+                         else "Kill, then clean up or push on.")
         elif wpn["id"] == "c4":
             desc_text = "Plant explosives." if self.c4_cooldown_nights == 0 else f"On Cooldown. \n (that stuff aint cheap)"
         else:
@@ -2846,7 +2838,7 @@ class GameWindow(QMainWindow):
         desc.setFont(description_font)
         desc.setWordWrap(True)
         desc.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
-        description_color = "#EF5350" if self.knife_extra_target else "#A0A0A0"
+        description_color = "#EF5350" if wpn["id"] == "knife" and self.knife_used_bloodlust else "#A0A0A0"
         desc.setStyleSheet(f'font-family: "{description_font.family()}"; font-size: 18px; '
                           f'color:{description_color};border:none;background:transparent;')
         desc.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -2860,8 +2852,6 @@ class GameWindow(QMainWindow):
                 self.open_pen_editor()
             elif wpn["id"] == "blackmagic":
                 self.open_blackmagic_dialog()
-            elif wpn["id"] == "knife":
-                self.open_knife_dialog()
             elif wpn["id"] == "c4":
                 self.open_c4_dialog()
 
@@ -2908,6 +2898,7 @@ class GameWindow(QMainWindow):
         """Only current setup may change before a room action is accepted."""
         return (self.phase == "action" and not self.game_over
                 and self.pending_room_action is None and not self.bonus_action_pending
+                and self.knife_stage not in {"choice", "room", "attack"}
                 and (self.selected_weapon or {}).get("id") == weapon_id
                 and (editor is None or (self._weapon_windows.get(weapon_id) is editor
                                         and night == self.round_number)))
@@ -2949,8 +2940,10 @@ class GameWindow(QMainWindow):
         return True
 
     def set_room_buttons_enabled(self, enabled: bool):
-        enabled = enabled and self.pending_room_action is None
+        enabled = enabled and self.pending_room_action is None and self.knife_stage != "choice"
         unavailable = set(self.old_crime_scenes)
+        if self.knife_stage in {"room", "attack"}:
+            unavailable.add(self.knife_first_room)
         if not self.bonus_action_pending:
             unavailable.update(getattr(self, "new_crime_scenes", []))
         for room, btn in self.room_buttons.items():
@@ -2967,7 +2960,9 @@ class GameWindow(QMainWindow):
         self.pending_pen_note_text = None
         self.black_magic_controller = None
         self.black_magic_target = None
-        self.knife_extra_target = None
+        self.retire_knife_choice()
+        self.knife_stage = "ready"
+        self.knife_first_room = None
         self.knife_used_bloodlust = False
         self.c4_target_room = None
         self.victims_last_night = []
@@ -3298,10 +3293,14 @@ class GameWindow(QMainWindow):
         if (self.phase != "action" or self.game_over or self.pending_room_action is not None
                 or self._room_choice_in_progress or selected_room not in self.room_buttons
                 or self.room_buttons_widget.isHidden()
-                or not self.room_buttons[selected_room].isEnabled()):
+                or not self.room_buttons[selected_room].isEnabled()
+                or self.knife_stage == "choice"
+                or (self.knife_stage == "room" and selected_room == self.knife_first_room)):
             return
         self._room_choice_in_progress = True
         try:
+            if self.knife_stage == "room":
+                self.knife_stage = "attack"
             if not self.prepare_room_entry(selected_room):
                 return
             self.offer_room_item(selected_room, lambda: self.finish_room_choice(selected_room))
@@ -3416,6 +3415,13 @@ class GameWindow(QMainWindow):
         if len(occupants) == 0:
             self.observe_house_room(selected_room, ())
             self.record_history(f"The {selected_room} is empty and is now also a crime scene.", display=True)
+            if self.knife_stage == "attack":
+                self.knife_stage = "done"
+                self.set_action_output_mode(False)
+                self.room_buttons_widget.hide()
+                self.weapon_action_panel.hide()
+                self.finish_night()
+                return
             self.append_output_text("You must choose another room.")
             self.had_to_change_rooms = True
             
@@ -3464,6 +3470,8 @@ class GameWindow(QMainWindow):
             self.layout.removeWidget(previous)
             previous.deleteLater()
         self.victim_buttons_widget = QWidget()
+        self._victim_selection_context = (self.run_id, night, room,
+                                          tuple(self.body_id(name) for name in occupants))
         victim_layout = QVBoxLayout()
 
         screen = QGuiApplication.primaryScreen()  # Get the primary screen
@@ -3498,16 +3506,21 @@ class GameWindow(QMainWindow):
         self.kill_victim(self.label_for_body(body_id))
 
     def kill_victim(self, victim):
+        selection = self._victim_selection_context
         if (self.phase != "action" or self.game_over or self.pending_room_action is not None
                 or not getattr(self, "rooms_visited", None)
                 or victim not in self.room_assignments.get(self.rooms_visited[-1], ())
-                or not self.characters.get(victim, {}).get("alive")):
+                or not self.characters.get(victim, {}).get("alive")
+                or selection is None or selection[:3] != (self.run_id, self.round_number, self.rooms_visited[-1])
+                or self.body_id(victim) not in selection[3]):
             return
+        self._victim_selection_context = None
         self.victim_buttons_widget.hide()
         self.finish_primary_kill(victim, self.rooms_visited[-1])
 
     def finish_primary_kill(self, victim, room):
-        if not self.characters.get(victim, {}).get("alive"):
+        if (self.phase != "action" or self.game_over or not self.characters.get(victim, {}).get("alive")
+                or (not self.bonus_action_pending and self.knife_stage in {"choice", "room", "done"})):
             return
         if self.bonus_action_pending:
             self.item_rules.consume_bonus_action(self.bonus_action_id, self.round_number)
@@ -3515,28 +3528,105 @@ class GameWindow(QMainWindow):
             self.commit_attack(victim, room, weapon_id="bare")
             self.finish_night()
             return
+        if self.knife_stage == "attack":
+            self.commit_attack(victim, room, weapon_id="knife")
+            self.knife_stage = "done"
+            self.finish_night()
+            return
         self.commit_attack(victim, room)
-        target = self.knife_extra_target
-        if (self.selected_weapon or {}).get("id") == "knife":
-            self.knife_used_bloodlust = False
-        if ((self.selected_weapon or {}).get("id") == "knife" and target != victim
-                and self.characters.get(target, {}).get("alive")):
-            extra_room = next((name for name, occupants in self.room_assignments.items()
-                               if target in occupants), None)
-            if extra_room is not None:
-                self.offer_room_item(extra_room, lambda: self.finish_knife_attack(target, extra_room))
-                return
+        if ((self.selected_weapon or {}).get("id") == "knife"
+                and self.knife_stage == "ready"):
+            self.knife_first_room = room
+            self.knife_stage = "choice"
+            self.show_knife_choice()
+            return
         self.finish_night()
 
-    def finish_knife_attack(self, target, room):
-        self.weapon_aftermath.visit(("knife", self.round_number, self.body_id(target)), self.round_number, room)
-        if room not in self.rooms_visited:
-            self.rooms_visited.append(room)
-        self.knife_used_bloodlust = bool(self.commit_attack(target, room, weapon_id="knife"))
-        self.finish_night()
+    def retire_knife_choice(self):
+        panel = self.knife_choice_panel
+        self.knife_choice_panel = None
+        if panel is not None:
+            self.layout.removeWidget(panel)
+            panel.hide()
+            panel.deleteLater()
+
+    def show_knife_choice(self):
+        if self.knife_choice_panel is not None:
+            return
+        self.set_action_output_mode(False)
+        self.room_buttons_widget.hide()
+        self.weapon_action_panel.hide()
+        if self.victim_buttons_widget is not None:
+            self.victim_buttons_widget.hide()
+        panel = QWidget(self)
+        panel.setObjectName("knifeChoice")
+        panel.setMaximumWidth(900)
+        panel.setStyleSheet("QWidget#knifeChoice { background:#0b0b0b; border:1px solid #444; }")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+        title = QLabel("You are covered in blood." if self.knife_used_bloodlust else "Your target survived.")
+        title.setFont(self.speaker_font)
+        title.setStyleSheet('color:#ef7777; border:none; background:transparent;')
+        layout.addWidget(title)
+        hint = QLabel("Clean up to hide the blood, or push on for one attack in another room."
+                      if self.knife_used_bloodlust else
+                      "End your Knife action, or push on for one attack in another room.")
+        hint.setFont(readable_body_font())
+        hint.setWordWrap(True)
+        hint.setStyleSheet('color:#ccc; border:none; background:transparent;')
+        layout.addWidget(hint)
+        row = QHBoxLayout()
+        run, night, body = self.run_id, self.round_number, self.body_id(self.player_name)
+        self.knife_cleanup_button = QPushButton("Clean up" if self.knife_used_bloodlust else "End night")
+        self.knife_push_button = QPushButton("Push on")
+        self.knife_push_button.setEnabled(any(
+            room in self.night_rooms and room != self.knife_first_room
+            and room not in self.old_crime_scenes and room not in self.new_crime_scenes
+            for room in self.rooms))
+        for button, color in ((self.knife_cleanup_button, "#91bc91"), (self.knife_push_button, "#ef7777")):
+            button.setFont(self.speaker_font)
+            button.setMinimumHeight(48)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setStyleSheet(f'QPushButton {{ color:{color}; background:transparent; border:none; padding:12px 18px; }} '
+                                'QPushButton:hover, QPushButton:focus { background:#191919; } '
+                                'QPushButton:disabled { color:#666; }')
+            row.addWidget(button)
+        self.knife_cleanup_button.clicked.connect(lambda: self.choose_knife_followup(run, night, body, False))
+        self.knife_push_button.clicked.connect(lambda: self.choose_knife_followup(run, night, body, True))
+        layout.addLayout(row)
+        self.knife_choice_panel = panel
+        self.layout.addWidget(panel, 0, Qt.AlignHCenter)
+        panel.show()
+
+    def choose_knife_followup(self, run, night, body, push):
+        if (self.run_id != run or self.round_number != night or self.body_id(self.player_name) != body
+                or self.phase != "action" or self.game_over or self.knife_stage != "choice"
+                or self.knife_choice_panel is None or (self.selected_weapon or {}).get("id") != "knife"):
+            return
+        if push and not any(room in self.night_rooms and room != self.knife_first_room
+                            and room not in self.old_crime_scenes and room not in self.new_crime_scenes
+                            for room in self.rooms):
+            return
+        self.retire_knife_choice()
+        if not push:
+            had_blood = self.knife_used_bloodlust
+            self.knife_used_bloodlust = False
+            self.knife_stage = "done"
+            self.record_history("You cleaned the blood from yourself instead of taking another Knife attack."
+                                if had_blood else "You ended the Knife action.", display=True)
+            self.finish_night()
+            return
+        self.knife_stage = "room"
+        self.record_history("You pushed on. Choose another room for one Knife attack.", display=True)
+        self.set_action_output_mode(True)
+        self.room_buttons_widget.show()
+        self.apply_weapon_gating()
+        self.position_weapon_panel()
 
     def finish_night(self):
-        if self.phase != "action" or self.game_over or self.pending_room_action is not None:
+        if (self.phase != "action" or self.game_over or self.pending_room_action is not None
+                or self.knife_stage in {"choice", "room", "attack"}):
             return
         if self.item_rules.bonus_actions and any(
                 self.characters.get(name, {}).get("alive")
@@ -4538,6 +4628,7 @@ class GameWindow(QMainWindow):
         if self.game_over:
             return
         self.cancel_item_offer()
+        self.retire_knife_choice()
         self.game_over = True
         self.invalidate_prepared_turn("game_over", changed=True)
         self.phase = "game_over"
@@ -4645,7 +4736,7 @@ class GameWindow(QMainWindow):
                 surface.close()
                 surface.deleteLater()
         for widget in (self.vote_buttons_widget, self.victim_buttons_widget,
-                       self.weapon_aftermath_panel):
+                       self.weapon_aftermath_panel, self.knife_choice_panel):
             if widget is not None:
                 self.layout.removeWidget(widget)
                 widget.hide()
@@ -5167,106 +5258,6 @@ class GameWindow(QMainWindow):
             rect.y() + (rect.height() - w.height()) // 2)
         w.show()
         w.raise_()
-
-    def open_knife_dialog(self):
-        if not self.can_configure_weapon("knife"):
-            return
-        if self._weapon_windows.get("knife") and self._weapon_windows["knife"].isVisible():
-            self._weapon_windows["knife"].raise_()
-            self._weapon_windows["knife"].activateWindow()
-            return
-        
-        alive = self.night_weapon_targets()
-        editor_night = self.round_number
-        w = QWidget(self); w.setWindowFlags(Qt.FramelessWindowHint)
-        w.setAttribute(Qt.WA_StyledBackground, True)
-        w.setStyleSheet("background-color:#090909; color:#eee;")
-        body_family = readable_body_font().family()
-        self._weapon_windows["knife"] = w
-        w.installEventFilter(self)
-        w.destroyed.connect(lambda: self.forget_weapon_editor("knife", w))
-        outer = QVBoxLayout(w); outer.setContentsMargins(0,0,0,0)
-
-        # Header
-        header = QWidget()
-        header.setObjectName("knifeHeader")
-        header.setStyleSheet("QWidget#knifeHeader {background:transparent; border-bottom:1px solid #666;}")
-        hl = QHBoxLayout(header); hl.setContentsMargins(8,4,8,4)
-        title = QLabel("Knife")
-        title.setFont(self.speaker_font)
-        title.setStyleSheet("color:white; font-size:14px;")
-        close_btn = QPushButton("Close"); close_btn.setFixedSize(84,38)
-        close_btn.setFont(readable_body_font())
-        close_btn.setStyleSheet(f'QPushButton{{font-family:"{body_family}";background:transparent;color:#bbb;font-size:16px;border:none;}} QPushButton:hover{{color:white;}}')
-        close_btn.clicked.connect(w.close)
-        hl.addWidget(title); hl.addStretch(1); hl.addWidget(close_btn)
-        outer.addWidget(header)
-
-        # Content (outlined)
-        content = QFrame(); content.setObjectName("knifeContent")
-        content.setAttribute(Qt.WA_StyledBackground, True)
-        content.setStyleSheet("#knifeContent{background:#090909; border:1px solid #666; border-top:0;}")
-        bl = QVBoxLayout(content); bl.setContentsMargins(16,16,16,16); bl.setSpacing(12)
-
-        row = QHBoxLayout(); row.setSpacing(12)
-        lbl = QLabel("Extra victim:")
-        lbl.setFont(readable_body_font())
-        lbl.setStyleSheet(f'font-family:"{body_family}"; color:#E0E0E0; font-size:18px;')
-        lbl.setMinimumHeight(28)   
-        row.addWidget(lbl, 0, Qt.AlignVCenter)
-        victim = GameComboBox(); victim.addItem("(none)")  # allow “no extra kill”
-        self.populate_body_choices(victim, alive, self.knife_extra_target)
-        victim.setFont(readable_body_font())
-        victim.setMinimumHeight(44)
-        victim.setStyleSheet(f'QComboBox{{font-family:"{body_family}";background:#111;border:1px solid #666;font-size:18px;padding:8px 12px;min-width:200px;}} QComboBox::drop-down{{width:28px;border-left:1px solid #666;}} QAbstractItemView{{background:#111;color:white;selection-background-color:#333;font-size:18px;}}')
-        row.addWidget(victim); row.addStretch(1)
-        bl.addLayout(row)
-
-        hint = QLabel("You may kill a second target tonight. Detective may notice you’re covered in blood.")
-        hint.setFont(readable_body_font())
-        hint.setWordWrap(True); hint.setStyleSheet(f'font-family:"{body_family}"; color:#aaa; font-size:18px;')
-        bl.addWidget(hint)
-
-        save = QPushButton("Confirm")
-        save.setFont(self.speaker_font)
-        save.setStyleSheet("QPushButton{background:transparent;color:white;padding:12px 20px;border:1px solid #999;font-size:12px;} QPushButton:hover{border-color:white;background:#191919;}")
-        def do_save():
-            if not self.can_configure_weapon("knife", w, editor_night):
-                return
-            body_id = victim.currentData()
-            choice = self.label_for_body(body_id) if body_id is not None else None
-            if body_id is not None and choice not in self.night_weapon_targets():
-                return
-            if choice is None:
-                self.knife_extra_target = None
-                self.knife_used_bloodlust = False
-            else:
-                self.knife_extra_target = choice
-                self.knife_used_bloodlust = True
-            self.trace_action("weapon_configured", weapon_id="knife", target=self.knife_extra_target)
-            self.record_history(f"You prepared a second attack against {self.perceived_actor(self.knife_extra_target)}."
-                                if self.knife_extra_target else "You decided against a second attack.")
-            w.close()
-            self.build_weapon_action_panel()
-            QTimer.singleShot(0, self.position_weapon_panel)
-        save.clicked.connect(do_save)
-        bl.addWidget(save, alignment=Qt.AlignRight)
-        outer.addWidget(content, 1)
-
-        # drag + center
-        w._old=None
-        def mp(e): 
-            if e.button()==Qt.LeftButton: w._old=e.globalPos()
-        def mm(e):
-            if e.buttons()==Qt.LeftButton and w._old:
-                d=e.globalPos()-w._old; w.move(w.x()+d.x(), w.y()+d.y()); w._old=e.globalPos()
-        w.mousePressEvent=mp; w.mouseMoveEvent=mm
-
-        screen = self.window().screen() or QApplication.primaryScreen()
-        rect = screen.availableGeometry()
-        w.resize(640, 260)
-        w.move(rect.x() + (rect.width()-w.width())//2, rect.y() + (rect.height()-w.height())//2)
-        w.show(); w.raise_()
 
     def open_c4_dialog(self):
         if not self.can_configure_weapon("c4"):
