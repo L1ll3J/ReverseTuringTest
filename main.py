@@ -793,6 +793,9 @@ class GameWindow(QMainWindow):
         soul_recipient = next((event.recipient_mind_id for event in events
                                if event.event_type == "soul_exchange_requested"
                                and event.event_id not in self.applied_item_events), None)
+        banana_recipient = next((event.recipient_mind_id for event in events
+                                 if event.event_type == "banana_given"
+                                 and event.event_id not in self.applied_item_events), None)
         death_applied = self.apply_item_events(events)
         self.trace_action("inventory_item_used", events=events)
         if death_applied:
@@ -808,6 +811,10 @@ class GameWindow(QMainWindow):
         if self.game_over:
             return True
         self.restore_conversation_decision()
+        if banana_recipient is not None:
+            self.overlay_host.close_page()
+            self.run_single_response(self.label_for_mind(banana_recipient), item_reaction=True)
+            return True
         if soul_recipient is not None:
             self.overlay_host.close_page()
             recipient = self.label_for_mind(soul_recipient)
@@ -1317,7 +1324,7 @@ class GameWindow(QMainWindow):
             self.invalidate_prepared_turn("private_experiences_changed", changed=True)
 
     def append_speech(self, speaker, speech, addressee=None, *, origin="ordinary", direct_reply=False,
-                      perceived_speaker=None):
+                      perceived_speaker=None, item_reaction=False):
         if speaker == self.player_name and origin == "ordinary" and self.player_is_muffled():
             if (self.phase != "conversation" or self.game_over or self.ai_busy
                     or not self.player_reply_required()):
@@ -1345,8 +1352,10 @@ class GameWindow(QMainWindow):
         self.dialogue_perceptions[id(line)] = (line, perception)
         self.last_speech_origin = (line, origin)
         if origin == "ordinary":
-            self.required_reply_anchor = ((line, self.body_id(self.player_name))
-                                          if addressee == self.player_name and speaker != self.player_name else None)
+            if addressee == self.player_name and speaker != self.player_name:
+                self.required_reply_anchor = (line, self.body_id(self.player_name))
+            elif not item_reaction:
+                self.required_reply_anchor = None
         self.trace.record("speech_committed", {"round": self.round_number, "speaker": speaker,
                                               "speech": speech, "addressee": addressee,
                                               "origin": origin, "direct_reply": direct_reply},
@@ -1358,7 +1367,7 @@ class GameWindow(QMainWindow):
         self.record_history(speech, kind="speech", speaker=display_speaker,
                             speaker_id=speaker_id, display=True)
         self.conversation_stage.set_active_speaker(speaker_id)
-        if ordinary_npc:
+        if ordinary_npc and not item_reaction:
             self.direct_replies.committed(self.body_id(speaker), direct=direct_reply)
         if (self.phase == "conversation" and origin == "ordinary"
                 and (speaker == self.player_name or ordinary_npc)):
@@ -1370,8 +1379,9 @@ class GameWindow(QMainWindow):
         return True
 
     def start_ai_request(self, operation, on_success, status, *, trace_task=None,
-                         trace_actor=None, trace_parent_job_id=None, trace_scope=None, context_guard=None):
-        if self.game_over or self.ai_busy or self.player_reply_required():
+                         trace_actor=None, trace_parent_job_id=None, trace_scope=None, context_guard=None,
+                         allow_required_reply=False):
+        if self.game_over or self.ai_busy or (self.player_reply_required() and not allow_required_reply):
             return
         if context_guard is not None and not context_guard():
             self.retry_action = None
@@ -1453,7 +1463,8 @@ class GameWindow(QMainWindow):
             self.retry_action = lambda: self.start_ai_request(
                 operation, on_success, status, trace_task=trace_task, trace_actor=trace_actor,
                 trace_parent_job_id=trace_parent_job_id,
-                trace_scope=scope.retry() if scope is not None else None, context_guard=context_guard)
+                trace_scope=scope.retry() if scope is not None else None, context_guard=context_guard,
+                allow_required_reply=allow_required_reply)
             self.retry_button.show()
             if phase == "conversation":
                 self.pass_button.setEnabled(not self.player_reply_required())
@@ -1485,7 +1496,8 @@ class GameWindow(QMainWindow):
 
     def retry_ai_request(self):
         retry = self.retry_action
-        if retry is not None and not self.game_over and not self.ai_busy and not self.player_reply_required():
+        # Each request owns its reply/context guard, including permitted item reactions.
+        if retry is not None and not self.game_over and not self.ai_busy:
             retry()
 
     def handle_ai_votes(self, votes):
@@ -4676,22 +4688,23 @@ class GameWindow(QMainWindow):
         self.trace_state("conversation_started")
         self.run_conversation_loop()
     
-    def run_single_response(self, mentioned, *, direct_reply=False):
+    def run_single_response(self, mentioned, *, direct_reply=False, item_reaction=False):
         if (self.phase != "conversation" or self.game_over or self.ai_busy
-                or self.player_reply_required()
+                or (self.player_reply_required() and not item_reaction)
                 or mentioned not in self.characters or not self.characters[mentioned]["alive"]):
             return
         body_id = self.body_id(mentioned)
         latest = self.recalled_routing_dialogue()[-1] if self.recalled_routing_dialogue() else None
         pending = self.pending_direct_reply
-        direct_reply = direct_reply or (pending is not None and pending[0] is latest and pending[1] == body_id)
+        direct_reply = not item_reaction and (direct_reply or (
+            pending is not None and pending[0] is latest and pending[1] == body_id))
         if direct_reply and not self.direct_replies.can_direct(body_id):
             self.update_recipient_controls()
             return
         self.invalidate_prepared_turn("direct_response")
         data = self.characters[mentioned]
         muted = self.item_rules.is_muffled(body_id)
-        if muted and self.addressed_muffled_npc() != mentioned:
+        if muted and not item_reaction and self.addressed_muffled_npc() != mentioned:
             return
         if direct_reply:
             self.pending_direct_reply = (latest, body_id)
@@ -4718,25 +4731,31 @@ class GameWindow(QMainWindow):
                 return tone
             def commit_tone(tone):
                 if current():
-                    self.append_speech(mentioned, muffled_sound(style, tone), None, direct_reply=direct_reply)
+                    self.append_speech(mentioned, muffled_sound(style, tone), None,
+                                       direct_reply=direct_reply, item_reaction=item_reaction)
                     self.run_conversation_loop()
             self.start_ai_request(choose_tone, commit_tone, "...", context_guard=current,
+                                  allow_required_reply=item_reaction,
                                   **self.trace_job_options("muffled_tone", mentioned))
             return
         self.start_ai_request(lambda scope=None: call_with_trace(runtime.speech, context, trace_scope=scope),
                               lambda proposal: self.handle_single_response(mentioned, proposal, direct_reply=direct_reply,
-                                                                           reference_routes=routes),
+                                                                           reference_routes=routes,
+                                                                           item_reaction=item_reaction),
                               f"{mentioned} is responding...", context_guard=current,
+                              allow_required_reply=item_reaction,
                               **self.trace_job_options("speech", mentioned))
 
-    def handle_single_response(self, mentioned, response, *, direct_reply=False, reference_routes=None):
+    def handle_single_response(self, mentioned, response, *, direct_reply=False, reference_routes=None,
+                               item_reaction=False):
         if (self.phase != "conversation" or self.game_over
                 or not self.characters.get(mentioned, {}).get("alive", False)
                 or self.item_rules.is_muffled(self.body_id(mentioned))):
             return
         routes = self.ai_reference_routes() if reference_routes is None else reference_routes
         response = self.routed_ai_proposal(response, routes)
-        self.append_speech(mentioned, response.speech, response.addressee, direct_reply=direct_reply)
+        self.append_speech(mentioned, response.speech, response.addressee,
+                           direct_reply=direct_reply, item_reaction=item_reaction)
         self.run_conversation_loop()
     
     def run_multiple_responses(self, *, snapshot=None):
