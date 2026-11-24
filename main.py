@@ -1654,6 +1654,13 @@ class GameWindow(QMainWindow):
         self.loiter_button.setFocusPolicy(Qt.StrongFocus)
         InventoryPage._font(self.loiter_button, body_font)
         self.loiter_button.setMinimumHeight(44)
+        self.loiter_button.setCursor(Qt.PointingHandCursor)
+        self.loiter_button.setStyleSheet(
+            f'QPushButton {{ font-family:"{body_family}"; font-size:18px; color:#ddd; '
+            'background:#141414; border:none; padding:12px 16px; text-align:left; } '
+            'QPushButton:enabled:hover, QPushButton:focus { color:white; background:#292929; } '
+            'QPushButton:pressed { background:#353535; } '
+            'QPushButton:disabled { color:#666; background:#0b0b0b; }')
         arrival_layout.addWidget(self.loiter_button)
         self.arrival_status = QLabel()
         self.arrival_status.setObjectName("arrivalStatus")
@@ -1978,13 +1985,17 @@ class GameWindow(QMainWindow):
         input_row.addWidget(self.recipient_controls)
         input_row.addWidget(self.interject_input, 1)
         input_row.addWidget(self.dictation_controls)
-        input_row.addWidget(self.say_button)
         interject_layout.addLayout(input_row)
         interject_layout.addWidget(self.muffled_player_controls)
         interject_layout.addWidget(self.recipient_hint)
         interject_layout.addWidget(self.dictation_status)
         self.layout.addLayout(interject_layout)
-        self.layout.addWidget(self.inventory_button, 0, Qt.AlignRight)
+        footer = QGridLayout()
+        for column in range(3):
+            footer.setColumnStretch(column, 1)
+        footer.addWidget(self.say_button, 0, 1, Qt.AlignCenter)
+        footer.addWidget(self.inventory_button, 0, 2, Qt.AlignRight)
+        self.layout.addLayout(footer)
 
         container = QWidget()
         container.setLayout(self.layout)
@@ -2136,10 +2147,11 @@ class GameWindow(QMainWindow):
         control_height = max(50, min(84, int(self.height() * 0.08)))
         mode_color = "#71ed8d" if self.show_room_allocations else "#ef7777"
         for button, color in ((self.difficulty_button, mode_color), (self.start_button, "white")):
+            hover_color = QColor(color).lighter(115).name() if button is self.difficulty_button else "#aaa"
             button.setFixedHeight(control_height)
             button.setStyleSheet(
                 f'QPushButton {{ font-size: {control_size}px; padding: 10px; color: {color}; border: none; }} '
-                'QPushButton:enabled:hover, QPushButton:focus { color: #aaa; background: transparent; }')
+                f'QPushButton:enabled:hover, QPushButton:focus {{ color: {hover_color}; background: transparent; }}')
 
     def position_corner_controls(self):
         if not hasattr(self, "how_to_play_button") or not hasattr(self, "mute_button"):
@@ -5282,19 +5294,19 @@ class GameWindow(QMainWindow):
             ("Resume", "pauseResume", self.close_escape_menu),
             ("Controls", "pauseControls", self.show_voice_controls),
             ("Microphone", "pauseMicrophone", self.show_microphone_settings),
-            ("Main menu", "pauseRestart", self._esc_restart_click),
         )
         for text, name, callback in actions:
             layout.addWidget(self.pause_menu_button(text, name, callback))
         sound = self.pause_menu_button("Sound: On" if self.music_enabled else "Sound: Off",
                                        "pauseSound", self.toggle_pause_sound)
         layout.addWidget(sound)
-        layout.addWidget(self.pause_menu_button("Exit", "pauseExit", self._esc_quit_click))
         if development_mode():
             diagnostics = self.pause_menu_button("Developer diagnostics", "pauseModels", self.show_model_configuration)
             diagnostics.setStyleSheet(diagnostics.styleSheet() + 'QPushButton { color: #888; font-size: 10px; }')
             layout.addWidget(diagnostics)
         layout.addStretch(1)
+        layout.addWidget(self.pause_menu_button("Main menu", "pauseRestart", self._esc_restart_click))
+        layout.addWidget(self.pause_menu_button("Exit", "pauseExit", self._esc_quit_click))
         if current is None:
             opened = self.open_overlay_page(page, "Menu")
         else:
