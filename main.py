@@ -124,7 +124,7 @@ class AIWorker(QThread):
 
 
 class GameWindow(QMainWindow):
-    development_trace_notice = pyqtSignal(str)
+    development_trace_notice = pyqtSignal(str, str)
     history_record_added = pyqtSignal(object)
     night_arrival_resolved = pyqtSignal(object)
 
@@ -135,10 +135,65 @@ class GameWindow(QMainWindow):
         self.effect_player.setVolume(25)
         self.music_enabled = True
 
-        # Initialize game state variables first
-        self.player_name = ""
         self.preferences = Preferences()
         self.entered_player_name = self.preferences.last_player_name()
+        self.show_room_allocations = True  # Track mode for room allocation display
+        self.active_workers = []
+        self.reset_run_state()
+        self.trace = self.new_run_trace()
+        self.development_trace_notice.connect(self.show_development_trace_notice)
+        self.trace_callback_scope = None
+        self.last_completed_trace_job_id = None
+        self.ai_runtime = AIRuntime(prompt_root=os.path.dirname(resource_path("System Prompt.txt")), trace=self.trace)
+        self.dictation_recorder = DictationRecorder(self, device_name=self.preferences.microphone_name())
+        self.dictation_session = 0
+        self.dictation_context = None
+        self.dictation_worker = None
+        self.dictation_recorder.started.connect(self.handle_dictation_started)
+        self.dictation_recorder.ready.connect(self.transcribe_recording)
+        self.dictation_recorder.failed.connect(self.handle_dictation_failure)
+        self.dictation_recorder.diagnostic.connect(self.record_dictation_diagnostic)
+        self.request_serial = 0
+        self.profile_store = ProfileStore(os.getenv("ALIBAI_PROFILE_PATH") or None, CONTENT_CATALOGUE)
+        self.profile = ProfileSnapshot()
+        self.pending_progress = []
+        self.resize(800, 600)
+
+        # weapon registry (easy to extend)
+        self.weapons = [
+            {"id": "bare", "name": "Bare Hands", "desc": "No effect, no gimmick. \n A hardcore killer's weapon of choice.", "image": "icons/weapons/bare.png"},
+            {"id": "pen", "name": "Pen", "desc": "Before a kill, write a fake 'last note' your victim will be found with. "+
+                                                  f"{int(self.weapon_pen_backfire*100)}% chance to implicate yourself.", "image": "icons/weapons/pen.png"},
+            {"id": "knife", "name": "Knife",
+            "desc": "Gain the ability to kill twice per night, but your bloodlust will be visible.",
+            "image": "icons/weapons/knife.png"},
+
+            {"id": "c4", "name": "C4",
+            "desc": "Not very subtle. \n Allows you to kill from a distance. \n One night cooldown.",
+            "image": "icons/weapons/c4.png"},
+
+            {"id": "stopwatch", "name": "Stopwatch",
+            "desc": "Witnesses to night kills will vouch for you instead of accuse.",
+            "image": "icons/weapons/polished-stopwatch.png"},
+            {"id": "voodoo", "name": "Voodoo Blade", "desc": "Possess the body of whoever you stab; the body you previously inhabited is the one that is found dead.", "image": "icons/weapons/polished-voodoo.png"},
+            {"id": "blackmagic", "name": "Dark Magic", "desc": "Mind-control someone to kill for you each night, but they'll know it was you.", "image": "icons/weapons/polished-blackmagic.png"},
+            {"id": "love", "name": "Love",
+            "desc": "\n Can't we all just get along?",
+            "image": "icons/weapons/love.png"}
+        ]
+
+
+        # For ESC menu
+        self._esc_overlay = None
+        self._esc_sound_btn = None
+
+        # Call init_ui after initializing game variables
+        self.init_ui()
+
+
+    def reset_run_state(self):
+        """Start a clean run while retaining the window and session services."""
+        self.player_name = ""
         self.characters = {}
         self.rooms = ["Attic", "Kitchen", "Library", "Basement", "Cellar"]
         self.old_crime_scenes = []
@@ -156,14 +211,10 @@ class GameWindow(QMainWindow):
         self.round_number = 0
         self.phase = "start"
         self.conversation_length = 0  # To track when the "Call Vote" button should appear
-        self.show_room_allocations = True  # Track mode for room allocation display
         self.game_over = False
-        self.active_workers = []
         self.votes = {}  # To store all votes (including player's)
         self.vote_buttons_widget = None  # Widget for player vote buttons
         self.voting_resolved = False
-
-        # New Variables for the conversation phase
         self.history_records = []
         self.public_event_display_records = []
         self.display_sequence = 0
@@ -172,26 +223,12 @@ class GameWindow(QMainWindow):
         self.alive_characters = []  # Holds the list of alive characters
         self.NPCs = []  # Holds the list of NPC characters
         self.minimum_to_call_vote = vote_conversation_minimum()
-        self.trace = TraceRun(on_error=self.development_trace_notice.emit)
-        self.development_trace_notice.connect(self.show_development_trace_notice)
-        self.trace_callback_scope = None
-        self.last_completed_trace_job_id = None
-        self.ai_runtime = AIRuntime(prompt_root=os.path.dirname(resource_path("System Prompt.txt")), trace=self.trace)
-        self.dictation_recorder = DictationRecorder(self, device_name=self.preferences.microphone_name())
-        self.dictation_session = 0
-        self.dictation_context = None
-        self.dictation_worker = None
-        self.dictation_recorder.started.connect(self.handle_dictation_started)
-        self.dictation_recorder.ready.connect(self.transcribe_recording)
-        self.dictation_recorder.failed.connect(self.handle_dictation_failure)
-        self.dictation_recorder.diagnostic.connect(self.record_dictation_diagnostic)
         self.public_events = []
         self.public_dialogue = []
         self.npc_recall_public_event_start = 0
         self.npc_recall_dialogue_start = 0
         self.night_rooms = tuple(self.rooms)
         self.ai_busy = False
-        self.request_serial = 0
         self.retry_action = None
         self.direct_replies = DirectReplyPolicy()
         self.pending_direct_reply = None
@@ -203,8 +240,6 @@ class GameWindow(QMainWindow):
         self.prepared_scope = None
         self.prepared_retry_snapshot = None
         self.npc_items = NPCItemState()
-        self.profile_store = ProfileStore(os.getenv("ALIBAI_PROFILE_PATH") or None, CONTENT_CATALOGUE)
-        self.profile = ProfileSnapshot()
         self.run_id = uuid4().hex
         self.player_owner_id = "player"
         self.body_ids = {}
@@ -236,7 +271,6 @@ class GameWindow(QMainWindow):
         self.run_weapons = ()
         self.run_item_pool = ()
         self.progress_sequence = 0
-        self.pending_progress = []
         self.items_used = 0
         self.used_item_types = set()
         self.applied_item_events = set()
@@ -256,11 +290,6 @@ class GameWindow(QMainWindow):
         self._night_memories_written = False
         self.vote_id = None
         self.vote_snapshot = None
-
-        # Set a consistent window size
-        self.resize(800, 600)
-
-        #WEAPONS
         self.selected_weapon = None           
         self.weapon_pen_backfire = 0.1     
         self.pending_pen_note_text = None          
@@ -277,43 +306,19 @@ class GameWindow(QMainWindow):
         self.victims_last_night = []
         self._override_murder_room = None          
         self.pen_last_victim_name = None 
-
-        self.weapon_action_panel = None
         self._weapon_windows = {"pen": None, "blackmagic": None, "knife": None, "c4": None}
-
-        
-
-        # weapon registry (easy to extend)
-        self.weapons = [
-            {"id": "bare", "name": "Bare Hands", "desc": "No effect, no gimmick. \n A hardcore killer's weapon of choice.", "image": "icons/weapons/bare.png"},
-            {"id": "pen", "name": "Pen", "desc": "Before a kill, write a fake 'last note' your victim will be found with. "+ 
-                                                  f"{int(self.weapon_pen_backfire*100)}% chance to implicate yourself.", "image": "icons/weapons/pen.png"}, 
-            {"id": "knife", "name": "Knife",
-            "desc": "Gain the ability to kill twice per night, but your bloodlust will be visible.",
-            "image": "icons/weapons/knife.png"},
-
-            {"id": "c4", "name": "C4",
-            "desc": "Not very subtle. \n Allows you to kill from a distance. \n One night cooldown.",
-            "image": "icons/weapons/c4.png"},
-
-            {"id": "stopwatch", "name": "Stopwatch",
-            "desc": "Witnesses to night kills will vouch for you instead of accuse.",
-            "image": "icons/weapons/polished-stopwatch.png"},
-            {"id": "voodoo", "name": "Voodoo Blade", "desc": "Possess the body of whoever you stab; the body you previously inhabited is the one that is found dead.", "image": "icons/weapons/polished-voodoo.png"},
-            {"id": "blackmagic", "name": "Dark Magic", "desc": "Mind-control someone to kill for you each night, but they'll know it was you.", "image": "icons/weapons/polished-blackmagic.png"},
-            {"id": "love", "name": "Love",
-            "desc": "\n Can't we all just get along?",
-            "image": "icons/weapons/love.png"}
-        ]
-
-
-        # For ESC menu
-        self._esc_overlay = None
-        self._esc_sound_btn = None
-
-        # Call init_ui after initializing game variables
-        self.init_ui()
-
+        self.rooms_visited = []
+        self.new_crime_scenes = []
+        self.expected_voters = set()
+        self.dictation_worker = None
+        self._player_muffle_active = False
+        self.victim_buttons_widget = None
+        self.awaiting_player_vote = False
+        self.vote_requests_started = False
+        self.vote_bodies = ()
+        self.proxy_voters = set()
+        self.ballot_actor = None
+        self.had_to_change_rooms = False
 
     def body_id(self, label):
         return self.body_ids.setdefault(label, uuid4().hex)
@@ -1104,8 +1109,13 @@ class GameWindow(QMainWindow):
         self.trace_action("kill_resolved", victim=attack["corpse_label"], room=room, attack=attack)
         return True
 
-    def show_development_trace_notice(self, message):
-        self.append_output_text("[Development] " + message)
+    def new_run_trace(self):
+        run_id = self.run_id
+        return TraceRun(on_error=lambda message: self.development_trace_notice.emit(run_id, message))
+
+    def show_development_trace_notice(self, run_id, message):
+        if run_id == self.run_id and self.phase not in ("restarting", "closed"):
+            self.append_output_text("[Development] " + message)
 
     def start_development_trace(self):
         if not self.trace.enabled or self.trace.run_id is not None:
@@ -1390,7 +1400,7 @@ class GameWindow(QMainWindow):
             return
         self.invalidate_prepared_turn("foreground_request")
         self.request_serial += 1
-        token, phase = self.request_serial, self.phase
+        token, phase, run_id = self.request_serial, self.phase, self.run_id
         scope = trace_scope or self.trace.new_job(trace_task or "operation",
             parent_job_id=trace_parent_job_id,
             metadata={"actor": trace_actor, "round": self.round_number, "phase": phase})
@@ -1410,7 +1420,8 @@ class GameWindow(QMainWindow):
         self.secondary_output_area.show()
 
         def current():
-            return not self.game_over and self.phase == phase and self.request_serial == token
+            return (not self.game_over and self.run_id == run_id
+                    and self.phase == phase and self.request_serial == token)
 
         def ready(result):
             if scope is not None:
@@ -3883,18 +3894,19 @@ class GameWindow(QMainWindow):
                 and self.turn_preparation.current(ticket, ticket.snapshot))
 
     def start_preparation_worker(self, ticket, operation, on_success, scope):
-        self.turn_preparation.worker_started(ticket)
+        preparation = self.turn_preparation
+        preparation.worker_started(ticket)
         worker = AIWorker(operation)
         worker.result_ready.connect(on_success)
         worker.failed.connect(lambda message: self.preparation_failed(ticket, message, scope))
-        worker.finished.connect(lambda: self.preparation_worker_finished(ticket))
+        worker.finished.connect(lambda: self.preparation_worker_finished(ticket, preparation))
         if scope is not None:
             scope.record("job_started", {"ticket": ticket.identifier, "speculative": True})
         self.start_worker(worker)
 
-    def preparation_worker_finished(self, ticket):
-        released = self.turn_preparation.worker_finished(ticket)
-        if released:
+    def preparation_worker_finished(self, ticket, preparation):
+        released = preparation.worker_finished(ticket)
+        if released and self.turn_preparation is preparation:
             if (self.prepared_scope is not None and self.prepared_scope[0] == ticket.identifier
                     and self.turn_preparation.ready is None and self.turn_preparation.failure is None):
                 self.prepared_scope = None
@@ -4411,6 +4423,7 @@ class GameWindow(QMainWindow):
 
         # Create the "Continue" button
         self.continue_button = QPushButton('Continue', self)
+        self.continue_button.setObjectName('continueRun')
         self.continue_button.setStyleSheet(f"""
             QPushButton {{
                 font-size: {int(conversation_button_font_size*2)}px;
@@ -4515,6 +4528,7 @@ class GameWindow(QMainWindow):
         conversation_button_font_size = max(int(32 *(screen_width/2560)), 18)
 
         play_again_button = QPushButton("Play Again")
+        play_again_button.setObjectName("playAgain")
         play_again_button.setStyleSheet(f"""
             QPushButton {{
                 font-size: {int(conversation_button_font_size*2)}px;
@@ -4544,96 +4558,89 @@ class GameWindow(QMainWindow):
         
 
     def display_play_again_button(self):
-        """Displays the 'Play Again' button at the bottom center of the window."""
-        
-        # Create the "Play Again" button
+        """Add replay navigation without replacing the reusable central widget."""
         play_again_button = QPushButton("Play Again")
+        play_again_button.setObjectName("playAgain")
         play_again_button.clicked.connect(self.restart_game)
-
-        # Create a layout for the button
-        play_again_layout = QVBoxLayout()
-
-        # Add the output area to the layout to keep it visible
-        play_again_layout.addWidget(self.message_log)
-
-        # Add a spacer to push the button to the bottom
-        play_again_layout.addStretch()
-
-        # Add the "Play Again" button at the bottom center
-        play_again_layout.addWidget(play_again_button, alignment=Qt.AlignCenter)
-
-        # Create a container widget for the layout
-        play_again_widget = QWidget()
-        play_again_widget.setLayout(play_again_layout)
-
-        # Set the play again layout as the central widget
-        self.setCentralWidget(play_again_widget)
+        self.layout.addWidget(play_again_button, alignment=Qt.AlignBottom | Qt.AlignCenter)
 
     def restart_game(self):
-        """Hard restart: spawn a new main window with the same window state, then close this one."""
-        if self.phase == "restarting":
+        """Return to the title in the same native window and session."""
+        if self.phase in ("restarting", "closed"):
             return
         self.save_player_name_preference()
         self.trace_action("restart_requested")
         self.trace.end("restart")
         self.game_over = True
+        self.phase = "restarting"
+        self.request_serial += 1
         self.cancel_item_offer()
         self.invalidate_prepared_turn("restarting", changed=True)
-        self.phase = "restarting"
-        self.dictation_bindings.close()
-        self.overlay_host.cancel_owner()
         self.cancel_dictation()
-        # Close the ESC overlay if it’s open
-        if self._esc_overlay and self._esc_overlay.isVisible():
-            self.close_escape_menu()
+        self.dictation_bindings.cancel_capture()
+        self.overlay_host.reset_session()
+        for surface in self._weapon_windows.values():
+            if surface is not None:
+                surface.close()
+                surface.deleteLater()
+        for widget in (self.vote_buttons_widget, self.victim_buttons_widget,
+                       self.weapon_aftermath_panel):
+            if widget is not None:
+                self.layout.removeWidget(widget)
+                widget.hide()
+                widget.deleteLater()
+        for name in ("playAgain", "continueRun"):
+            for button in self.centralWidget().findChildren(QPushButton, name):
+                self.layout.removeWidget(button)
+                button.hide()
+                button.deleteLater()
+        self.media_player.stop()
+        self.effect_player.stop()
+        configuration = self.ai_runtime.config
+        self.reset_run_state()
+        self.trace = self.new_run_trace()
+        self.trace_callback_scope = None
+        self.last_completed_trace_job_id = None
+        self.ai_runtime = AIRuntime(prompt_root=os.path.dirname(resource_path("System Prompt.txt")),
+                                    trace=self.trace, config=configuration)
+        self.set_action_output_mode(False)
+        self.message_log.clear()
+        self.house_view.reset_observations(tuple(RoomObservation(room_id) for room_id in ROOM_LABELS))
+        self.secondary_output_area.clear()
+        self.interject_input.clear()
+        self.interject_input.setEnabled(True)
+        self.say_button.setEnabled(True)
+        self.conversation_stage.set_participants(())
+        self.conversation_stage.set_active_speaker(None)
+        self.conversation_stage.set_required_reply(None)
+        for widget in (self.weapon_scroll, self.room_buttons_widget, self.conversation_stage,
+                       self.message_log, self.secondary_output_area, self.conversation_buttons_widget,
+                       self.interject_input, self.say_button, self.recipient_controls, self.recipient_hint,
+                       self.muffled_player_controls, self.inventory_button, self.retry_button,
+                       self.weapon_action_panel, self.npc_equipment_label, self.transcript_button):
+            widget.hide()
+        self.player_name_label.setText("Enter your name:")
+        for widget in (self.menu_widget, self.title_label, self.player_name_label,
+                       self.player_name_input, self.difficulty_button, self.start_button,
+                       self.how_to_play_button, self.mute_button):
+            widget.show()
+        self.show_menu_tab("play")
+        self.update_dictation_controls()
+        self.update_mute_button_icon()
+        self.progress_notice.hide()
+        self.progress_retry_button.hide()
+        self.load_profile()
+        self.item_catalogue.refresh(self.profile)
+        if self.pending_progress:
+            self.show_profile_error("Some progress from the previous run still needs saving.")
+        self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(resource_path("sounds/start.mp3"))))
+        self.media_player.setVolume(50)
+        if self.music_enabled:
+            self.media_player.play()
+        self.resize_menu_content()
+        self.position_corner_controls()
+        self.player_name_input.setFocus()
 
-        app = QApplication.instance()
-
-        # Remember state & geometry
-        old_state = self.windowState()
-        old_geo   = self.geometry()
-
-        # Ensure the app doesn't quit during the handoff
-        app.setQuitOnLastWindowClosed(False)
-
-        def _spawn():
-            new_win = self.__class__()              # re-runs __init__()
-            new_win.pending_progress = list(self.pending_progress)
-            self.pending_progress.clear()
-            if new_win.pending_progress:
-                new_win.show_profile_error("Some progress from the previous run still needs saving.")
-
-            # Preserve window state
-            if old_state & Qt.WindowFullScreen:
-                new_win.showFullScreen()
-            elif old_state & Qt.WindowMaximized:
-                new_win.showMaximized()
-            else:
-                # Normal window: restore geometry on the current screen
-                # (If you always run fullscreen, you can remove this branch)
-                scr = self.screen() or app.primaryScreen()
-                avail = scr.availableGeometry()
-                # Clamp geometry into the visible area
-                g = old_geo
-                x = max(avail.left(), min(g.x(), avail.right() - g.width()))
-                y = max(avail.top(),  min(g.y(), avail.bottom() - g.height()))
-                new_win.setGeometry(x, y, g.width(), g.height())
-                new_win.showNormal()
-
-            new_win.show()
-            app.setActiveWindow(new_win)
-
-            # Keep a strong ref so Python GC doesn't collect it
-            app._main_window = new_win
-
-            # Close old window *after* the new one is visible
-            QTimer.singleShot(50, self.close)
-
-            # Restore normal quit behavior
-            app.setQuitOnLastWindowClosed(True)
-
-        QTimer.singleShot(0, _spawn)
-        
     def end_game(self):
         self.append_output_text("Game Over. Thanks for playing!\n")
 

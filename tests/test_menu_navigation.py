@@ -67,6 +67,96 @@ class MenuNavigationTests(unittest.TestCase):
         self.assertLessEqual(requested.height(), contents.height())
         self.assertFalse(button.icon().pixmap(requested).isNull())
 
+    def test_repeated_main_menu_preserves_window_session_and_resets_each_run(self):
+        window = self.window
+        window.resize(1100, 760)
+        self.app.processEvents()
+        native_id, geometry, state = int(window.winId()), window.geometry(), window.windowState()
+        services = (window.centralWidget(), window.dictation_bindings, window.dictation_recorder,
+                    window.preferences, window.profile_store, window.media_player, window.effect_player)
+        window.player_name_input.setText("Literal entered name")
+        window.toggle_mode()
+        window.toggle_mode()
+        self.assertEqual(window.difficulty_button.text(), "Mode: Coward")
+        window.toggle_mute()
+        window.media_player.play.reset_mock()
+        configuration = window.ai_runtime.config
+        runs = set()
+        for _ in range(3):
+            window.start_button.click()
+            self.assertEqual(window.phase, "weapon_select")
+            runs.add(window.run_id)
+            window.select_weapon_and_start(window.weapons[0])
+            self.assertEqual(window.phase, "action")
+            self.assertTrue(window.room_buttons_widget.isVisible())
+            window.add_continue_button()
+            window.display_play_again_button()
+            old_trace, old_runtime = window.trace, window.ai_runtime
+            window.open_escape_menu()
+            button = window.overlay_host.current_page.findChild(QPushButton, "pauseRestart")
+            button.click()
+            self.app.processEvents()
+            self.assertEqual(window.phase, "start")
+            self.assertEqual(int(window.winId()), native_id)
+            self.assertEqual(window.geometry(), geometry)
+            self.assertEqual(window.windowState(), state)
+            self.assertEqual((window.centralWidget(), window.dictation_bindings, window.dictation_recorder,
+                              window.preferences, window.profile_store, window.media_player, window.effect_player), services)
+            self.assertEqual(window.player_name_input.text(), "Literal entered name")
+            self.assertEqual(window.difficulty_button.text(), "Mode: Coward")
+            self.assertTrue(window.show_room_allocations)
+            self.assertFalse(window.music_enabled)
+            self.assertFalse(window.sfx_enabled)
+            self.assertEqual(window.characters, {})
+            self.assertEqual(window.history_records, [])
+            self.assertEqual(window.public_dialogue, [])
+            self.assertEqual(window.inventory.entries, ())
+            self.assertIsNone(window.selected_weapon)
+            self.assertIsNot(window.trace, old_trace)
+            self.assertIsNot(window.ai_runtime, old_runtime)
+            self.assertEqual(window.ai_runtime.config, configuration)
+            self.assertTrue(window.menu_widget.isVisible())
+            self.assertFalse(window.room_buttons_widget.isVisible())
+            self.assertFalse(window.overlay_host.owner_cancelled)
+            self.assertFalse(any(button.isVisible() for name in ("playAgain", "continueRun")
+                                 for button in window.findChildren(QPushButton, name)))
+        self.assertEqual(len(runs), 3)
+        window.media_player.play.assert_not_called()
+        window.effect_player.stop.assert_called()
+
+    def test_previous_run_trace_notice_cannot_write_into_new_run(self):
+        previous = self.window.trace
+        self.window.restart_game()
+        previous.on_error("Old trace failed")
+        self.app.processEvents()
+        self.assertEqual(self.window.output_area.toPlainText(), "")
+        self.window.trace.on_error("Current trace failed")
+        self.app.processEvents()
+        self.assertIn("Current trace failed", self.window.output_area.toPlainText())
+
+    def test_fullscreen_and_unsaved_progress_survive_navigation(self):
+        from progression import ProfileError, ProgressEvent
+        window = self.window
+        window.showFullScreen()
+        self.app.processEvents()
+        native_id, state = int(window.winId()), window.windowState()
+        event = ProgressEvent(window.run_id, 1, "survived_vote")
+        window.pending_progress.append(event)
+        profile = game.ProfileSnapshot(unlocked=frozenset({"knife"}))
+        with patch.object(window.profile_store, "read", return_value=profile):
+            window.restart_game()
+        self.app.processEvents()
+        self.assertEqual(int(window.winId()), native_id)
+        self.assertEqual(window.windowState(), state)
+        self.assertEqual(window.pending_progress, [event])
+        self.assertEqual(window.profile.unlocked, frozenset({"knife"}))
+        self.assertTrue(window.progress_retry_button.isVisible())
+        self.assertNotEqual(window.run_id, event.run_id)
+        with patch.object(window.profile_store, "record", side_effect=ProfileError("Save unavailable")):
+            window.retry_progress()
+        self.assertEqual(window.pending_progress, [event])
+        self.assertTrue(window.progress_retry_button.isVisible())
+
     def test_repeated_resizes_keep_real_controls_in_bounds_and_clear_of_corners(self):
         window = self.window
         for width, height in ((800, 600), (1280, 800), (2560, 1440), (3440, 1440), (800, 600)):

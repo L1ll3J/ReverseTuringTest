@@ -57,6 +57,29 @@ class OverlayHostTests(unittest.TestCase):
         layout.addWidget(entry)
         return page, entry
 
+    def test_session_reset_invalidates_pages_and_queued_notifications_but_remains_usable(self):
+        page, _ = self.page()
+        self.assertTrue(self.host.open_page(page, title="Menu"))
+        stale = Mock(side_effect=lambda: self.page()[0])
+        self.host.enqueue_unlock(stale, title="Old unlock")
+        self.host.reset_session()
+        self.events()
+        self.assertFalse(self.host.owner_cancelled)
+        self.assertIsNone(self.host.current_page)
+        self.assertEqual(self.host.pending_unlock_count, 0)
+        stale.assert_not_called()
+        fresh, entry = self.page()
+        self.assertTrue(self.host.open_page(fresh, title="New menu"))
+        self.events()
+        self.assertIs(self.host.current_page, fresh)
+        self.assertIs(self.app.focusWidget(), entry)
+        self.host.close_page()
+        queued = Mock(side_effect=lambda: self.page()[0])
+        self.host.enqueue_unlock(queued, title="Scheduled unlock")
+        self.host.reset_session()
+        self.events()
+        queued.assert_not_called()
+
     def test_one_modal_surface_rejects_second_page_without_taking_ownership(self):
         first, _ = self.page()
         second, _ = self.page()

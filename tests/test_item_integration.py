@@ -704,55 +704,29 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.window.draft_page)
         self.assertEqual(self.window.rooms_visited, ["Basement"])
 
-    def test_restart_retires_old_offer_before_new_window_and_rejects_late_actions(self):
+    def test_restart_retires_old_offer_in_same_window_and_rejects_late_actions(self):
         self.night()
         continuation = Mock()
         self.window.offer_room_item("Basement", continuation)
         page = self.window.draft_page
-        offer = self.window.item_drafts.pending_offer
-        had_main_window = hasattr(self.app, "_main_window")
-        previous_main_window = getattr(self.app, "_main_window", None)
-        previous_quit = self.app.quitOnLastWindowClosed()
-        original_init = game.GameWindow.__init__
-        created = []
-
-        def record_init(window):
-            original_init(window)
-            created.append(window)
-
-        try:
-            with patch.object(game.GameWindow, "__init__", new=record_init):
-                self.window.restart_game()
-                self.assertIsNone(self.window.draft_page)
-                self.assertIsNone(self.window.pending_room_action)
-                self.assertIsNone(self.window.item_drafts.pending_offer)
-                self.window.choose_item_offer(offer.offer_id, 0)
-                self.window.skip_item_offer(offer.offer_id)
-                self.window.reroll_item_offer(offer.offer_id, 0)
-                deadline = monotonic() + 3
-                while not created and monotonic() < deadline:
-                    QTest.qWait(5)
-            self.assertEqual(len(created), 1)
-            self.assertIs(self.app._main_window, created[0])
-            self.assertEqual(created[0].phase, "start")
-            self.assertIsNone(created[0].draft_page)
-            self.assertEqual(created[0].inventory.entries, ())
-            self.assertEqual(self.window.inventory.entries, ())
-            continuation.assert_not_called()
-            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-            self.assertTrue(sip.isdeleted(page))
-            QTest.qWait(60)
-        finally:
-            self.app.setQuitOnLastWindowClosed(False)
-            for replacement in created:
-                replacement.close()
-                replacement.deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-            if had_main_window:
-                self.app._main_window = previous_main_window
-            elif hasattr(self.app, "_main_window"):
-                del self.app._main_window
-            self.app.setQuitOnLastWindowClosed(previous_quit)
+        drafts = self.window.item_drafts
+        offer = drafts.pending_offer
+        native_id = int(self.window.winId())
+        with patch.object(game.GameWindow, "__init__", side_effect=AssertionError("Unexpected window replacement")):
+            self.window.restart_game()
+        self.assertEqual(int(self.window.winId()), native_id)
+        self.assertEqual(self.window.phase, "start")
+        self.assertIsNone(self.window.draft_page)
+        self.assertIsNone(self.window.pending_room_action)
+        self.assertIsNone(self.window.item_drafts)
+        self.assertIsNone(drafts.pending_offer)
+        self.window.choose_item_offer(offer.offer_id, 0)
+        self.window.skip_item_offer(offer.offer_id)
+        self.window.reroll_item_offer(offer.offer_id, 0)
+        self.assertEqual(self.window.inventory.entries, ())
+        continuation.assert_not_called()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertTrue(sip.isdeleted(page))
 
     def test_real_room_offer_excludes_owned_types_and_exhaustion_continues_action(self):
         self.night()

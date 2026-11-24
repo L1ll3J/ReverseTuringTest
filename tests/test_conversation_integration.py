@@ -742,34 +742,32 @@ class ConversationIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.window.turn_preparation.ready)
         self.selector.assert_not_called()
 
-    def test_restart_keeps_old_preparation_out_of_new_window(self):
+    def test_restart_keeps_old_preparation_out_of_new_run_and_releases_original_manager(self):
         self.free_floor()
         release, _ = self.block_proposals()
-        before = tuple(self.window.public_dialogue)
-        original_init = game.GameWindow.__init__
-        previous = getattr(self.app, "_main_window", None)
-        created = []
+        old_manager = self.window.turn_preparation
+        old_ticket = old_manager.active
+        old_workers = tuple(self.window.active_workers)
+        self.window.restart_game()
+        self.assertEqual(self.window.phase, "start")
+        self.assertIsNot(self.window.turn_preparation, old_manager)
+        self.assertTrue(old_ticket.cancelled.is_set())
+        self.assertTrue(all(worker in self.app._ai_workers for worker in old_workers))
+        # Return to the same phase before the old requests finish.
+        self.window.player_name = "Alex"
+        self.window.characters = {name: {"alive": True, "profile": [], "experiences": [], "dispositions": []}
+                                  for name in ("Dave", "Hank", "Jerry")}
+        self.window.phase = "conversation"
+        self.window.round_number = 1
+        self.window.menu_widget.hide()
+        release.set()
+        self.wait_for(lambda: not self.window.active_workers)
+        self.assertIsNone(old_manager.active)
+        self.assertEqual(old_ticket.workers, 0)
+        self.assertEqual(self.window.public_dialogue, [])
+        self.assertIsNone(self.window.turn_preparation.active)
+        self.selector.assert_not_called()
 
-        def record_init(window):
-            original_init(window)
-            created.append(window)
-            self.windows.append(window)
-
-        try:
-            with patch.object(game.GameWindow, "__init__", new=record_init):
-                self.window.restart_game()
-                self.wait_for(lambda: bool(created))
-            self.assertEqual(created[0].phase, "start")
-            release.set()
-            self.wait_for(lambda: not self.window.active_workers)
-            self.assertEqual(tuple(self.window.public_dialogue), before)
-            self.assertEqual(created[0].public_dialogue, [])
-            self.selector.assert_not_called()
-        finally:
-            if previous is not None:
-                self.app._main_window = previous
-            elif hasattr(self.app, "_main_window"):
-                del self.app._main_window
 
 
 if __name__ == "__main__":

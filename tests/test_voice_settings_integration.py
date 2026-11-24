@@ -367,24 +367,29 @@ class VoiceSettingsIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.interject_input.text(), "Unfinished draft")
         self.assertTrue(self.window.player_reply_required())
 
-    def test_restart_and_close_remove_old_binding_dispatch(self):
+    def test_restart_preserves_binding_dispatch_and_actual_close_removes_it(self):
         self.capture(key=Qt.Key_PageUp)
         self.resume()
         self.open_input()
-        old_controller = self.window.dictation_bindings
+        controller = self.window.dictation_bindings
+        recorder = self.window.dictation_recorder
         self.window.open_escape_menu()
         QTest.mouseClick(self.button("pauseRestart"), Qt.LeftButton)
-        self.wait_for(lambda: getattr(self.app, "_main_window", self.window) is not self.window)
-        replacement = self.app._main_window
-        self.windows.append(replacement)
-        self.assertEqual(replacement.dictation_bindings.binding, InputBinding.for_key(Qt.Key_PageUp))
-        self.assertTrue(old_controller._closed)
+        self.app.processEvents()
+        self.assertIs(self.app._main_window, self.window)
+        self.assertIs(self.window.dictation_bindings, controller)
+        self.assertFalse(controller._closed)
+        self.assertFalse(recorder.closed)
+        self.assertEqual(self.window.phase, "start")
+        QTest.keyClick(self.window.player_name_input, Qt.Key_PageUp)
+        self.assertFalse(recorder.is_recording)
+        self.open_input()
         QTest.keyClick(self.window.interject_input, Qt.Key_PageUp)
-        self.assertFalse(self.window.dictation_recorder.is_recording)
-        replacement.close()
-        self.assertTrue(replacement.dictation_bindings._closed)
-        self.assertTrue(replacement.dictation_recorder.closed)
-        self.assertTrue(replacement.overlay_host.owner_cancelled)
+        self.assertTrue(recorder.is_recording)
+        self.window.close()
+        self.assertTrue(controller._closed)
+        self.assertTrue(recorder.closed)
+        self.assertTrue(self.window.overlay_host.owner_cancelled)
 
 
 class VoiceSettingsFixtureCleanupTests(unittest.TestCase):

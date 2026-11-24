@@ -797,85 +797,41 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.assertEqual(self.window.current_conversation, ["Alex: Original"])
                 self.assertEqual(self.window.most_recent_messageS, ["Alex: Original"])
 
-    def test_restart_rejects_queued_old_results_and_creates_one_new_window(self):
-        self.window.player_name_input.setText("Literal input before possession")
-        self.window.phase = "conversation"
-        self.window.current_conversation = ["Alex: Original"]
-        self.window.most_recent_messageS = ["Alex: Original"]
-        self.window.NPCs = ["Jerry", "Dave", "Hank"]
-        previous_quit_setting = self.app.quitOnLastWindowClosed()
-        had_main_window = hasattr(self.app, "_main_window")
-        previous_main_window = getattr(self.app, "_main_window", None)
-        original_init = game.GameWindow.__init__
-        created = []
-        delivered = []
-
-        def record_init(window):
-            created.append(window)
-            original_init(window)
-
-        def deliver(callback, *args):
-            delivered.append(callback.__name__)
-            callback(*args)
-
-        proposal = game.SpeechProposal(None, "Late reply")
-        snapshot = (self.window.public_state(), (), ())
-        callbacks = (
-            (self.window.handle_single_response, ("Jerry", proposal)),
-            (self.window.handle_multiple_responses, ({"Jerry": proposal}, snapshot)),
-            (self.window.handle_best_response, (proposal, "Jerry")),
-        )
-        entered, release = Event(), Event()
-        success = Mock()
-
-        def operation():
-            entered.set()
-            if not release.wait(2):
-                raise AssertionError("Old request was not released")
-            return "late result"
-
-        try:
-            self.window.start_ai_request(operation, success, "Waiting for old request")
-            self.wait_for(entered.is_set)
-            with patch.object(game.GameWindow, "__init__", new=record_init), patch.object(
-                game.QThread, "start"
-            ) as start_worker, patch.object(self.window, "run_conversation_loop") as resume:
-                for delay, (callback, args) in enumerate(callbacks, start=5):
-                    QTimer.singleShot(delay, lambda callback=callback, args=args: deliver(callback, *args))
-                self.window.restart_game()
-                self.window.restart_game()
-                QTimer.singleShot(10, release.set)
-                QTest.qWait(80)
-                self.wait_for(lambda: not self.window.active_workers)
-                self.assertEqual(len(created), 1)
-                self.assertIs(self.app._main_window, created[0])
-                self.assertTrue(created[0].isVisible())
-                self.assertEqual(created[0].phase, "start")
-                self.assertEqual(created[0].player_name_input.text(), "Literal input before possession")
-                self.assertEqual(len(delivered), 3)
-                self.assertEqual(self.window.phase, "restarting")
-                self.assertTrue(self.window.game_over)
-                self.assertEqual(self.window.current_conversation, ["Alex: Original"])
-                self.assertEqual(self.window.most_recent_messageS, ["Alex: Original"])
-                start_worker.assert_not_called()
-                resume.assert_not_called()
-                success.assert_not_called()
-        finally:
-            release.set()
-            for worker in list(self.window.active_workers):
-                worker.wait(3000)
-            self.app.processEvents()
-            self.app.setQuitOnLastWindowClosed(False)
-            for window in created:
-                window.close()
-                window.deleteLater()
-            self.app.processEvents()
-            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-            if had_main_window:
-                self.app._main_window = previous_main_window
-            elif hasattr(self.app, "_main_window"):
-                del self.app._main_window
-            self.app.setQuitOnLastWindowClosed(previous_quit_setting)
+    def test_restart_rejects_old_success_and_failure_even_in_same_phase(self):
+        for fails in (False, True):
+            with self.subTest(fails=fails):
+                self.window.phase = "conversation"
+                self.window.game_over = False
+                entered, release = Event(), Event()
+                success = Mock()
+                old_run = self.window.run_id
+                def operation():
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("Old request was not released")
+                    if fails:
+                        raise game.AIRequestError("Old failure")
+                    return "late result"
+                try:
+                    self.window.start_ai_request(operation, success, "Waiting")
+                    self.wait_for(entered.is_set)
+                    worker = self.window.active_workers[0]
+                    self.window.restart_game()
+                    self.assertNotEqual(self.window.run_id, old_run)
+                    self.assertIn(worker, self.app._ai_workers)
+                    self.window.phase = "conversation"
+                    self.window.secondary_output_area.setText("New run status")
+                    release.set()
+                    self.wait_for(lambda: not self.window.active_workers)
+                    success.assert_not_called()
+                    self.assertEqual(self.window.secondary_output_area.text(), "New run status")
+                    self.assertIsNone(self.window.retry_action)
+                    self.assertNotIn(worker, self.app._ai_workers)
+                finally:
+                    release.set()
+                    for worker in list(self.window.active_workers):
+                        worker.wait(3000)
+                    self.app.processEvents()
 
     def test_parallel_private_drafts_commit_only_the_selected_reply(self):
         self.window.phase = "conversation"
