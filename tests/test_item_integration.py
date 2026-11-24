@@ -882,10 +882,13 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.characters["Hank"]["alive"])
         self.assertEqual([(attack["target_label"], attack["room"]) for attack in self.window.night_attacks],
                          [("Dave", "Attic"), ("Hank", "Kitchen")])
-        self.assertEqual(len(self.window.characters["Jerry"]["experiences"]), 1)
-        self.assertIn("Alex kill Dave in the Attic", self.window.characters["Jerry"]["experiences"][0].text)
-        self.assertEqual(len(self.window.characters["Owen"]["experiences"]), 1)
-        self.assertIn("Alex kill Hank in the Kitchen", self.window.characters["Owen"]["experiences"][0].text)
+        for witness, victim, room in (("Jerry", "Dave", "Attic"), ("Owen", "Hank", "Kitchen")):
+            event = next(event for event in self.window.night_arrivals.events
+                         if event.body_id == self.window.body_id(witness))
+            memories = self.window.characters[witness]["experiences"]
+            self.assertEqual(len(memories), 2)
+            self.assertEqual(memories[0].text, f"At {event.time}, you entered the {room}.")
+            self.assertIn(f"Alex kill {victim} in the {room}", memories[1].text)
         self.assertEqual(self.window.profile.counters["player_kill"], 2)
         self.assertEqual(self.window.item_drafts.seen_rooms, {"Attic", "Kitchen"})
         self.assertEqual(len(self.window.inventory.entries), 1)

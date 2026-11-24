@@ -70,12 +70,30 @@ class NightArrivalIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.house_view.observations['kitchen'].known_names, ('Dave',))
         memories = self.window.characters['Dave']['experiences']
         expected = f'At {event.time}, you saw Alex outside the house as you went through the front door towards the kitchen. They glanced towards you.'
-        self.assertEqual([record.text for record in memories], [expected])
+        own_entry = f'At {event.time}, you entered the Kitchen.'
+        self.assertEqual([record.text for record in memories], [own_entry, expected])
         self.window.loiter_outside(state.night, cursor)
         self.assertEqual(state.cursor, cursor + 1)
-        self.assertEqual([record.text for record in memories], [expected])
-        self.assertFalse(self.window.characters['Hank']['experiences'])
+        self.assertEqual([record.text for record in memories], [own_entry, expected])
+        first = state.initial[0]
+        self.assertEqual([record.text for record in self.window.characters['Hank']['experiences']],
+                         [f'At {first.time}, you entered the Kitchen.'])
         self.assertFalse(self.window.characters['Jerry']['experiences'])
+
+    def test_initial_guests_remember_their_actual_entry_in_both_modes(self):
+        for normal in (True, False):
+            with self.subTest(normal=normal):
+                state = self.open_night(initial_count=2, normal=normal)
+                for event in state.initial:
+                    mind_id = self.window.identity_state.mind_for_body(event.body_id)
+                    memories = [record for record in self.window.mind_data[mind_id]['experiences']
+                                if record.round_number == state.night]
+                    self.assertEqual([record.text for record in memories],
+                                     [f'At {event.time}, you entered the {event.room}.'])
+                    self.assertEqual(memories[0].source, 'eyewitness')
+                    self.window.apply_arrival(event, observed=normal)
+                    self.assertEqual(len([record for record in self.window.mind_data[mind_id]['experiences']
+                                          if record.round_number == state.night]), 1)
 
     def test_room_commits_before_rewards_and_camera_contains_final_human_room_before_attack(self):
         self.window.npc_items = NPCItemState({'Hank':'camera'})
@@ -93,8 +111,13 @@ class NightArrivalIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.house_view.observations['attic'].known_names)
         transcript = '\n'.join(record.text for record in self.window.history_records)
         self.assertNotIn('Jerry entered', transcript)
+        event = next(event for event in state.events if event.body_id == self.window.body_id('Jerry'))
+        memories = self.window.characters['Jerry']['experiences']
+        self.assertEqual([record.text for record in memories],
+                         [f'At {event.time}, you entered the Attic.'])
         self.window.loiter_outside(state.night, 1)
-        self.assertFalse(self.window.characters['Jerry']['experiences'])
+        self.window.apply_arrival(event)
+        self.assertEqual(len(memories), 1)
         self.window.draft_page.leave_button.click()
         self.assertIs(self.window.npc_items._photos_by_night[state.night][0], photo)
         self.assertEqual(self.window.night_attacks, [])
@@ -128,15 +151,17 @@ class NightArrivalIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.room_assignments['Kitchen'], ['Hank','Jerry'])
         discoverer = self.window.characters['Jerry']['experiences']
         recipient = self.window.characters['Hank']['experiences']
-        self.assertEqual(len(discoverer), 1)
-        self.assertEqual(discoverer[0].source, 'eyewitness')
-        self.assertIn('you recognised Dave; their body had been torn apart.', discoverer[0].text)
-        self.assertIn('hurried to the Kitchen.', discoverer[0].text)
-        self.assertEqual(len(recipient), 1)
-        self.assertEqual(recipient[0].source, 'hearsay')
-        self.assertIn('Jerry told you what they had found in the Attic.', recipient[0].text)
-        self.assertFalse(self.window.characters['Debra']['experiences'])
-        self.assertFalse(self.window.characters['Owen']['experiences'])
+        self.assertEqual(len(discoverer), 2)
+        self.assertEqual(discoverer[1].source, 'eyewitness')
+        self.assertIn('you recognised Dave; their body had been torn apart.', discoverer[1].text)
+        self.assertIn('hurried to the Kitchen.', discoverer[1].text)
+        self.assertEqual(len(recipient), 2)
+        self.assertEqual(recipient[1].source, 'hearsay')
+        self.assertIn('Jerry told you what they had found in the Attic.', recipient[1].text)
+        for name in ('Debra', 'Owen'):
+            event = next(event for event in state.events if event.body_id == self.window.body_id(name))
+            self.assertEqual([record.text for record in self.window.characters[name]['experiences']],
+                             [f'At {event.time}, you entered the {event.room}.'])
         photo, = self.window.npc_items._photos_by_night[state.night]
         self.assertEqual(set(photo.occupants), {'Alex','Hank','Jerry'})
         self.assertNotIn('Dave', photo.occupants)
@@ -177,6 +202,14 @@ class NightArrivalIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.night_arrivals.destinations[old_player_body], 'Attic')
         self.assertNotIn(old_dave_body, self.window.night_arrivals.destinations)
         self.assertIn('Alex', self.window.room_assignments['Attic'])
+        event = next(event for event in self.window.night_arrivals.initial
+                     if event.body_id == old_player_body)
+        occupant_mind = self.window.identity_state.mind_for_body(old_player_body)
+        expected = f'At {event.time}, you entered the Attic.'
+        memories = self.window.mind_data[occupant_mind]['experiences']
+        self.assertEqual([record.text for record in memories].count(expected), 1)
+        self.assertNotEqual(occupant_mind, self.window.player_owner_id)
+        self.assertNotIn(expected, [record.text for record in self.window.history_records])
 
     def test_due_curse_resolves_before_any_arrival_is_scheduled(self):
         self.conversation()

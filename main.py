@@ -3062,6 +3062,8 @@ class GameWindow(QMainWindow):
         if not self.characters.get(guest, {}).get("alive"):
             return self.game_over
         self.room_assignments[event.room].append(guest)
+        self.remember_arrival(f"{event.event_id}:entry", event.body_id,
+            f"At {event.time}, you entered the {event.room}.", source="eyewitness")
         if outside:
             self.remember_arrival(event.event_id, event.body_id,
                 f"At {event.time}, you saw {self.perceived_actor(self.player_name)} outside the house as you {event.route}. They glanced towards you.",
