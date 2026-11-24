@@ -325,6 +325,11 @@ class RuntimeRegressionTests(unittest.TestCase):
 
     def test_pending_reply_blocks_all_conversation_advance_paths_until_actual_reply(self):
         self.prepare_vote_call()
+        self.speech.side_effect = game.AIRequestError("Temporary ordinary speech failure")
+        self.window.run_single_response("Dave")
+        self.wait_for(lambda: self.window.retry_action is not None and not self.window.active_workers)
+        retry = self.window.retry_action
+        self.assertEqual(self.speech.call_count, 1)
         self.window.append_speech("Hank", "Where were you last night?", "Alex")
         self.window.run_conversation_loop()
         before = tuple(self.window.public_dialogue)
@@ -332,7 +337,6 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertFalse(self.window.can_call_vote())
         self.assertFalse(self.window.vote_button.isEnabled())
         self.window.pass_button.setEnabled(True)
-        retry = Mock()
         self.window.retry_action = retry
         with patch.object(self.window, "start_ai_request") as request:
             self.window.pass_button.click()
@@ -340,15 +344,18 @@ class RuntimeRegressionTests(unittest.TestCase):
             self.window.run_voting_phase()
             self.window.run_multiple_responses()
             self.window.run_single_response("Dave")
-            self.window.retry_ai_request()
         request.assert_not_called()
-        retry.assert_not_called()
+        self.window.retry_ai_request()
+        self.assertEqual(self.speech.call_count, 1)
+        self.assertFalse(self.window.active_workers)
+        self.assertFalse(self.window.ai_busy)
         self.assertEqual(self.window.phase, "conversation")
         self.assertEqual(tuple(self.window.public_dialogue), before)
         self.window.interject_input.setText("   ")
         self.window.send_interjection()
         self.assertTrue(self.window.player_reply_required())
         self.window.interject_input.setText("I was upstairs.")
+        self.speech.side_effect = None
         self.window.interject_conversation()
         self.assertEqual(self.window.interject_input.text(), "I was upstairs.")
         with patch.object(self.window, "run_multiple_responses") as group:

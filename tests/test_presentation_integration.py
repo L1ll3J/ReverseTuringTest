@@ -139,7 +139,7 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.assertIn("A genuine discovery.", self.window.transcript_page.editor.toPlainText())
 
     def test_inventory_use_replaces_one_page_and_preserves_composing_selection(self):
-        entry = self.window.inventory.grant("banana")
+        entry = self.window.inventory.grant("muffle")
         self.window.interject_input.setText("My unfinished alibi")
         self.window.interject_input.setSelection(3, 10)
         self.window.interject_input.show()
@@ -153,7 +153,7 @@ class PresentationIntegrationTests(unittest.TestCase):
         self.assertIsNot(self.window.inventory_page, old_page)
         self.assertIs(self.window.overlay_host.current_page, self.window.inventory_page)
         self.assertEqual(self.window.inventory.entries, ())
-        self.assertEqual(self.window.public_events[-1].text, "Alex gave Hank a banana.")
+        self.assertTrue(self.window.item_rules.is_muffled(self.window.body_id("Hank")))
         self.assertEqual(self.window.interject_input.text(), before[0])
         self.window.show_transcript()
         self.assertEqual(self.window.overlay_host.current_title, "Inventory")

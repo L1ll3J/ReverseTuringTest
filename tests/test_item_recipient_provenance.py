@@ -11,6 +11,7 @@ class ItemRecipientProvenanceTests(unittest.TestCase):
     setUp = integration.ItemIntegrationTests.setUp
     tearDown = integration.ItemIntegrationTests.tearDown
     conversation = integration.ItemIntegrationTests.conversation
+    wait_for_workers = integration.ItemIntegrationTests.wait_for_workers
 
     def pending(self, item_id, message=None):
         self.conversation()
@@ -36,6 +37,7 @@ class ItemRecipientProvenanceTests(unittest.TestCase):
     def recover(self, entry, message=None):
         self.assertTrue(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave"),
                                                        message=message, activation_id="pending"))
+        self.wait_for_workers()
 
     def test_love_recovery_follows_original_recipient_mind_after_body_cycle(self):
         entry, events, mind, data = self.pending("love_potion")
