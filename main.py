@@ -1615,7 +1615,7 @@ class GameWindow(QMainWindow):
         start_buttons_font_size = max(int(50*(screen_width/2560)), 37)
 
         # Toggle button for game difficulty (Normal/Super Hard)
-        self.difficulty_button = QPushButton("Mode: Coward", self)
+        self.difficulty_button = QPushButton("Mode: Easy", self)
         self.difficulty_button.setAccessibleName("Change difficulty")
         self.difficulty_button.clicked.connect(self.toggle_mode)
 
