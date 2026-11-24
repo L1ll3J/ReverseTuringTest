@@ -688,6 +688,7 @@ class ItemIntegrationTests(unittest.TestCase):
         top = viewport.mapTo(self.window, QPoint(0, 0)).y()
         self.assertGreater(top, self.window.transcript_button.geometry().bottom())
         self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
+        self.app.setActiveWindow(self.window)
         page.take_buttons[0].setFocus()
         QTest.keyClick(page.take_buttons[0], Qt.Key_Tab)
         self.assertTrue(page.take_buttons[1].hasFocus())
