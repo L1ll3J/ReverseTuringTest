@@ -85,11 +85,16 @@ class ItemCataloguePanel(QWidget):
                             for word in definition.name.split()), default=0)
         # Keep whole words inside the existing card margins and focused border.
         minimum_card_width = max(180, longest_word + 2 * 12 + 2 * 2)
+        rarity_order = {rarity: index for index, rarity in enumerate(("green", "blue", "purple", "gold"))}
+        ordered_items = sorted(
+            self._definitions.items(),
+            key=lambda item: rarity_order.get(item[1].rarity, len(rarity_order)),
+        )
         for default, heading in ((True, "Default items"), (False, "Optional items")):
             rows.addWidget(self._label(heading, self._title_font))
             grid = ResponsiveItemGrid(minimum_card_width)
             self.grids.append(grid)
-            for item_id, definition in self._definitions.items():
+            for item_id, definition in ordered_items:
                 if definition.default != default:
                     continue
                 card = ItemCardButton()

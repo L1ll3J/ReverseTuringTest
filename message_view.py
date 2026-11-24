@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Callable, Iterable, Literal
 
-from PyQt5.QtCore import Qt, QSize, QTextBoundaryFinder, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QTextBlockFormat, QTextCharFormat, QTextCursor
+from PyQt5.QtCore import QEvent, QPoint, QRectF, Qt, QSize, QTextBoundaryFinder, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QPainter, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextFormat
 from PyQt5.QtWidgets import QHBoxLayout, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
 
@@ -38,6 +38,44 @@ class DisplayRecord:
             raise ValueError("Speech records require a speaker")
         if self.round_number is not None and (type(self.round_number) is not int or self.round_number < 0):
             raise ValueError("A display round must be a nonnegative integer")
+
+
+_EVENT_BLOCK = QTextFormat.UserProperty + 1
+
+
+class _EventMarkers(QWidget):
+    """Decorate native event blocks without changing document text or input."""
+
+    def __init__(self, editor):
+        # A viewport child would be translated by QTextEdit's content scrolling.
+        super().__init__(editor)
+        self.editor = editor
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setGeometry(editor.viewport().geometry())
+        editor.viewport().installEventFilter(self)
+        editor.verticalScrollBar().valueChanged.connect(self.update)
+        editor.document().documentLayout().update.connect(lambda _rect: self.update())
+        self.show()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Resize:
+            self.setGeometry(watched.geometry())
+        return super().eventFilter(watched, event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        block = self.editor.cursorForPosition(QPoint(0, 0)).block()
+        document_layout = self.editor.document().documentLayout()
+        while block.isValid():
+            position = self.editor.cursorRect(QTextCursor(block))
+            if position.top() > self.height():
+                break
+            if block.blockFormat().property(_EVENT_BLOCK):
+                height = document_layout.blockBoundingRect(block).height()
+                painter.fillRect(QRectF(position.left() - 12, position.top() - 2, 2, height + 4),
+                                 QColor("#555555"))
+            block = block.next()
 
 
 class MessageLog(QWidget):
@@ -99,6 +137,7 @@ class MessageLog(QWidget):
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
         ''')
         editor.document().setDocumentMargin(16)
+        self._event_markers = _EventMarkers(editor)
         controls = QHBoxLayout()
         controls.addStretch()
         self.latest_button = QPushButton("Latest", self)
@@ -277,6 +316,7 @@ class MessageLog(QWidget):
                 if not isinstance(supplied, QTextCharFormat):
                     raise TypeError("The name formatter must return QTextCharFormat")
                 header.merge(supplied)
+            header.setForeground(QColor(Qt.white))
             if record.speaker_id is None:
                 header.setAnchor(False)
                 header.setAnchorHref("")
@@ -338,7 +378,14 @@ class MessageLog(QWidget):
         block = QTextBlockFormat()
         block.setLineHeight(130, QTextBlockFormat.ProportionalHeight)
         block.setTopMargin(0)
-        block.setBottomMargin(9)
+        block.setBottomMargin(18)
+        if record.kind == "event":
+            block.setLeftMargin(20)
+            block.setRightMargin(12)
+            block.setTopMargin(8)
+            block.setBackground(QColor("#101010"))
+            block.setProperty(_EVENT_BLOCK, True)
+            body.setForeground(QColor("#c5c5c5"))
         if not cursor.document().isEmpty():
             cursor.insertBlock(block, body)
         else:
@@ -352,8 +399,8 @@ class MessageLog(QWidget):
             return
         if record.speaker:
             heading = QTextBlockFormat(block)
-            heading.setTopMargin(4)
-            heading.setBottomMargin(3)
+            heading.setTopMargin(16)
+            heading.setBottomMargin(6)
             cursor.setBlockFormat(heading)
             cursor.insertText(record.speaker, header)
             cursor.insertBlock(block, body)

@@ -53,5 +53,18 @@ class ConversationControlsUXTests(unittest.TestCase):
         self.window.append_speech(self.window.player_name, "I was in the kitchen.")
         self.assertTrue(self.window.conversation_stage.reply_notice.isHidden())
 
+    def test_say_is_below_the_composer_and_centered_without_growing_normal_windows(self):
+        self.open_input()
+        for width, height in ((1280, 720), (1920, 1080), (2560, 1440)):
+            with self.subTest(width=width):
+                self.window.resize(width, height)
+                self.app.processEvents()
+                self.assertEqual((self.window.width(), self.window.height()), (width, height))
+                input_bottom = self.window.interject_input.mapTo(self.window, self.window.interject_input.rect().bottomLeft()).y()
+                say_top = self.window.say_button.mapTo(self.window, QPoint(0, 0)).y()
+                say_center = self.window.say_button.mapTo(self.window, self.window.say_button.rect().center()).x()
+                self.assertGreaterEqual(say_top, input_bottom)
+                self.assertLessEqual(abs(say_center - self.window.rect().center().x()), 2)
+
 if __name__ == "__main__":
     unittest.main()

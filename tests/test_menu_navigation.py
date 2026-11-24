@@ -143,6 +143,31 @@ class MenuNavigationTests(unittest.TestCase):
             self.app.processEvents()
             self.assert_mute_icon_fits()
 
+    def test_mode_keeps_rendered_colour_through_hover_focus_and_repeated_clicks(self):
+        button = self.window.difficulty_button
+
+        def assert_tint(green):
+            self.app.processEvents()
+            image = button.grab().toImage()
+            coloured = 0
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    pixel = image.pixelColor(x, y)
+                    dominant, secondary = ((pixel.green(), pixel.red()) if green
+                                           else (pixel.red(), pixel.green()))
+                    coloured += dominant > 100 and dominant > secondary * 1.2
+            self.assertGreater(coloured, 20)
+
+        assert_tint(True)
+        QTest.mouseMove(button, button.rect().center())
+        assert_tint(True)
+        for green in (False, True, False, True):
+            QTest.mouseClick(button, Qt.LeftButton)
+            self.assertEqual(self.window.show_room_allocations, green)
+            assert_tint(green)
+            QTest.mouseMove(self.window, QPoint(0, self.window.height() - 1))
+            assert_tint(green)
+
 
 if __name__ == "__main__":
     unittest.main()

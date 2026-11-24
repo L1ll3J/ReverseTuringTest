@@ -695,8 +695,9 @@ class ConversationIntegrationTests(unittest.TestCase):
         self.window.append_speech("Hank", "Alex, answer me.", "Alex")
         self.window.run_conversation_loop()
         entry = self.window.inventory.grant("banana")
-        self.assertTrue(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
-        self.app.processEvents()
+        with patch.object(self.window.ai_runtime, "muffled_tone", return_value=0):
+            self.assertTrue(self.window.use_inventory_item(entry.instance_id, self.window.body_id("Dave")))
+            self.wait_for(lambda: not self.window.active_workers)
         self.assertTrue(self.window.player_reply_required())
         self.assertFalse(self.window.pass_button.isEnabled())
         self.assertFalse(self.window.vote_button.isEnabled())

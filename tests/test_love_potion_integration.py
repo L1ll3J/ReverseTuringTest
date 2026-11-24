@@ -189,8 +189,11 @@ class LovePotionIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.phase, "action")
         before_morning = self.window.build_character_context("Jerry")
         self.assertEqual(before_morning.current_feelings, ())
+        arrival = next(event for event in self.window.night_arrivals.events
+                       if event.body_id == self.window.body_id("Jerry"))
         self.assertEqual([record.text for record in before_morning.experiences],
-                         [PAST_INFATUATION.format(giver="Alex")])
+                         [f"At {arrival.time}, you entered the {arrival.room}.",
+                          PAST_INFATUATION.format(giver="Alex")])
         self.assertFalse(self.window._night_memories_written)
         self.window.choose_room("Kitchen")
         self.window.kill_victim("Hank")
@@ -263,8 +266,13 @@ class LovePotionIntegrationTests(unittest.TestCase):
         self.window.run_conversation_phase()
         self.apply()
         replaced = self.window.build_character_context("Dave")
-        self.assertEqual(len(replaced.experiences), 3)
-        self.assertEqual(replaced.experiences[-1].text, PAST_HANGOVER.format(giver="Alex"))
+        expected = []
+        for arrival in self.window.night_arrivals.initial:
+            if arrival.body_id == self.window.body_id("Dave"):
+                expected.append(f"At {arrival.time}, you entered the {arrival.room}.")
+        expected.extend([PAST_INFATUATION.format(giver="Alex")] * 2)
+        expected.append(PAST_HANGOVER.format(giver="Alex"))
+        self.assertEqual([record.text for record in replaced.experiences], expected)
         self.assertEqual(replaced.current_feelings[0].kind, FeelingKind.INFATUATION)
         self.assertEqual(len(replaced.current_feelings), 1)
 

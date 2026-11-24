@@ -144,6 +144,8 @@ class ItemIntegrationTests(unittest.TestCase):
         entry = self.window.inventory.grant(item_id)
         target_id = self.window.body_id(target) if target else None
         self.assertTrue(self.window.use_inventory_item(entry.instance_id, target_id))
+        if item_id == "banana":
+            self.wait_for_workers()
         return entry
 
     def vote(self, ballots):
@@ -830,7 +832,11 @@ class ItemIntegrationTests(unittest.TestCase):
         # The first real night starts at round 2 from this round-1 decision point.
         self.assertEqual(self.window.round_number, 2)
         self.assertIsNone(self.window.item_rules.speech_override(self.window.body_id("Dave")))
-        self.assertEqual(self.window.characters["Dave"]["experiences"][-1].text, MUFFLE_EXPIRED)
+        memories = self.window.characters["Dave"]["experiences"]
+        self.assertEqual(memories[-2].text, MUFFLE_EXPIRED)
+        event = next(event for event in self.window.night_arrivals.initial
+                     if event.body_id == self.window.body_id("Dave"))
+        self.assertEqual(memories[-1].text, f"At {event.time}, you entered the {event.room}.")
 
     def test_spare_paper_stacks_weights_freeze_and_resolve_once(self):
         self.conversation()
@@ -882,10 +888,13 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window.characters["Hank"]["alive"])
         self.assertEqual([(attack["target_label"], attack["room"]) for attack in self.window.night_attacks],
                          [("Dave", "Attic"), ("Hank", "Kitchen")])
-        self.assertEqual(len(self.window.characters["Jerry"]["experiences"]), 1)
-        self.assertIn("Alex kill Dave in the Attic", self.window.characters["Jerry"]["experiences"][0].text)
-        self.assertEqual(len(self.window.characters["Owen"]["experiences"]), 1)
-        self.assertIn("Alex kill Hank in the Kitchen", self.window.characters["Owen"]["experiences"][0].text)
+        for witness, victim, room in (("Jerry", "Dave", "Attic"), ("Owen", "Hank", "Kitchen")):
+            event = next(event for event in self.window.night_arrivals.events
+                         if event.body_id == self.window.body_id(witness))
+            memories = self.window.characters[witness]["experiences"]
+            self.assertEqual(len(memories), 2)
+            self.assertEqual(memories[0].text, f"At {event.time}, you entered the {room}.")
+            self.assertIn(f"Alex kill {victim} in the {room}", memories[1].text)
         self.assertEqual(self.window.profile.counters["player_kill"], 2)
         self.assertEqual(self.window.item_drafts.seen_rooms, {"Attic", "Kitchen"})
         self.assertEqual(len(self.window.inventory.entries), 1)
@@ -915,6 +924,7 @@ class ItemIntegrationTests(unittest.TestCase):
         original_player_id = self.window.body_id("Alex")
         target_id = self.window.body_id("Dave")
         self.window.append_speech("Alex", "My old statement")
+        old_statement = self.window.public_dialogue[-1]
         self.window.phase = "weapon_select"
         self.night("voodoo")
         self.window.choose_room("Attic")
@@ -925,7 +935,8 @@ class ItemIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.characters["Alex"]["alive"])
         self.assertFalse(self.window.item_rules.protection_armed)
         self.assertEqual(self.window.item_rules.affinities[0].subject_body_id, original_player_id)
-        self.assertEqual(self.window.public_dialogue[0].speaker, "Alex")
+        self.assertIn(old_statement, self.window.public_dialogue)
+        self.assertEqual(old_statement.speaker, "Alex")
         record = self.window.characters["Jerry"]["experiences"][-1].text
         self.assertEqual(record, "You (Jerry) were in the Attic. You saw Alex stab Dave.")
         self.assertTrue(self.window.resolve_death("Dave", "test-new-body").killed)
@@ -1140,6 +1151,9 @@ class ItemIntegrationTests(unittest.TestCase):
         if message is not None:
             page.message_boxes[entry.instance_id].setPlainText(message)
         page.use_buttons[entry.instance_id].click()
+        if item_id == "banana":
+            self.wait_for_workers()
+            self.window.overlay_host.close_page()
         return entry
 
     def watch_night(self, weapon_id="bare", marked="Dave"):

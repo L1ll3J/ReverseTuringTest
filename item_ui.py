@@ -434,6 +434,12 @@ class InlineItemDraftPage(QWidget):
         heading = QHBoxLayout()
         title = self._label(f"Found in the {offer.room_id}", self._title_font)
         title.setObjectName("inlineItemHeading")
+        heading_font = QFont(self._title_font)
+        if heading_font.pixelSize() > 0:
+            heading_font.setPixelSize(heading_font.pixelSize() + 4)
+        else:
+            heading_font.setPointSizeF(heading_font.pointSizeF() + 3)
+        InventoryPage._font(title, heading_font)
         heading.addWidget(title, 1)
         self.help_button = self._button("?", "inlineItemHelpToggle", "Help with room items")
         self.help_button.setCheckable(True)
@@ -445,6 +451,7 @@ class InlineItemDraftPage(QWidget):
             self._body_font,
         )
         status.setObjectName("inlineItemStatus")
+        status.setStyleSheet(status.styleSheet() + "color: #aaaaaa;")
         rows.addWidget(status)
         self.help_label = self._label(
             "Take an item to keep for a later discussion. Reroll replaces one item "
@@ -468,15 +475,17 @@ class InlineItemDraftPage(QWidget):
             take.setMinimumHeight(480)
             color = RARITY_COLORS.get(getattr(definition, "rarity", "green"), RARITY_COLORS["green"])
             selector = f"QPushButton#{take.objectName()}"
-            take.setStyleSheet(selector + " { " + take.styleSheet() + f" padding: 0; min-height: 480px; background: #0b0b0b; border: 1px solid #333; border-top: 2px solid {color}; }}"
-                               + selector + ":hover, " + selector + ":focus { border: 2px solid white; background: #161616; }"
-                               + selector + ":pressed { background: #202020; }")
+            take.setCursor(Qt.PointingHandCursor)
+            take.setStyleSheet(selector + " { " + take.styleSheet() + f" padding: 0; min-height: 480px; background: #0b0b0b; border: 2px solid #292929; border-top-color: {color}; }}"
+                               + selector + f":hover, " + selector + f":focus {{ border-color: #dedede; border-top-color: {color}; background: #161616; }}"
+                               + selector + ":pressed { background: #282828; border-color: white; }")
             contents = QVBoxLayout(take)
             contents.setContentsMargins(24, 24, 24, 20)
             contents.setSpacing(12)
             sprite = item_sprite(item_id, size=160)
             sprite.setAttribute(Qt.WA_TransparentForMouseEvents)
             sprite.setAccessibleName(definition.name)
+            sprite.setStyleSheet("background: qradialgradient(cx: 0.5, cy: 0.52, fx: 0.5, fy: 0.52, radius: 0.5, stop: 0 #202020, stop: 1 transparent); border: none;")
             contents.addWidget(sprite, 0, Qt.AlignHCenter)
             name = self._label(definition.name, self._title_font)
             name.setObjectName(f"inlineItemName_{slot}")
@@ -520,6 +529,12 @@ class InlineItemDraftPage(QWidget):
             "Leave these behind", "inlineItemLeave", "Leave the remaining items behind",
         )
         self.leave_button.clicked.connect(lambda _checked=False: on_leave(offer_id))
+        self.leave_button.setStyleSheet('''
+            QPushButton#inlineItemLeave { ''' + self.leave_button.styleSheet() + '''
+                background: transparent; border: 1px solid transparent; color: #999999; }
+            QPushButton#inlineItemLeave:hover, QPushButton#inlineItemLeave:focus { color: white; border-color: #666666; }
+            QPushButton#inlineItemLeave:pressed { background: #202020; }
+        ''')
         rows.addWidget(self.leave_button)
         rows.addStretch()
         self.scroll.setWidget(content)

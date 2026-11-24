@@ -14,11 +14,14 @@ class MassMemoryTests(unittest.TestCase):
     setUp = integration.ItemIntegrationTests.setUp
     tearDown = integration.ItemIntegrationTests.tearDown
     conversation = integration.ItemIntegrationTests.conversation
+    wait_for_workers = integration.ItemIntegrationTests.wait_for_workers
 
     def activate(self, item_id, target=None, **kwargs):
         entry = self.window.inventory.grant(item_id)
         self.assertTrue(self.window.use_inventory_item(
             entry.instance_id, self.window.body_id(target) if target else None, **kwargs))
+        if item_id == "banana":
+            self.wait_for_workers()
         return entry
 
     def test_real_item_clears_npc_context_selector_and_old_night_view_preserving_history(self):
