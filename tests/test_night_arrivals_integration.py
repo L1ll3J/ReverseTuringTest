@@ -3,6 +3,8 @@ from dataclasses import replace
 import unittest
 from unittest.mock import Mock, patch
 
+from PyQt5.QtTest import QTest
+
 from test_item_integration import ItemIntegrationTests
 import main as game
 from items import DraftState
@@ -322,6 +324,7 @@ class NightArrivalIntegrationTests(unittest.TestCase):
             self.window.resize(width, height)
             self.window.position_corner_controls()
             self.app.processEvents()
+            QTest.qWait(10)
             viewport = self.window.house_sidebar.viewport()
             control = self.window.loiter_button
             point = control.mapTo(viewport, control.rect().topLeft())

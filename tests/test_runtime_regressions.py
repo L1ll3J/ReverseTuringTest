@@ -1150,6 +1150,10 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertIn(photo.public_description(), self.window.output_area.toPlainText())
 
     def test_close_retains_running_worker_until_safe_release_and_ignores_its_result(self):
+        self.window.media_player = Mock()
+        self.window.effect_player = Mock()
+        self.window.media_player.play()
+        self.window.effect_player.play()
         self.window.phase = "conversation"
         entered, release = Event(), Event()
         success = Mock()
@@ -1168,7 +1172,17 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.wait_for(entered.is_set)
                 worker = self.window.active_workers[0]
                 self.app.setQuitOnLastWindowClosed(True)
+                music_stops = self.window.media_player.stop.call_count
+                effect_stops = self.window.effect_player.stop.call_count
+                music_plays = self.window.media_player.play.call_count
+                effect_plays = self.window.effect_player.play.call_count
                 self.window.close()
+                self.assertEqual(self.window.media_player.stop.call_count, music_stops + 1)
+                self.assertEqual(self.window.effect_player.stop.call_count, effect_stops + 1)
+                self.window.loop_music(game.QMediaPlayer.EndOfMedia)
+                self.window.play_sound_effect("sounds/start_button.mp3")
+                self.assertEqual(self.window.media_player.play.call_count, music_plays)
+                self.assertEqual(self.window.effect_player.play.call_count, effect_plays)
                 self.assertEqual(self.window.phase, "closed")
                 self.assertIn(worker, self.app._ai_workers)
                 quit_app.assert_not_called()

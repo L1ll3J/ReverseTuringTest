@@ -1523,6 +1523,10 @@ class GameWindow(QMainWindow):
         if not restarting:
             self.save_player_name_preference()
         self.game_over = True
+        self.music_enabled = False
+        self.sfx_enabled = False
+        self.media_player.stop()
+        self.effect_player.stop()
         self.cancel_item_offer()
         self.dictation_bindings.close()
         self.overlay_host.cancel_owner()
@@ -2853,7 +2857,7 @@ class GameWindow(QMainWindow):
         if not getattr(self, "weapon_action_panel", None):
             return
         # Fit the composition to the proportional artwork instead of the monitor width.
-        self.house_sidebar.setFixedWidth(max(260, min(320, int(self.width() * 0.16))))
+        self.house_sidebar.setFixedWidth(max(280, min(320, int(self.width() * 0.16))))
         self.house_timeline.setFixedWidth(max(200, min(420, int(self.width() * 0.20))))
         height = max(1, self.room_buttons_widget.contentsRect().height() - 16)
         art_width = int(height * ARTWORK_SIZE[0] / ARTWORK_SIZE[1])
