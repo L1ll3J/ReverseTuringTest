@@ -167,10 +167,10 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertFalse(self.window.menu_widget.isVisible())
         self.assertFalse(self.window.play_tab_button.isVisible())
         self.assertFalse(self.window.item_catalogue.isVisible())
-        goals = [label.text() for label in self.window.weapon_picker_widget.findChildren(QLabel)
-                 if "\n\nLocked:" in label.text()]
         knife = next(weapon for weapon in self.window.weapons if weapon["id"] == "knife")
-        self.assertIn(knife["desc"] + "\n\nLocked: Kill your first victim.", goals)
+        self.window.inspect_weapon(knife)
+        self.assertEqual(self.window.weapon_details.description.text(), knife["desc"])
+        self.assertEqual(self.window.weapon_details.goal.text(), "Unlock: Kill your first victim.")
         bare = next(weapon for weapon in self.window.weapons if weapon["id"] == "bare")
         self.window.select_weapon_and_start(bare)
         self.assertEqual(self.window.phase, "action")
@@ -588,14 +588,14 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertIsInstance(scroll, QScrollArea)
         self.assertTrue(scroll.isVisible())
         self.assertLessEqual(scroll.width(), self.window.width())
-        self.assertEqual(self.window.weapon_grid.count(), len(self.window.weapons))
+        self.assertEqual(len(self.window.weapon_cards), len(self.window.weapons))
+        self.assertEqual(set(self.window.weapon_group_headings), {"Available", "Locked"})
         self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
-        for index in range(self.window.weapon_grid.count()):
-            card = self.window.weapon_grid.itemAt(index).widget()
-            scroll.ensureWidgetVisible(card)
+        for card in self.window.weapon_cards:
+            self.window.weapon_grid_scroll.ensureWidgetVisible(card)
             self.app.processEvents()
-            self.assertTrue(scroll.viewport().rect().contains(
-                card.rect().translated(card.mapTo(scroll.viewport(), card.rect().topLeft()))
+            self.assertTrue(self.window.weapon_grid_scroll.viewport().rect().contains(
+                card.rect().translated(card.mapTo(self.window.weapon_grid_scroll.viewport(), card.rect().topLeft()))
             ))
 
     def test_source_resources_load_outside_working_directory(self):
@@ -797,85 +797,41 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.assertEqual(self.window.current_conversation, ["Alex: Original"])
                 self.assertEqual(self.window.most_recent_messageS, ["Alex: Original"])
 
-    def test_restart_rejects_queued_old_results_and_creates_one_new_window(self):
-        self.window.player_name_input.setText("Literal input before possession")
-        self.window.phase = "conversation"
-        self.window.current_conversation = ["Alex: Original"]
-        self.window.most_recent_messageS = ["Alex: Original"]
-        self.window.NPCs = ["Jerry", "Dave", "Hank"]
-        previous_quit_setting = self.app.quitOnLastWindowClosed()
-        had_main_window = hasattr(self.app, "_main_window")
-        previous_main_window = getattr(self.app, "_main_window", None)
-        original_init = game.GameWindow.__init__
-        created = []
-        delivered = []
-
-        def record_init(window):
-            created.append(window)
-            original_init(window)
-
-        def deliver(callback, *args):
-            delivered.append(callback.__name__)
-            callback(*args)
-
-        proposal = game.SpeechProposal(None, "Late reply")
-        snapshot = (self.window.public_state(), (), ())
-        callbacks = (
-            (self.window.handle_single_response, ("Jerry", proposal)),
-            (self.window.handle_multiple_responses, ({"Jerry": proposal}, snapshot)),
-            (self.window.handle_best_response, (proposal, "Jerry")),
-        )
-        entered, release = Event(), Event()
-        success = Mock()
-
-        def operation():
-            entered.set()
-            if not release.wait(2):
-                raise AssertionError("Old request was not released")
-            return "late result"
-
-        try:
-            self.window.start_ai_request(operation, success, "Waiting for old request")
-            self.wait_for(entered.is_set)
-            with patch.object(game.GameWindow, "__init__", new=record_init), patch.object(
-                game.QThread, "start"
-            ) as start_worker, patch.object(self.window, "run_conversation_loop") as resume:
-                for delay, (callback, args) in enumerate(callbacks, start=5):
-                    QTimer.singleShot(delay, lambda callback=callback, args=args: deliver(callback, *args))
-                self.window.restart_game()
-                self.window.restart_game()
-                QTimer.singleShot(10, release.set)
-                QTest.qWait(80)
-                self.wait_for(lambda: not self.window.active_workers)
-                self.assertEqual(len(created), 1)
-                self.assertIs(self.app._main_window, created[0])
-                self.assertTrue(created[0].isVisible())
-                self.assertEqual(created[0].phase, "start")
-                self.assertEqual(created[0].player_name_input.text(), "Literal input before possession")
-                self.assertEqual(len(delivered), 3)
-                self.assertEqual(self.window.phase, "restarting")
-                self.assertTrue(self.window.game_over)
-                self.assertEqual(self.window.current_conversation, ["Alex: Original"])
-                self.assertEqual(self.window.most_recent_messageS, ["Alex: Original"])
-                start_worker.assert_not_called()
-                resume.assert_not_called()
-                success.assert_not_called()
-        finally:
-            release.set()
-            for worker in list(self.window.active_workers):
-                worker.wait(3000)
-            self.app.processEvents()
-            self.app.setQuitOnLastWindowClosed(False)
-            for window in created:
-                window.close()
-                window.deleteLater()
-            self.app.processEvents()
-            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-            if had_main_window:
-                self.app._main_window = previous_main_window
-            elif hasattr(self.app, "_main_window"):
-                del self.app._main_window
-            self.app.setQuitOnLastWindowClosed(previous_quit_setting)
+    def test_restart_rejects_old_success_and_failure_even_in_same_phase(self):
+        for fails in (False, True):
+            with self.subTest(fails=fails):
+                self.window.phase = "conversation"
+                self.window.game_over = False
+                entered, release = Event(), Event()
+                success = Mock()
+                old_run = self.window.run_id
+                def operation():
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("Old request was not released")
+                    if fails:
+                        raise game.AIRequestError("Old failure")
+                    return "late result"
+                try:
+                    self.window.start_ai_request(operation, success, "Waiting")
+                    self.wait_for(entered.is_set)
+                    worker = self.window.active_workers[0]
+                    self.window.restart_game()
+                    self.assertNotEqual(self.window.run_id, old_run)
+                    self.assertIn(worker, self.app._ai_workers)
+                    self.window.phase = "conversation"
+                    self.window.secondary_output_area.setText("New run status")
+                    release.set()
+                    self.wait_for(lambda: not self.window.active_workers)
+                    success.assert_not_called()
+                    self.assertEqual(self.window.secondary_output_area.text(), "New run status")
+                    self.assertIsNone(self.window.retry_action)
+                    self.assertNotIn(worker, self.app._ai_workers)
+                finally:
+                    release.set()
+                    for worker in list(self.window.active_workers):
+                        worker.wait(3000)
+                    self.app.processEvents()
 
     def test_parallel_private_drafts_commit_only_the_selected_reply(self):
         self.window.phase = "conversation"
@@ -1194,6 +1150,10 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertIn(photo.public_description(), self.window.output_area.toPlainText())
 
     def test_close_retains_running_worker_until_safe_release_and_ignores_its_result(self):
+        self.window.media_player = Mock()
+        self.window.effect_player = Mock()
+        self.window.media_player.play()
+        self.window.effect_player.play()
         self.window.phase = "conversation"
         entered, release = Event(), Event()
         success = Mock()
@@ -1212,7 +1172,17 @@ class RuntimeRegressionTests(unittest.TestCase):
                 self.wait_for(entered.is_set)
                 worker = self.window.active_workers[0]
                 self.app.setQuitOnLastWindowClosed(True)
+                music_stops = self.window.media_player.stop.call_count
+                effect_stops = self.window.effect_player.stop.call_count
+                music_plays = self.window.media_player.play.call_count
+                effect_plays = self.window.effect_player.play.call_count
                 self.window.close()
+                self.assertEqual(self.window.media_player.stop.call_count, music_stops + 1)
+                self.assertEqual(self.window.effect_player.stop.call_count, effect_stops + 1)
+                self.window.loop_music(game.QMediaPlayer.EndOfMedia)
+                self.window.play_sound_effect("sounds/start_button.mp3")
+                self.assertEqual(self.window.media_player.play.call_count, music_plays)
+                self.assertEqual(self.window.effect_player.play.call_count, effect_plays)
                 self.assertEqual(self.window.phase, "closed")
                 self.assertIn(worker, self.app._ai_workers)
                 quit_app.assert_not_called()

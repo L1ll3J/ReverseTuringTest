@@ -341,6 +341,23 @@ class OverlayHost(QDialog):
             return
         self.open_page(page, title=queued.title, help_text=queued.help_text)
 
+    def reset_session(self):
+        """Retire run-owned pages and callbacks while keeping this host usable."""
+        if self._cancelled:
+            return
+        self._generation += 1
+        self._queue.clear()
+        self._queue_timer.stop()
+        self._focus_timer.stop()
+        self._return_focus = None
+        # Suppress focus restoration and queue scheduling during retirement.
+        self._draining = True
+        try:
+            if self._current_page is not None or self.isVisible():
+                self.done(QDialog.Rejected)
+        finally:
+            self._draining = False
+
     def cancel_owner(self):
         if self._cancelled:
             return

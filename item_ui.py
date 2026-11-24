@@ -1,10 +1,10 @@
-﻿"""Small, state-driven inventory and room-offer widgets."""
+"""Small, state-driven inventory and room-offer widgets."""
 
 from pathlib import Path
 import sys
 
-from PyQt5.QtCore import QPoint, QSize, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QPixmap, QPolygon
+from PyQt5.QtCore import QEvent, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QFontDatabase, QImage, QPainter, QPen, QPixmap, QPolygon
 from PyQt5.QtWidgets import (
     QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
@@ -16,18 +16,42 @@ _ITEM_SPRITE_NAMES = {"soul": "soul_transfusion"}
 
 def item_sprite(item_id, parent=None, *, icon_root=None, size=64):
     """Return a bounded sprite label using source or packaged resources."""
-    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    directory = Path(icon_root) if icon_root is not None else root / "icons" / "items"
     label = QLabel(parent)
     label.setObjectName(f"itemIcon_{item_id}")
     label.setTextFormat(Qt.PlainText)
     label.setFixedSize(size, size)
     label.setAlignment(Qt.AlignCenter)
-    sprite_name = _ITEM_SPRITE_NAMES.get(item_id, item_id)
-    pixmap = QPixmap(str(directory / f"{sprite_name}.png"))
+    pixmap = item_pixmap(item_id, icon_root=icon_root)
     if not pixmap.isNull():
         label.setPixmap(pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.FastTransformation))
     return label
+
+
+def item_pixmap(item_id, *, icon_root=None):
+    """Load source artwork once at its native resolution for caller-owned caches."""
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    directory = Path(icon_root) if icon_root is not None else root / "icons" / "items"
+    sprite_name = _ITEM_SPRITE_NAMES.get(item_id, item_id)
+    return QPixmap(str(directory / f"{sprite_name}.png"))
+
+
+def dimmed_sprite(pixmap):
+    """Return a grayscale, dimmed pixmap while preserving its original alpha."""
+    if pixmap.isNull():
+        return QPixmap()
+    original = pixmap.toImage()
+    image = original.convertToFormat(QImage.Format_Grayscale8).convertToFormat(QImage.Format_ARGB32)
+    painter = QPainter(image)
+    painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+    painter.drawImage(0, 0, original)
+    painter.end()
+    result = QPixmap(pixmap.size())
+    result.fill(Qt.transparent)
+    painter = QPainter(result)
+    painter.setOpacity(.55)
+    painter.drawImage(0, 0, image)
+    painter.end()
+    return result
 
 
 RARITY_COLORS = {"green": "#91bc91", "blue": "#9dbfe5", "purple": "#c5a5dc", "gold": "#dfc383"}
@@ -64,6 +88,51 @@ class ItemCardButton(QPushButton):
     def focusInEvent(self, event):
         self.inspected.emit()
         super().focusInEvent(event)
+
+
+class CollectionTileButton(ItemCardButton):
+    """Keep unavailable collection entries inspectable with a quiet lock mark."""
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.property("locked"):
+            painter = QPainter(self)
+            painter.setPen(QPen(QColor("#666666"), 1))
+            x, y = self.width() - 18, self.height() - 17
+            painter.drawRect(x, y + 4, 8, 7)
+            painter.drawArc(x + 1, y, 6, 9, 0, 180 * 16)
+
+
+class RewardCardButton(ItemCardButton):
+    """Native reward activation decorated with progressively richer pixel frames."""
+    def __init__(self, rarity, parent=None):
+        super().__init__(parent)
+        self.rarity = rarity
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.rarity == "green":
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        colour = QColor(RARITY_COLORS[self.rarity])
+        painter.setPen(QPen(colour, 2))
+        left, right, top, bottom = 7, self.width() - 8, 7, self.height() - 8
+        length = 22 if self.rarity == "blue" else 30
+        for x, y, dx, dy in ((left, top, 1, 1), (right, top, -1, 1),
+                             (left, bottom, 1, -1), (right, bottom, -1, -1)):
+            painter.drawLine(x, y, x + length * dx, y)
+            painter.drawLine(x, y, x, y + length * dy)
+        if self.rarity in ("purple", "gold"):
+            center = self.width() // 2
+            painter.setBrush(QColor("#0b0b0b"))
+            painter.drawPolygon(QPolygon((QPoint(center - 10, 8), QPoint(center, 2),
+                                          QPoint(center + 10, 8), QPoint(center, 14))))
+        if self.rarity == "gold":
+            painter.drawRect(4, 4, self.width() - 9, self.height() - 9)
+            for side in (-1, 1):
+                painter.drawPolyline(QPolygon((QPoint(center + 16 * side, 8),
+                    QPoint(center + 28 * side, 8), QPoint(center + 34 * side, 3),
+                    QPoint(center + 45 * side, 3), QPoint(center + 51 * side, 8))))
 
 
 class ResponsiveItemGrid(QWidget):
@@ -467,7 +536,7 @@ class InlineItemDraftPage(QWidget):
         rows.addWidget(self.offer_grid)
         for slot, item_id in enumerate(offer.options):
             definition = definitions[item_id]
-            take = ItemCardButton()
+            take = RewardCardButton(getattr(definition, "rarity", "green"))
             InventoryPage._font(take, self._title_font)
             take.setObjectName(f"inlineItemTake_{slot}")
             take.setAccessibleName(f"Take {definition.name}")
@@ -492,19 +561,22 @@ class InlineItemDraftPage(QWidget):
             name.setStyleSheet(name.styleSheet() + f"color: {color};")
             name.setAlignment(Qt.AlignCenter)
             contents.addWidget(name)
+            contents.addStretch(1)
             detail = self._label(definition.description, self._body_font)
             detail.setObjectName(f"inlineItemDescription_{slot}")
+            detail.setAlignment(Qt.AlignCenter)
             contents.addWidget(detail)
+            contents.addStretch(2)
             if definition.flavour:
                 flavour = self._label(definition.flavour, self._body_font)
                 flavour.setObjectName(f"inlineItemFlavour_{slot}")
+                flavour.setAlignment(Qt.AlignCenter)
                 flavour.setStyleSheet(flavour.styleSheet() + "color: #999999;")
                 contents.addWidget(flavour)
             for label in take.findChildren(QLabel):
                 label.setAttribute(Qt.WA_TransparentForMouseEvents)
                 label.setTextInteractionFlags(Qt.NoTextInteraction)
                 label.setFocusPolicy(Qt.NoFocus)
-            contents.addStretch()
             take.clicked.connect(lambda _checked=False, index=slot: on_take(offer_id, index))
             self.take_buttons[slot] = take
             reroll = self._button("\u21bb", f"inlineItemReroll_{slot}", f"Reroll {definition.name}")
@@ -523,7 +595,7 @@ class InlineItemDraftPage(QWidget):
                 reroll.setToolTip(f"Reroll {definition.name}")
             reroll.clicked.connect(lambda _checked=False, index=slot: on_reroll(offer_id, index))
             self.reroll_buttons[slot] = reroll
-            contents.addWidget(reroll, 0, Qt.AlignRight)
+            contents.addWidget(reroll, 0, Qt.AlignHCenter)
             self.offer_grid.add_card(take)
         self.leave_button = self._button(
             "Leave these behind", "inlineItemLeave", "Leave the remaining items behind",
@@ -539,6 +611,37 @@ class InlineItemDraftPage(QWidget):
         rows.addStretch()
         self.scroll.setWidget(content)
         layout.addWidget(self.scroll)
+        self._fitting_cards = False
+        self.scroll.viewport().installEventFilter(self)
+        self.help_button.toggled.connect(lambda _checked: self._schedule_card_fit())
+        self._schedule_card_fit()
+
+    def eventFilter(self, watched, event):
+        if watched is self.scroll.viewport() and event.type() == QEvent.Resize:
+            self._fit_card_heights()
+        return super().eventFilter(watched, event)
+
+    def _schedule_card_fit(self):
+        QTimer.singleShot(0, self._fit_card_heights)
+
+    def _fit_card_heights(self):
+        if self._fitting_cards:
+            return
+        self._fitting_cards = True
+        try:
+            overhead = self.leave_button.sizeHint().height() + 110
+            if self.help_label.isVisible():
+                overhead += self.help_label.height() + 12
+            target = max(480, min(1100, self.scroll.viewport().height() - overhead))
+            for card in self.take_buttons.values():
+                if card.minimumHeight() != target:
+                    card.setMinimumHeight(target)
+            content = self.scroll.widget()
+            content.layout().invalidate()
+            content.layout().activate()
+            content.resize(self.scroll.viewport().size().expandedTo(content.minimumSizeHint()))
+        finally:
+            self._fitting_cards = False
 
     def sizeHint(self):
         # A scroll area's small natural hint must not collapse the whole reward.

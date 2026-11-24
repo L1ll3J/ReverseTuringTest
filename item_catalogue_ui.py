@@ -1,11 +1,85 @@
-"""Main-menu item catalogue driven by the caller's progression snapshot."""
+"""Compact collection tiles with a stable, inspectable detail pane."""
 
-from PyQt5.QtCore import QRect, QSize, Qt
-from PyQt5.QtGui import QFont, QFontMetrics, QImage, QPainter, QPixmap
-from PyQt5.QtWidgets import QFrame, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
+from PyQt5.QtCore import QSize, Qt
+from PyQt5.QtGui import QFont, QFontMetrics, QPixmap
+from PyQt5.QtWidgets import (
+    QBoxLayout, QCheckBox, QFrame, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+)
 
-from item_ui import InventoryPage, ItemCardButton, ITEM_SCROLLBAR_STYLE, RARITY_COLORS, ResponsiveItemGrid, item_sprite
+from item_ui import InventoryPage, CollectionTileButton, ITEM_SCROLLBAR_STYLE, RARITY_COLORS, ResponsiveItemGrid, dimmed_sprite, item_pixmap, item_sprite
 from progression import ProfileError
+
+
+class CatalogueDetails(QFrame):
+    """Literal descriptive content shared by item and weapon browsers."""
+
+    def __init__(self, body_font, title_font, parent=None):
+        super().__init__(parent)
+        self.setObjectName("catalogueDetails")
+        self.setStyleSheet('QFrame#catalogueDetails { background:#0b0b0b; border:none; } QFrame#catalogueDetails QLabel { color:#dedede; background:transparent; border:none; }')
+        self._body_font = QFont(body_font)
+        self._title_font = QFont(title_font)
+        self.column = QVBoxLayout(self)
+        self.column.setContentsMargins(22, 24, 22, 24)
+        self.column.setSpacing(18)
+        self.icon = QLabel()
+        self.icon.setObjectName("catalogueDetailIcon")
+        self.icon.setFixedSize(152, 152)
+        self.icon.setAlignment(Qt.AlignCenter)
+        self.icon.setTextFormat(Qt.PlainText)
+        self.icon.setWordWrap(True)
+        self.icon.setStyleSheet("background:transparent; border:none;")
+        InventoryPage._font(self.icon, self._body_font)
+        self.column.addWidget(self.icon, 0, Qt.AlignHCenter)
+        self.name = self._label("", self._title_font)
+        self.status = self._label("")
+        self.description = self._label("")
+        self.flavour = self._label("")
+        self.flavour.setStyleSheet(self.flavour.styleSheet() + "color:#999999;")
+        self.goal = self._label("")
+        for label in (self.name, self.status, self.description, self.flavour, self.goal):
+            self.column.addWidget(label)
+        self.column.addStretch()
+
+    def _label(self, text, font=None):
+        label = QLabel(text)
+        label.setTextFormat(Qt.PlainText)
+        label.setWordWrap(True)
+        label.setContentsMargins(2, 1, 2, 1)
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        InventoryPage._font(label, font or self._body_font)
+        return label
+
+    def show_entry(self, *, name, description, flavour="", status="", goal="", pixmap=None):
+        self.name.setText(name)
+        self.status.setText(status)
+        self.description.setText(description)
+        self.flavour.setText(flavour)
+        self.flavour.setVisible(bool(flavour))
+        self.goal.setText(goal)
+        self.goal.setVisible(bool(goal))
+        if pixmap is not None and not pixmap.isNull():
+            self.icon.setPixmap(pixmap.scaled(152, 152, Qt.KeepAspectRatio, Qt.FastTransformation))
+        else:
+            self.icon.clear()
+        self.updateGeometry()
+
+
+class CatalogueDetailsScroll(QScrollArea):
+    """Prefer a stable inspector height without imposing a window minimum."""
+
+    def sizeHint(self):
+        return QSize(380, 720)
+
+
+def details_scroll(details):
+    scroll = CatalogueDetailsScroll()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    scroll.setStyleSheet(ITEM_SCROLLBAR_STYLE + 'QScrollArea { background:#0b0b0b; border:none; }')
+    scroll.setWidget(details)
+    return scroll
 
 
 class ItemCataloguePanel(QWidget):
@@ -15,19 +89,24 @@ class ItemCataloguePanel(QWidget):
         self.setObjectName("itemCataloguePanel")
         self.setFont(body_font)
         self.setStyleSheet('''
-            QWidget#itemCataloguePanel { background: #000000; color: #dedede; }
-            QWidget#itemCataloguePanel QLabel { color: #dedede; background: transparent; border: none; }
-            QWidget#itemCataloguePanel QScrollArea { border: none; background: transparent; }
-            QWidget#itemCatalogueContents { background: #000000; }
+            QWidget#itemCataloguePanel { background:#000000; color:#dedede; }
+            QWidget#itemCataloguePanel QLabel { color:#dedede; background:transparent; border:none; }
+            QWidget#itemCataloguePanel QScrollArea { border:none; background:transparent; }
+            QWidget#itemCatalogueContents { background:#000000; }
             QWidget#itemCataloguePanel QPushButton {
-                background: #0b0b0b; color: #dedede; border: 1px solid #333; padding: 4px;
+                background:#0b0b0b; color:#dedede; border:1px solid transparent;
+                border-bottom-color:#333333; padding:4px;
             }
             QWidget#itemCataloguePanel QPushButton:hover,
-            QWidget#itemCataloguePanel QPushButton:focus { background: #161616; border: 2px solid white; }
-            QWidget#itemCataloguePanel QPushButton[locked="true"] { background: #070707; border-color: #222; }
-            QWidget#itemCataloguePanel QPushButton[locked="true"] QLabel { color: #777; }
-            QWidget#itemCataloguePanel QLabel#itemCatalogueError { color: #ffb3a9; }
-            QFrame#itemCatalogueDetails { background: #0b0b0b; border: 1px solid #333; }
+            QWidget#itemCataloguePanel QPushButton:focus { background:#141414; border-color:#dddddd; }
+            QWidget#itemCataloguePanel QPushButton[locked="true"] {
+                background:#070707; border-color:transparent; border-bottom-color:#222222;
+            }
+            QWidget#itemCataloguePanel QPushButton[locked="true"]:focus { border-color:#666666; }
+            QWidget#itemCataloguePanel QLabel#itemCatalogueError { color:#ffb3a9; }
+            QWidget#itemCataloguePanel QCheckBox { color:#dddddd; background:transparent; spacing:10px; }
+            QWidget#itemCataloguePanel QCheckBox::indicator { width:16px; height:16px; border:1px solid #777777; background:#111111; }
+            QWidget#itemCataloguePanel QCheckBox::indicator:checked { background:#dddddd; border-color:#dddddd; }
         ''')
         self._definitions = dict(definitions)
         self._unlock_goals = dict(unlock_goals)
@@ -36,132 +115,115 @@ class ItemCataloguePanel(QWidget):
         self._title_font = QFont(title_font or body_font)
         if title_font is None:
             self._title_font.setBold(True)
-        self._icon_root = icon_root
         self._profile = None
         self._inspected = None
+        self._sprites = {}
+        self._dimmed_sprites = {}
+        self._detail_sprites = {}
+        self._pool_toggle = None
         self.checkboxes = {}
         self.cards = {}
-        self._sprites = {}
-        layout = QVBoxLayout(self)
         self.setAccessibleDescription(
-            "Click unlocked optional items to enable or disable them. "
-            "Hover over an item or focus it with Tab to inspect its effect and unlock goal."
+            "Hover over an item or focus it with Tab to inspect its effect and unlock goal. "
+            "Click unlocked optional items or use their pool control to enable or disable them."
         )
-        self.details = QFrame()
-        self.details.setObjectName("itemCatalogueDetails")
-        detail_layout = QVBoxLayout(self.details)
-        detail_layout.setContentsMargins(12, 10, 12, 10)
-        self.detail_name = self._label("", self._title_font)
-        self.detail_description = self._label("")
-        self.detail_flavour = self._label("")
-        self.detail_flavour.setStyleSheet(self.detail_flavour.styleSheet() + "color: #999999;")
-        self.detail_goal = self._label("")
-        for label in (self.detail_name, self.detail_description, self.detail_flavour, self.detail_goal):
-            detail_layout.addWidget(label)
-        self.detail_flavour.hide()
-        self.detail_goal.hide()
-        detail_layout.addStretch()
-        layout.addWidget(self.details)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
         self.error_label = self._label("")
         self.error_label.setObjectName("itemCatalogueError")
         self.error_label.hide()
-        layout.addWidget(self.error_label)
+        outer.addWidget(self.error_label)
+        self.browser = QBoxLayout(QBoxLayout.LeftToRight)
+        self.browser.setContentsMargins(0, 0, 0, 0)
+        self.browser.setSpacing(24)
+        outer.addLayout(self.browser, 1)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setStyleSheet(ITEM_SCROLLBAR_STYLE)
-        layout.addWidget(self.scroll, 1)
+        self.browser.addWidget(self.scroll, 1)
+        self.details = CatalogueDetails(self._body_font, self._title_font)
+        self.detail_name = self.details.name
+        self.detail_description = self.details.description
+        self.detail_flavour = self.details.flavour
+        self.detail_goal = self.details.goal
+        self.detail_status = self.details.status
+        self.details_scroll = details_scroll(self.details)
+        self.browser.addWidget(self.details_scroll, 0, Qt.AlignTop)
         content = QWidget()
         content.setObjectName("itemCatalogueContents")
         rows = QVBoxLayout(content)
         rows.setContentsMargins(0, 0, 0, 0)
-        rows.setSpacing(12)
+        rows.setSpacing(14)
+        metrics = QFontMetrics(self._title_font)
+        longest = max((max(metrics.horizontalAdvance(word), metrics.boundingRect(word).width())
+                       for item in self._definitions.values() for word in item.name.split()), default=0)
         self.grids = []
-        title_metrics = QFontMetrics(self._title_font)
-        longest_word = max((max(title_metrics.horizontalAdvance(word),
-                                title_metrics.boundingRect(word).width())
-                            for definition in self._definitions.values()
-                            for word in definition.name.split()), default=0)
-        # Keep whole words inside the existing card margins and focused border.
-        minimum_card_width = max(180, longest_word + 2 * 12 + 2 * 2)
-        rarity_order = {rarity: index for index, rarity in enumerate(("green", "blue", "purple", "gold"))}
-        ordered_items = sorted(
-            self._definitions.items(),
-            key=lambda item: rarity_order.get(item[1].rarity, len(rarity_order)),
-        )
-        for default, heading in ((True, "Default items"), (False, "Optional items")):
-            rows.addWidget(self._label(heading, self._title_font))
-            grid = ResponsiveItemGrid(minimum_card_width)
+        self.group_headings = []
+        for heading in ("Available", "Locked"):
+            title = self._label(heading, self._title_font)
+            self.group_headings.append(title)
+            rows.addWidget(title)
+            grid = ResponsiveItemGrid(max(180, longest + 28))
             self.grids.append(grid)
-            for item_id, definition in ordered_items:
-                if definition.default != default:
-                    continue
-                card = ItemCardButton()
-                card.setObjectName(f"itemCard_{item_id}")
-                card.setAccessibleName(definition.name)
-                column = QVBoxLayout(card)
-                column.setContentsMargins(12, 12, 12, 12)
-                column.setSpacing(8)
-                icon = item_sprite(item_id, icon_root=icon_root)
-                InventoryPage._font(icon, self._body_font)
-                icon.setAccessibleName(definition.name)
-                self._sprites[item_id] = QPixmap(icon.pixmap()) if icon.pixmap() else None
-                column.addWidget(icon, 0, Qt.AlignHCenter)
-                name = self._label(definition.name, self._title_font)
-                name.setObjectName(f"itemName_{item_id}")
-                name.setAlignment(Qt.AlignCenter)
-                column.addWidget(name)
-                status = self._label("")
-                status.setObjectName(f"itemStatus_{item_id}")
-                status.setAlignment(Qt.AlignCenter)
-                column.addWidget(status)
-                for label in card.findChildren(QLabel):
-                    label.setAttribute(Qt.WA_TransparentForMouseEvents)
-                    label.setTextInteractionFlags(Qt.NoTextInteraction)
-                    label.setFocusPolicy(Qt.NoFocus)
-                card.inspected.connect(lambda key=item_id: self._inspect(key))
-                card.toggled.connect(lambda enabled, key=item_id: self._toggle(key, enabled))
-                self.cards[item_id] = card
-                grid.add_card(card)
             rows.addWidget(grid)
         rows.addStretch()
         self.scroll.setWidget(content)
+        for item_id, definition in self._definitions.items():
+            card = CollectionTileButton()
+            card.setObjectName(f"itemCard_{item_id}")
+            card.setAccessibleName(definition.name)
+            column = QVBoxLayout(card)
+            column.setContentsMargins(12, 12, 12, 12)
+            column.setSpacing(10)
+            icon = item_sprite(item_id, icon_root=icon_root)
+            InventoryPage._font(icon, self._body_font)
+            icon.setAccessibleName(definition.name)
+            self._sprites[item_id] = QPixmap(icon.pixmap()) if icon.pixmap() else None
+            self._detail_sprites[item_id] = item_pixmap(item_id, icon_root=icon_root)
+            column.addWidget(icon, 0, Qt.AlignHCenter)
+            name = self._label(definition.name, self._title_font)
+            name.setObjectName(f"itemName_{item_id}")
+            name.setAlignment(Qt.AlignCenter)
+            column.addWidget(name)
+            status = self._label("")
+            status.setObjectName(f"itemStatus_{item_id}")
+            status.hide()
+            column.addWidget(status)
+            for child in card.findChildren(QLabel):
+                child.setAttribute(Qt.WA_TransparentForMouseEvents)
+                child.setTextInteractionFlags(Qt.NoTextInteraction)
+                child.setFocusPolicy(Qt.NoFocus)
+            card.inspected.connect(lambda key=item_id: self._inspect(key))
+            card.clicked.connect(lambda _checked=False, key=item_id: self._inspect(key))
+            card.toggled.connect(lambda enabled, key=item_id: self._toggle(key, enabled))
+            self.cards[item_id] = card
         self.refresh(profile)
-        self._size_details()
         if self._definitions:
             self._inspect(next(iter(self._definitions)))
+        self._size_details()
 
     def sizeHint(self):
-        natural = super().sizeHint()
-        return QSize(1440, natural.height())
+        return QSize(1780, super().sizeHint().height())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._size_details()
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._size_details()
-
     def _size_details(self):
-        """Reserve the tallest detail at this width so inspection cannot move cards."""
-        if not self.isVisible():
-            return
-        width = max(1, self.width() - 50)
-        title_metrics = QFontMetrics(self._title_font)
-        body_metrics = QFontMetrics(self._body_font)
-        heights = []
-        for item_id, definition in self._definitions.items():
-            fields = [(definition.name, title_metrics), (definition.description, body_metrics)]
-            if definition.flavour:
-                fields.append((definition.flavour, body_metrics))
-            if not definition.default:
-                fields.append(("Unlock: " + self._unlock_goals.get(item_id, ""), body_metrics))
-            height = sum(metrics.boundingRect(QRect(0, 0, width, 10000), Qt.TextWordWrap, text).height()
-                         for text, metrics in fields)
-            heights.append(height + 24 + self.details.layout().spacing() * (len(fields) - 1))
-        self.details.setFixedHeight(max(heights, default=0))
+        stacked = self.width() < 680
+        self.details.icon.setVisible(not stacked)
+        self.browser.setDirection(QBoxLayout.TopToBottom if stacked else QBoxLayout.LeftToRight)
+        self.details_scroll.setMinimumWidth(0)
+        self.details_scroll.setMaximumWidth(16777215 if stacked else max(264, min(380, self.width() // 3)))
+        if stacked:
+            self.details_scroll.setMinimumHeight(180)
+            self.details_scroll.setMaximumHeight(max(180, min(280, self.height() // 2)))
+        else:
+            self.details_scroll.setMinimumHeight(0)
+            self.details_scroll.setMaximumHeight(720)
+            self.details_scroll.setFixedWidth(max(264, min(380, self.width() // 3)))
 
     @property
     def profile(self):
@@ -176,19 +238,46 @@ class ItemCataloguePanel(QWidget):
         return label
 
     def _inspect(self, item_id):
-        self.details.show()
         self._inspected = item_id
         definition = self._definitions[item_id]
-        self.detail_name.setText(definition.name)
-        self.detail_description.setText(definition.description)
-        self.detail_flavour.setText(definition.flavour)
-        self.detail_flavour.setVisible(bool(definition.flavour))
-        locked = not definition.default and item_id not in self._profile.unlocked
-        self.detail_goal.setText("Unlock: " + self._unlock_goals.get(item_id, "") if locked else "")
-        self.detail_goal.setVisible(locked)
+        unlocked = definition.default or item_id in self._profile.unlocked
+        status = "Default" if definition.default else ("Enabled" if item_id not in self._profile.disabled_items else "Disabled") if unlocked else "Locked"
+        self.details.show_entry(
+            name=definition.name, description=definition.description, flavour=definition.flavour,
+            status=f"{definition.rarity.capitalize()} / {status}",
+            goal="Unlock: " + self._unlock_goals.get(item_id, "") if not unlocked else "",
+            pixmap=self._detail_sprites[item_id],
+        )
+        if unlocked and not definition.default and self._pool_toggle is None:
+            self._pool_toggle = QCheckBox("Include in item pool")
+            self._pool_toggle.setObjectName("itemPoolToggle")
+            InventoryPage._font(self._pool_toggle, self._body_font)
+            self._pool_toggle.toggled.connect(self._toggle_inspected)
+            self.details.column.insertWidget(self.details.column.count() - 1, self._pool_toggle)
+        if self._pool_toggle is not None:
+            self._pool_toggle.blockSignals(True)
+            self._pool_toggle.setChecked(item_id not in self._profile.disabled_items)
+            self._pool_toggle.blockSignals(False)
+            self._pool_toggle.setVisible(unlocked and not definition.default)
+
+    def _toggle_inspected(self, enabled):
+        if self._inspected in self.checkboxes:
+            self.cards[self._inspected].setChecked(enabled)
+
+    def _arrange_groups(self):
+        ranks = {rarity: rank for rank, rarity in enumerate(RARITY_COLORS)}
+        ordered = sorted(self._definitions, key=lambda key: ranks.get(self._definitions[key].rarity, len(ranks)))
+        for available, heading, grid in zip((True, False), self.group_headings, self.grids):
+            desired = [self.cards[key] for key in ordered if (self._definitions[key].default or key in self._profile.unlocked) == available]
+            if grid.cards != desired:
+                while grid.grid.count():
+                    grid.grid.takeAt(0)
+                grid.cards = desired
+                grid._arrange()
+            heading.setVisible(bool(desired))
+            grid.setVisible(bool(desired))
 
     def refresh(self, profile):
-        """Update card state in place without emitting preference writes."""
         self.error_label.clear()
         self.error_label.hide()
         if profile == self._profile:
@@ -200,38 +289,29 @@ class ItemCataloguePanel(QWidget):
             unlocked = definition.default or item_id in profile.unlocked
             optional = unlocked and not definition.default
             card.setCursor(Qt.PointingHandCursor if optional else Qt.ArrowCursor)
-            enabled = item_id not in profile.disabled_items
             card.blockSignals(True)
             card.setCheckable(optional)
-            card.setChecked(optional and enabled)
+            card.setChecked(optional and item_id not in profile.disabled_items)
             card.blockSignals(False)
             card.setProperty("locked", not unlocked)
             card.style().unpolish(card)
             card.style().polish(card)
             if optional:
                 self.checkboxes[item_id] = card
-            status = "Default" if definition.default else ("Enabled" if enabled else "Disabled") if unlocked else "Locked"
+            status = "Default" if definition.default else ("Enabled" if item_id not in profile.disabled_items else "Disabled") if unlocked else "Locked"
             card.findChild(QLabel, f"itemStatus_{item_id}").setText(status)
             name = card.findChild(QLabel, f"itemName_{item_id}")
-            color = RARITY_COLORS.get(getattr(definition, "rarity", "green"), RARITY_COLORS["green"]) if unlocked else "#777777"
-            InventoryPage._font(name, self._title_font)
-            name.setStyleSheet(name.styleSheet() + f"color: {color};")
+            colour = RARITY_COLORS[definition.rarity] if unlocked and item_id not in profile.disabled_items else "#666666"
+            name.setStyleSheet(name.styleSheet() + f"color:{colour};")
             icon = card.findChild(QLabel, f"itemIcon_{item_id}")
-            pixmap = self._sprites[item_id]
-            if pixmap is not None:
-                if unlocked:
-                    icon.setPixmap(pixmap)
-                else:
-                    original = pixmap.toImage()
-                    image = original.convertToFormat(QImage.Format_Grayscale8).convertToFormat(QImage.Format_ARGB32)
-                    painter = QPainter(image)
-                    painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-                    painter.drawImage(0, 0, original)
-                    painter.end()
-                    icon.setPixmap(QPixmap.fromImage(image))
+            source = self._sprites[item_id]
+            if source is not None:
+                if not unlocked and item_id not in self._dimmed_sprites:
+                    self._dimmed_sprites[item_id] = dimmed_sprite(source)
+                icon.setPixmap(source if unlocked else self._dimmed_sprites[item_id])
             goal = " Unlock: " + self._unlock_goals.get(item_id, "") if not unlocked else ""
-            tier = getattr(definition, "rarity", "green").capitalize()
-            card.setAccessibleDescription(f"{tier} tier. {status}. {definition.description} {definition.flavour}{goal}")
+            card.setAccessibleDescription(f"{definition.rarity.capitalize()} tier. {status}. {definition.description} {definition.flavour}{goal}")
+        self._arrange_groups()
         if self._inspected is not None:
             self._inspect(self._inspected)
 
@@ -243,6 +323,10 @@ class ItemCataloguePanel(QWidget):
             card.blockSignals(True)
             card.setChecked(item_id not in self._profile.disabled_items)
             card.blockSignals(False)
+            if self._pool_toggle is not None and self._inspected == item_id:
+                self._pool_toggle.blockSignals(True)
+                self._pool_toggle.setChecked(item_id not in self._profile.disabled_items)
+                self._pool_toggle.blockSignals(False)
             self.error_label.setText(str(error))
             self.error_label.show()
             return
@@ -251,3 +335,5 @@ class ItemCataloguePanel(QWidget):
         card.setChecked(item_id not in profile.disabled_items)
         card.blockSignals(False)
         self.refresh(profile)
+        if self._inspected == item_id:
+            self._inspect(item_id)

@@ -45,7 +45,7 @@ class HouseIntegrationTests(unittest.TestCase):
     def test_actual_house_and_sidebar_are_disjoint_at_all_target_sizes(self):
         self.start_night()
         self.window.transcript_button.show()
-        for width, height in ((800, 600), (1280, 800), (2560, 1440), (3440, 1440)):
+        for width, height in ((800, 600), (1280, 800), (2560, 1440), (3440, 1440), (800, 600)):
             with self.subTest(size=(width, height)):
                 self.window.resize(width, height)
                 self.window.position_corner_controls()
@@ -56,6 +56,11 @@ class HouseIntegrationTests(unittest.TestCase):
                 art = view.image_rect.toAlignedRect().translated(view.mapTo(self.window, QPoint()))
                 side = sidebar.rect().translated(sidebar.mapTo(self.window, QPoint()))
                 control = self.window.transcript_button.geometry()
+                timeline = self.window.house_timeline
+                timeline_rect = timeline.rect().translated(timeline.mapTo(self.window, QPoint()))
+                self.assertTrue(self.window.rect().contains(timeline_rect))
+                self.assertLess(timeline_rect.right(), art.left())
+                self.assertFalse(timeline_rect.intersects(side))
                 self.assertFalse(art.intersects(side))
                 self.assertGreaterEqual(side.left() - art.right(), 16)
                 self.assertLessEqual(side.left() - art.right(), 28)
@@ -74,10 +79,40 @@ class HouseIntegrationTests(unittest.TestCase):
                 self.assertTrue(self.window.rect().contains(side))
                 self.assertIs(view.info_panel.parentWidget(), self.window.house_sidebar_content)
                 self.assertIs(self.window.weapon_action_panel.parentWidget(), self.window.house_sidebar_content)
-                self.assertLessEqual(self.window.message_log.height(), 128)
+                self.assertIs(self.window.message_log.parentWidget(), self.window.house_timeline)
                 view.buttons['library'].setFocus()
                 self.app.processEvents()
                 self.assertIn('LIBRARY', view.info_title.text())
+
+    def test_timeline_uses_sidebar_height_and_instructions_stay_outside_events(self):
+        self.start_night()
+        self.window.resize(2560, 1440)
+        self.app.processEvents()
+        self.window.loiter_button.click()
+        self.window.loiter_button.click()
+        self.app.processEvents()
+        log = self.window.message_log
+        self.assertIs(log.parentWidget(), self.window.house_timeline)
+        self.assertGreater(log.height(), 400)
+        self.assertEqual(self.window.house_sidebar.verticalScrollBar().maximum(), 0)
+        self.assertEqual(self.window.output_area.verticalScrollBar().maximum(), 0)
+        self.assertNotIn("Choose a room in the house.", self.window.output_area.toPlainText())
+        self.assertFalse(any("Choose a room in the house." in record.text
+                             for record in self.window.history_records))
+        self.assertEqual(QFontInfo(self.window.loiter_button.font()).family(), self.window.pixel_font_family)
+        self.assertLess(self.window.arrival_controls.height(), 200)
+        self.assertLess(self.window.house_view.info_panel.height(), 150)
+        with patch.object(self.window, 'run_conversation_loop'):
+            self.window.run_conversation_phase()
+        self.assertIs(log.parentWidget(), self.window.centralWidget())
+        self.assertTrue(self.window.house_timeline.isHidden())
+        native_id, geometry = int(self.window.winId()), self.window.geometry()
+        self.window.restart_game()
+        self.app.processEvents()
+        self.assertEqual(int(self.window.winId()), native_id)
+        self.assertEqual(self.window.geometry(), geometry)
+        self.assertTrue(self.window.menu_widget.isVisible())
+        self.assertEqual(self.window.message_log.records, ())
 
     def test_action_open_initializes_native_room_masks_without_event_dispatch(self):
         self.window.player_name_input.setText("Alex")
@@ -201,9 +236,8 @@ class HouseIntegrationTests(unittest.TestCase):
     def test_action_weapon_description_uses_readable_body_font(self):
         import main
         self.start_night()
-        for weapon_id, extra in (("bare", None), ("knife", "Jerry")):
+        for weapon_id in ("bare", "knife"):
             self.window.selected_weapon = next(w for w in self.window.weapons if w['id'] == weapon_id)
-            self.window.knife_extra_target = extra
             self.window.build_weapon_action_panel()
             self.app.processEvents()
             description = self.window.weapon_action_panel.findChild(QLabel, "actionWeaponDescription")
@@ -217,7 +251,7 @@ class HouseIntegrationTests(unittest.TestCase):
         self.window.resize(800, 600)
         QTest.qWait(10)
         self.assertEqual(self.window.phase, "action")
-        self.assertEqual(self.window.message_log.maximumHeight(), 128)
+        self.assertIs(self.window.message_log.parentWidget(), self.window.house_timeline)
         for name, character in self.window.characters.items():
             character['alive'] = name == 'Jerry'
         self.assertTrue(self.window.check_victory())

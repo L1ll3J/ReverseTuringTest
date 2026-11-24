@@ -82,14 +82,16 @@ class ItemGridTests(unittest.TestCase):
         page.refresh(page.profile)
         self.assertEqual(identities, page.cards)
 
-    def test_default_group_precedes_optional_and_grid_reflows_without_horizontal_scroll(self):
+    def test_available_group_precedes_locked_and_each_reflows_by_rarity_without_horizontal_scroll(self):
         page, _ = self.catalogue()
-        self.assertTrue(all(ITEM_CATALOGUE[key].default for key, card in page.cards.items() if card in page.grids[0].cards))
-        self.assertTrue(all(not ITEM_CATALOGUE[key].default for key, card in page.cards.items() if card in page.grids[1].cards))
+        self.assertTrue(all(ITEM_CATALOGUE[key].default or key in page.profile.unlocked
+                            for key, card in page.cards.items() if card in page.grids[0].cards))
+        self.assertTrue(all(not ITEM_CATALOGUE[key].default and key not in page.profile.unlocked
+                            for key, card in page.cards.items() if card in page.grids[1].cards))
         ranks = {rarity: index for index, rarity in enumerate(('green', 'blue', 'purple', 'gold'))}
-        for default, grid in zip((True, False), page.grids):
+        for available, grid in zip((True, False), page.grids):
             actual = [card.objectName().removeprefix('itemCard_') for card in grid.cards]
-            expected = sorted((key for key, item in ITEM_CATALOGUE.items() if item.default == default),
+            expected = sorted((key for key, item in ITEM_CATALOGUE.items() if (item.default or key in page.profile.unlocked) == available),
                               key=lambda key: ranks[ITEM_CATALOGUE[key].rarity])
             self.assertEqual(actual, expected)
         for width, height in ((480, 600), (800, 600), (1920, 1080), (2560, 1440)):

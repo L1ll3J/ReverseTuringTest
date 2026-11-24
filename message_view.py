@@ -398,14 +398,15 @@ class MessageLog(QWidget):
             cursor.insertText(record.text, header)
             return
         if record.speaker:
-            heading = QTextBlockFormat(block)
+            heading = QTextBlockFormat()
+            heading.setLineHeight(130, QTextBlockFormat.ProportionalHeight)
             heading.setTopMargin(16)
             heading.setBottomMargin(6)
             cursor.setBlockFormat(heading)
             cursor.insertText(record.speaker, header)
             cursor.insertBlock(block, body)
         start = cursor.position()
-        cursor.insertText(record.text, body)
+        cursor.insertText(record.text.replace("\n", "\u2028"), body)
         return start, cursor.position()
 
     def set_records(self, records: Iterable[DisplayRecord], *, follow_tail=True):

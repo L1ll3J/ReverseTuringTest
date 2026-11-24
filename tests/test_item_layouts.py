@@ -45,20 +45,28 @@ class ItemLayoutIntegrationTests(unittest.TestCase):
             self.window.resize_weapon_cards()
             self.app.processEvents()
             self.assertEqual(self.window.width(), width)
+            heading = self.window.weapon_picker_widget.findChild(QLabel, "weaponSelectionHeading")
+            heading_top = heading.mapTo(self.window, heading.rect().topLeft()).y()
+            self.assertGreater(heading_top, self.window.game_menu_button.geometry().bottom())
             self.assertEqual(self.window.weapon_scroll.horizontalScrollBar().maximum(), 0)
             for card in self.window.weapon_cards:
                 weapon_id = card.property("weapon_id")
-                description = card.findChild(QLabel, "weaponDescription_" + weapon_id)
                 name = card.findChild(QLabel, "weaponName_" + weapon_id)
-                self.assertGreaterEqual(description.height(), description.heightForWidth(description.width()), weapon_id)
                 self.assertGreaterEqual(name.height(), name.heightForWidth(name.width()), weapon_id)
                 self.assertGreaterEqual(name.width(), max(QFontMetrics(name.font()).horizontalAdvance(word)
                                                         for word in name.text().split()), weapon_id)
-                self.assertLessEqual(description.geometry().bottom(), card.height() - 16, weapon_id)
-            voodoo = self.window.weapon_picker_widget.findChild(QLabel, "weaponDescription_voodoo")
-            self.assertTrue(voodoo.text().endswith("your former body the following night."))
+                weapon = next(weapon for weapon in self.window.weapons if weapon["id"] == weapon_id)
+                self.window.inspect_weapon(weapon)
+                self.app.processEvents()
+                for field in (self.window.weapon_details.name, self.window.weapon_details.description,
+                              self.window.weapon_details.goal):
+                    self.assertGreaterEqual(field.height(), field.heightForWidth(field.width()), weapon_id)
+            self.window.inspect_weapon(next(weapon for weapon in self.window.weapons if weapon["id"] == "voodoo"))
+            self.app.processEvents()
+            self.assertTrue(self.window.weapon_details.goal.text().endswith("your former body the following night."))
             card = next(card for card in self.window.weapon_cards if card.property("weapon_id") == "voodoo")
             self.assertEqual(card.cursor().shape(), Qt.ArrowCursor)
+
 
 
 if __name__ == "__main__":

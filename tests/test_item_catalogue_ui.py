@@ -179,7 +179,7 @@ class ItemCatalogueTests(unittest.TestCase):
         self.app.processEvents()
         for label in panel.findChildren(QLabel):
             if (label.objectName().startswith("itemName_") or label is panel.detail_name
-                    or label.text() in ("Default items", "Optional items")):
+                    or label in panel.group_headings):
                 self.assertEqual(QFontInfo(label.font()).family(), QFontInfo(title_font).family())
                 self.assertEqual(QFontInfo(label.font()).pixelSize(), 12)
             elif label is not panel.detail_name and not label.objectName().startswith("itemIcon_"):
@@ -205,6 +205,58 @@ class ItemCatalogueTests(unittest.TestCase):
                     self.assertLessEqual(longest, label.contentsRect().width())
                     self.assertLessEqual(label.heightForWidth(label.width()), label.height())
                     self.assertEqual(label.font().pixelSize(), 12)
+
+    def test_inspector_toggle_is_explicit_and_hover_never_writes_preferences(self):
+        profile = ProfileSnapshot(unlocked={"guardian_angel"})
+        panel = self.panel(profile)
+        for item_id in ITEM_CATALOGUE:
+            panel._inspect(item_id)
+        self.callback.assert_not_called()
+        panel._inspect("guardian_angel")
+        checkbox = panel.findChild(QCheckBox, "itemPoolToggle")
+        self.assertTrue(checkbox.isVisible())
+        self.assertTrue(checkbox.isChecked())
+        self.callback.return_value = ProfileSnapshot(unlocked={"guardian_angel"}, disabled_items={"guardian_angel"})
+        checkbox.click()
+        self.callback.assert_called_once_with("guardian_angel", False)
+        self.assertFalse(panel.checkboxes["guardian_angel"].isChecked())
+        panel._inspect("banana")
+        self.assertTrue(checkbox.isHidden())
+        checkbox.click()
+        self.assertEqual(self.callback.call_count, 1)
+        panel._inspect("booby_trap")
+        self.assertTrue(checkbox.isHidden())
+        self.assertFalse(panel.cards["booby_trap"].isCheckable())
+
+    def test_real_details_fit_without_an_internal_scroll_at_normal_browser_sizes(self):
+        panel = self.panel()
+        for width, height in ((1180, 660), (1700, 900)):
+            panel.resize(width, height)
+            self.app.processEvents()
+            for item_id in ITEM_CATALOGUE:
+                panel._inspect(item_id)
+                self.app.processEvents()
+                self.assertEqual(panel.details_scroll.verticalScrollBar().maximum(), 0, (width, item_id))
+                self.assertEqual(panel.details_scroll.horizontalScrollBar().maximum(), 0)
+        self.callback.assert_not_called()
+
+    def test_locked_art_is_gray_and_unlock_restores_colour_without_replacing_cards(self):
+        panel = self.panel()
+        card = panel.cards["guardian_angel"]
+        icon = card.findChild(QLabel, "itemIcon_guardian_angel")
+        locked = icon.pixmap().toImage()
+        painted = [locked.pixelColor(x, y) for x in range(locked.width()) for y in range(locked.height())
+                   if locked.pixelColor(x, y).alpha() > 20]
+        self.assertTrue(painted)
+        self.assertTrue(all(colour.red() == colour.green() == colour.blue() for colour in painted))
+        panel.refresh(ProfileSnapshot(unlocked={"guardian_angel"}))
+        self.assertIs(panel.cards["guardian_angel"], card)
+        colour = icon.pixmap().toImage()
+        self.assertTrue(any(colour.pixelColor(x, y).red() != colour.pixelColor(x, y).blue()
+                            for x in range(colour.width()) for y in range(colour.height())))
+        self.assertIn(card, panel.grids[0].cards)
+        self.assertNotIn(card, panel.grids[1].cards)
+        self.callback.assert_not_called()
 
     def test_packaged_resource_root_and_shared_dialog_sprites_keep_callbacks(self):
         with tempfile.TemporaryDirectory() as directory:

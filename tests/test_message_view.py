@@ -94,6 +94,20 @@ class MessageViewTests(unittest.TestCase):
         cursor = self.editor.document().find("Detective")
         self.assertFalse(cursor.charFormat().isAnchor())
         self.assertEqual(cursor.charFormat().anchorHref(), "")
+        body = self.editor.document().find("Dave's photograph")
+        self.assertEqual(cursor.blockFormat().leftMargin(), 0)
+        self.assertNotEqual(cursor.blockFormat().background(), body.blockFormat().background())
+
+    def test_multiline_event_is_one_native_block_with_literal_line_breaks(self):
+        text = "Initial room arrivals;\nAttic: Jerry\nKitchen: Dave\nCellar: EMPTY"
+        record = DisplayRecord("arrivals", "event", text)
+        self.view.append_record(record)
+        self.assertEqual(self.editor.toPlainText(), text)
+        self.assertEqual(self.editor.document().blockCount(), 1)
+        self.assertEqual(self.view.records, (record,))
+        self.view.set_records((record,))
+        self.assertEqual(self.editor.toPlainText(), text)
+        self.assertEqual(self.editor.document().blockCount(), 1)
 
     def test_action_blocks_are_inset_without_changing_literal_records_or_speech(self):
         records = (

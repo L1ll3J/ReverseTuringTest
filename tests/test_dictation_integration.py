@@ -351,20 +351,31 @@ class DictationIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.interject_input.text(), "Draft before close")
         self.assertEqual(len(self.window.public_dialogue), 1)
 
-    def test_restart_invalidates_old_request_and_new_window_has_clean_input(self):
+    def test_restart_invalidates_old_request_without_clearing_new_transcription(self):
         self.open_input()
         release = self.pending_transcription()
+        worker = self.window.dictation_worker
         self.window.interject_input.setText("Old window draft")
         self.window.restart_game()
-        self.wait_for(lambda: getattr(self.app, "_main_window", self.window) is not self.window)
-        replacement = self.app._main_window
-        self.windows.append(replacement)
-        self.wait_for(lambda: self.window.phase == "restarting" and not self.window.isVisible())
+        self.assertEqual(self.window.phase, "start")
+        self.assertIn(worker, self.app._ai_workers)
+        self.assertEqual(self.window.interject_input.text(), "")
+        self.window.player_name = "Alex"
+        self.window.characters = {name: {"alive": True, "profile": [], "experiences": [], "dispositions": []}
+                                  for name in ("Dave", "Hank", "Jerry")}
+        self.open_input()
+        self.window.interject_input.setText("New run draft")
+        release_new = self.pending_transcription()
+        new_worker = self.window.dictation_worker
         release.set()
+        self.wait_for(lambda: worker not in self.window.active_workers)
+        self.assertEqual(self.window.interject_input.text(), "New run draft")
+        self.assertIs(self.window.dictation_worker, new_worker)
+        self.assertNotIn(worker, self.app._ai_workers)
+        release_new.set()
         self.wait_for(lambda: not self.window.active_workers)
-        self.assertEqual(self.window.interject_input.text(), "Old window draft")
-        self.assertEqual(replacement.interject_input.text(), "")
-        self.assertIsNone(replacement.dictation_context)
+        self.assertEqual(self.window.interject_input.text(), "New run draft Late spoken words.")
+        self.assertIsNone(self.window.dictation_worker)
 
     def test_missing_microphone_and_api_failure_preserve_draft(self):
         self.open_input()

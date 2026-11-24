@@ -28,6 +28,8 @@ from dev_trace import TraceRun, prompt_fingerprints
 from game_rules import BodyState, ItemRuleError, ItemUseContext, PlayerItemRules
 from items import ITEM_CATALOGUE, Inventory, eligible_item_pool
 from love_potion import PAST_HANGOVER, PAST_INFATUATION
+from night_arrivals import NightArrivals
+from test_item_integration import ArrivalFixtureRng
 
 
 class LoveItemRuleTests(unittest.TestCase):
@@ -180,7 +182,9 @@ class LovePotionIntegrationTests(unittest.TestCase):
             "Library": ["Debra"], "Basement": [], "Cellar": [],
         }
         plan = {self.window.body_id(name): room for room, names in assignments.items() for name in names}
-        with patch.object(game, "assign_guest_rooms", return_value=plan):
+        with patch.object(game, "assign_guest_rooms", return_value=plan), patch.object(
+                game, "NightArrivals", side_effect=lambda night, assigned: NightArrivals(
+                    night, assigned, rng=ArrivalFixtureRng(), initial_count=1)):
             self.window.run_action_phase()
         self.window.item_drafts = None
         self.window.choose_room("Attic")
@@ -193,6 +197,8 @@ class LovePotionIntegrationTests(unittest.TestCase):
                        if event.body_id == self.window.body_id("Jerry"))
         self.assertEqual([record.text for record in before_morning.experiences],
                          [f"At {arrival.time}, you entered the {arrival.room}.",
+                          f"At {arrival.time}, Dave was already in the Attic when you entered.",
+                          f"At {arrival.time}, Alex was already in the Attic when you entered.",
                           PAST_INFATUATION.format(giver="Alex")])
         self.assertFalse(self.window._night_memories_written)
         self.window.choose_room("Kitchen")
@@ -262,7 +268,9 @@ class LovePotionIntegrationTests(unittest.TestCase):
         current = self.window.build_character_context("Dave")
         self.assertEqual(len(current.experiences), 1)
         self.assertEqual(len(current.current_feelings), 1)
-        self.window.run_action_phase()
+        with patch.object(game, "NightArrivals", side_effect=lambda night, assigned: NightArrivals(
+                night, assigned, rng=ArrivalFixtureRng(), initial_count=1)):
+            self.window.run_action_phase()
         self.window.run_conversation_phase()
         self.apply()
         replaced = self.window.build_character_context("Dave")

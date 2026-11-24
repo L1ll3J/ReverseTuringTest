@@ -253,7 +253,7 @@ class PresentationIntegrationTests(unittest.TestCase):
         editor = self.window.output_area
         self.assertTrue(editor.isVisible())
         self.assertEqual(editor.viewport().palette().color(QPalette.Base), QColor("black"))
-        self.assertEqual(self.window.message_log.maximumHeight(), 128)
+        self.assertIs(self.window.message_log.parentWidget(), self.window.house_timeline)
         self.window.append_output_text("A weapon effect.\nAn action error.")
         self.assertIn("An action error.", editor.toPlainText())
         self.assertEqual(editor.document().find("An action error.").charFormat().font().pixelSize(), 18)
@@ -370,22 +370,22 @@ class PresentationIntegrationTests(unittest.TestCase):
             self.assertIsNone(host.current_page)
             self.assertFalse(recorder.is_recording)
 
-    def test_restart_cancels_old_overlay_and_starts_with_empty_history(self):
+    def test_restart_reuses_overlay_and_starts_with_empty_history(self):
         self.window.append_speech("Dave", "Previous run.")
         self.window.show_transcript()
-        old_host = self.window.overlay_host
+        host, page = self.window.overlay_host, self.window.transcript_page
         self.window.restart_game()
-        deadline = monotonic() + 3
-        while getattr(self.app, "_main_window", self.window) is self.window and monotonic() < deadline:
-            QTest.qWait(5)
-        replacement = self.app._main_window
-        self.assertIsNot(replacement, self.window)
-        self.windows.append(replacement)
-        self.assertTrue(old_host.owner_cancelled)
-        self.assertEqual(replacement.history_records, [])
-        self.assertIsNone(replacement.overlay_host.current_page)
-        self.window.history_record_added.emit(self.window.history_records[0])
-        self.assertEqual(replacement.history_records, [])
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertIs(self.app._main_window, self.window)
+        self.assertIs(self.window.overlay_host, host)
+        self.assertFalse(host.owner_cancelled)
+        self.assertTrue(sip.isdeleted(page))
+        self.assertEqual(self.window.history_records, [])
+        self.assertIsNone(host.current_page)
+        self.window.open_escape_menu()
+        self.assertEqual(host.current_title, "Menu")
+        self.window.close_escape_menu()
+        self.assertEqual(self.window.history_records, [])
 
 
 if __name__ == "__main__":
